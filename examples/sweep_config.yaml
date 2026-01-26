@@ -1,0 +1,49 @@
+# Example sweep configuration for joshpy
+# Run with: python -c "from joshpy.jobs import JobConfig; c = JobConfig.from_yaml_file('sweep_config.yaml'); print(c)"
+
+# Template file path (Jinja2 .j2 file)
+template_path: templates/editor.jshc.j2
+
+# Josh source file
+source_path: hello_cli_configurable.josh
+
+# Simulation name in the .josh file
+simulation: Main
+
+# Number of replicates per parameter combination
+replicates: 1
+
+# Parameter sweep configuration
+sweep:
+  parameters:
+    # Method 1: Explicit values list
+    - name: maxGrowth
+      values: [1, 5, 10]
+
+    # Method 2: Range with step (like numpy.arange)
+    # - name: survivalProbAdult
+    #   range:
+    #     start: 80
+    #     stop: 100
+    #     step: 5
+    #   # Expands to: [80, 85, 90, 95]
+
+    # Method 3: Range with count (like numpy.linspace)
+    # - name: seedCount
+    #   range:
+    #     start: 1000
+    #     stop: 5000
+    #     num: 5
+    #   # Expands to: [1000, 2000, 3000, 4000, 5000]
+
+# Optional: Upload path templates for organizing outputs
+# Uses {config_hash}, {timestamp}, and custom tag placeholders
+# upload_source_path: "minio://bucket/{timestamp}/{config_hash}/source/"
+# upload_config_path: "minio://bucket/{timestamp}/{config_hash}/config/"
+# upload_data_path: "minio://bucket/{timestamp}/{config_hash}/data/"
+
+# Optional: Additional CLI options
+# seed: 42
+# crs: "EPSG:4326"
+# use_float64: false
+# output_steps: "0-10,50,100"
