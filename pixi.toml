@@ -9,6 +9,7 @@ platforms = ["linux-64", "osx-arm64", "osx-64"]
 python = ">=3.10"
 openjdk = ">=17"
 pip = "*"
+wget = "*"
 
 [feature.dev.dependencies]
 pytest = ">=7.0"
@@ -27,3 +28,4 @@ test = "pytest joshpy/test_*.py -v"
 lint = "ruff check joshpy/"
 typecheck = "mypy joshpy/"
 format = "ruff format joshpy/"
+get-jars = "bash .devcontainer/scripts/on_build/get_fat_jar.sh"

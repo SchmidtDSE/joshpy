@@ -31,29 +31,31 @@ from __future__ import annotations
 
 import hashlib
 import itertools
-import json
-import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any
 
 try:
     import numpy as np
+
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
 
 try:
-    from jinja2 import Environment, FileSystemLoader, BaseLoader
+    from jinja2 import BaseLoader, Environment, FileSystemLoader
+
     HAS_JINJA2 = True
 except ImportError:
     HAS_JINJA2 = False
 
 try:
     import yaml
+
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
@@ -63,8 +65,7 @@ def _check_jinja2() -> None:
     """Raise ImportError if jinja2 is not available."""
     if not HAS_JINJA2:
         raise ImportError(
-            "jinja2 is required for job templating. "
-            "Install with: pip install joshpy[jobs]"
+            "jinja2 is required for job templating. Install with: pip install joshpy[jobs]"
         )
 
 
@@ -72,8 +73,7 @@ def _check_yaml() -> None:
     """Raise ImportError if pyyaml is not available."""
     if not HAS_YAML:
         raise ImportError(
-            "pyyaml is required for YAML config files. "
-            "Install with: pip install joshpy[jobs]"
+            "pyyaml is required for YAML config files. Install with: pip install joshpy[jobs]"
         )
 
 
@@ -89,7 +89,7 @@ def compute_config_hash(config_content: str) -> str:
     Returns:
         12-character hex string hash.
     """
-    return hashlib.md5(config_content.encode('utf-8')).hexdigest()[:12]
+    return hashlib.md5(config_content.encode("utf-8")).hexdigest()[:12]
 
 
 def _normalize_values(values: Any) -> list[Any]:
@@ -113,20 +113,20 @@ def _normalize_values(values: Any) -> list[Any]:
 
     # Range specification dict
     if isinstance(values, dict):
-        start = values.get('start', 0)
-        stop = values['stop']  # Required
+        start = values.get("start", 0)
+        stop = values["stop"]  # Required
 
-        if 'num' in values:
+        if "num" in values:
             # linspace-style
             if not HAS_NUMPY:
                 # Fallback without numpy
-                num = values['num']
+                num = values["num"]
                 if num == 1:
                     return [start]
                 step = (stop - start) / (num - 1)
                 return [start + i * step for i in range(num)]
-            return np.linspace(start, stop, values['num']).tolist()
-        elif 'step' in values:
+            return np.linspace(start, stop, values["num"]).tolist()
+        elif "step" in values:
             # arange-style
             if not HAS_NUMPY:
                 # Fallback without numpy
@@ -134,19 +134,16 @@ def _normalize_values(values: Any) -> list[Any]:
                 current = start
                 while current < stop:
                     result.append(current)
-                    current += values['step']
+                    current += values["step"]
                 return result
-            return np.arange(start, stop, values['step']).tolist()
+            return np.arange(start, stop, values["step"]).tolist()
         else:
             raise ValueError(f"Range spec must have 'step' or 'num': {values}")
 
     # Already a sequence
     if isinstance(values, (list, tuple)):
         # Recursively normalize in case of nested numpy arrays
-        return [
-            v.tolist() if HAS_NUMPY and isinstance(v, np.ndarray) else v
-            for v in values
-        ]
+        return [v.tolist() if HAS_NUMPY and isinstance(v, np.ndarray) else v for v in values]
 
     # Single value - wrap in list
     return [values]
@@ -245,17 +242,12 @@ class SweepConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization."""
-        return {
-            "parameters": [p.to_dict() for p in self.parameters]
-        }
+        return {"parameters": [p.to_dict() for p in self.parameters]}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SweepConfig:
         """Create from dict."""
-        parameters = [
-            SweepParameter.from_dict(p)
-            for p in data.get("parameters", [])
-        ]
+        parameters = [SweepParameter.from_dict(p) for p in data.get("parameters", [])]
         return cls(parameters=parameters)
 
 
@@ -359,9 +351,7 @@ class JobConfig:
         if "sweep" in data:
             kwargs["sweep"] = SweepConfig.from_dict(data["sweep"])
         if "file_mappings" in data:
-            kwargs["file_mappings"] = {
-                k: Path(v) for k, v in data["file_mappings"].items()
-            }
+            kwargs["file_mappings"] = {k: Path(v) for k, v in data["file_mappings"].items()}
         if "upload_source_path" in data:
             kwargs["upload_source_path"] = data["upload_source_path"]
         if "upload_config_path" in data:
@@ -401,7 +391,7 @@ class JobConfig:
 
     def save_yaml(self, path: Path) -> None:
         """Save to YAML file."""
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             f.write(self.to_yaml())
 
 
@@ -490,10 +480,7 @@ class JobExpander:
             self.jinja_env = Environment(autoescape=False)
 
     def expand(
-        self,
-        config: JobConfig,
-        output_dir: Path | None = None,
-        config_name: str = "editor.jshc"
+        self, config: JobConfig, output_dir: Path | None = None, config_name: str = "editor.jshc"
     ) -> JobSet:
         """Expand a JobConfig into a JobSet with one ExpandedJob per parameter combo.
 
@@ -511,10 +498,7 @@ class JobExpander:
         if config.template_path:
             template_dir = config.template_path.parent
             template_name = config.template_path.name
-            env = Environment(
-                loader=FileSystemLoader(str(template_dir)),
-                autoescape=False
-            )
+            env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
             template = env.get_template(template_name)
         elif config.template_string:
             template = self.jinja_env.from_string(config.template_string)
@@ -551,9 +535,7 @@ class JobExpander:
             config_path.write_text(rendered)
 
             # Build custom tags from parameters
-            custom_tags = {
-                str(k): str(v) for k, v in params.items()
-            }
+            custom_tags = {str(k): str(v) for k, v in params.items()}
             # Add config_hash as a custom tag
             custom_tags["config_hash"] = config_hash
 
@@ -613,15 +595,58 @@ class JobResult:
 class JobRunner:
     """Executes ExpandedJobs via subprocess (calls Josh CLI).
 
+    Supports three jar modes:
+    - Path: Use a specific jar file
+    - JarMode.PROD: Use production jar from joshsim.org (default)
+    - JarMode.DEV: Use development jar from joshsim.org
+    - JarMode.LOCAL: Use local jar from jar/joshsim-fat.jar
+
     Attributes:
-        josh_jar: Path to joshsim.jar file.
+        josh_jar: Path to jar, JarMode enum, or None for default (PROD).
         java_path: Path to java executable.
         working_dir: Working directory for job execution.
+        jar_dir: Directory for downloaded jars (default: ./jar/).
+        auto_download: If True, download jars automatically if needed.
+
+    Example:
+        # Use production jar (downloads if needed)
+        runner = JobRunner()
+
+        # Use development jar
+        runner = JobRunner(josh_jar=JarMode.DEV)
+
+        # Use specific jar file
+        runner = JobRunner(josh_jar=Path("my-custom.jar"))
     """
 
-    josh_jar: Path
+    josh_jar: Path | None = None  # None means use default (PROD)
     java_path: str = "java"
     working_dir: Path | None = None
+    jar_dir: Path | None = None
+    auto_download: bool = True
+
+    # Resolved jar path (set in __post_init__)
+    _resolved_jar: Path = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Resolve jar path based on josh_jar setting."""
+        from joshpy.jar import JarManager, JarMode
+
+        manager = JarManager(jar_dir=self.jar_dir, java_path=self.java_path)
+
+        if self.josh_jar is None:
+            # Default to PROD
+            self._resolved_jar = manager.get_jar(JarMode.PROD, auto_download=self.auto_download)
+        elif isinstance(self.josh_jar, JarMode):
+            # JarMode enum
+            self._resolved_jar = manager.get_jar(self.josh_jar, auto_download=self.auto_download)
+        elif isinstance(self.josh_jar, (str, Path)):
+            # Explicit path
+            self._resolved_jar = Path(self.josh_jar)
+            if not self._resolved_jar.exists():
+                raise FileNotFoundError(f"JAR file not found: {self._resolved_jar}")
+        else:
+            raise TypeError(f"josh_jar must be Path, JarMode, or None, got {type(self.josh_jar)}")
 
     def build_command(self, job: ExpandedJob) -> list[str]:
         """Build the CLI command for a job.
@@ -635,7 +660,7 @@ class JobRunner:
         cmd = [
             self.java_path,
             "-jar",
-            str(self.josh_jar),
+            str(self._resolved_jar),
             "run",
         ]
 
@@ -684,10 +709,7 @@ class JobRunner:
         return cmd
 
     def run(
-        self,
-        job: ExpandedJob,
-        timeout: float | None = None,
-        capture_output: bool = True
+        self, job: ExpandedJob, timeout: float | None = None, capture_output: bool = True
     ) -> JobResult:
         """Execute a single job.
 
@@ -739,7 +761,7 @@ class JobRunner:
         *,
         cleanup: bool = True,
         timeout: float | None = None,
-        on_complete: Callable[[JobResult], None] | None = None
+        on_complete: Callable[[JobResult], None] | None = None,
     ) -> list[JobResult]:
         """Execute all jobs in a JobSet sequentially.
 
@@ -772,10 +794,10 @@ def run_sweep(
     template: str | Path,
     source: Path,
     parameters: dict[str, Sequence[Any]],
-    josh_jar: Path,
+    josh_jar: Path | None = None,
     simulation: str = "Main",
     replicates: int = 1,
-    **kwargs: Any
+    **kwargs: Any,
 ) -> list[JobResult]:
     """Convenience function to run a parameter sweep.
 
@@ -783,7 +805,7 @@ def run_sweep(
         template: Jinja template string or path to template file.
         source: Path to .josh source file.
         parameters: Dict mapping parameter names to lists of values.
-        josh_jar: Path to joshsim.jar.
+        josh_jar: Path to jar, JarMode, or None for default (PROD).
         simulation: Simulation name.
         replicates: Number of replicates per job.
         **kwargs: Additional arguments passed to JobConfig.
@@ -792,17 +814,25 @@ def run_sweep(
         List of JobResults.
 
     Example:
+        # Using default (production) jar
         results = run_sweep(
             template="maxGrowth = {{ maxGrowth }} meters",
             source=Path("hello.josh"),
             parameters={"maxGrowth": [1, 5, 10]},
-            josh_jar=Path("joshsim.jar"),
+        )
+
+        # Using development jar
+        from joshpy.jar import JarMode
+        results = run_sweep(
+            template="maxGrowth = {{ maxGrowth }} meters",
+            source=Path("hello.josh"),
+            parameters={"maxGrowth": [1, 5, 10]},
+            josh_jar=JarMode.DEV,
         )
     """
     # Build sweep config
     sweep_params = [
-        SweepParameter(name=name, values=list(values))
-        for name, values in parameters.items()
+        SweepParameter(name=name, values=list(values)) for name, values in parameters.items()
     ]
     sweep = SweepConfig(parameters=sweep_params)
 
@@ -814,7 +844,7 @@ def run_sweep(
             simulation=simulation,
             replicates=replicates,
             sweep=sweep,
-            **kwargs
+            **kwargs,
         )
     else:
         config = JobConfig(
@@ -823,7 +853,7 @@ def run_sweep(
             simulation=simulation,
             replicates=replicates,
             sweep=sweep,
-            **kwargs
+            **kwargs,
         )
 
     # Expand and run

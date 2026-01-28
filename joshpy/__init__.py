@@ -12,6 +12,16 @@ import joshpy.remote
 import joshpy.strategy
 import joshpy.virtual_file
 
+# Jar management (always available)
+from joshpy.jar import (
+    JarMode,
+    JarManager,
+    get_jar,
+    download_jars,
+    get_jar_hash,
+    get_jar_version,
+)
+
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
