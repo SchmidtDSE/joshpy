@@ -1,0 +1,43 @@
+{
+    "name": "joshpy",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": "../",
+        "options": ["--platform=linux/amd64"]
+    },
+    // "runArgs": [
+    //     "--userns=keep-id"
+    // ],
+    "mounts": [
+        "source=${localWorkspaceFolderBasename}-pixi,target=/home/vscode/.pixi-env,type=volume"
+    ],
+    "updateRemoteUserUID": false,
+    "remoteUser": "vscode",
+    "containerUser": "vscode",
+    "postCreateCommand": "ln -sfn /home/vscode/.pixi-env .pixi && pixi install && pixi run install-dev && pixi run get-jars",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.debugpy",
+                "ms-python.vscode-pylance",
+                "charliermarsh.ruff",
+                "ms-toolsai.jupyter",
+                "redhat.vscode-yaml"
+            ],
+            "settings": {
+                "python.testing.pytestEnabled": true,
+                "python.testing.unittestEnabled": false,
+                "editor.formatOnSave": true,
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff",
+                    "editor.codeActionsOnSave": {
+                        "source.fixAll": "explicit",
+                        "source.organizeImports": "explicit"
+                    }
+                }
+            }
+        }
+    }
+}
+icc
