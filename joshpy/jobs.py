@@ -402,6 +402,7 @@ class ExpandedJob:
     Attributes:
         config_content: Rendered .jshc configuration content.
         config_path: Path to written config file.
+        config_name: Logical name for the config (used in --data flag, e.g., "sweep").
         config_hash: MD5 hash of config content.
         parameters: Parameter values used for this job.
         simulation: Simulation name.
@@ -420,6 +421,7 @@ class ExpandedJob:
 
     config_content: str
     config_path: Path
+    config_name: str
     config_hash: str
     parameters: dict[str, Any]
     simulation: str
@@ -480,7 +482,7 @@ class JobExpander:
             self.jinja_env = Environment(autoescape=False)
 
     def expand(
-        self, config: JobConfig, output_dir: Path | None = None, config_name: str = "editor.jshc"
+        self, config: JobConfig, output_dir: Path | None = None, config_name: str = "sweep_config.jshc"
     ) -> JobSet:
         """Expand a JobConfig into a JobSet with one ExpandedJob per parameter combo.
 
@@ -539,10 +541,14 @@ class JobExpander:
             # Add config_hash as a custom tag
             custom_tags["config_hash"] = config_hash
 
+            # Extract logical config name (without .jshc extension) for --data flag
+            logical_name = config_name.removesuffix(".jshc")
+
             # Create expanded job
             job = ExpandedJob(
                 config_content=rendered,
                 config_path=config_path,
+                config_name=logical_name,
                 config_hash=config_hash,
                 parameters=params,
                 simulation=config.simulation,
@@ -648,6 +654,9 @@ class JobRunner:
         else:
             raise TypeError(f"josh_jar must be Path, JarMode, or None, got {type(self.josh_jar)}")
 
+        # Ensure jar path is absolute since we may change working directories
+        self._resolved_jar = self._resolved_jar.resolve()
+
     def build_command(self, job: ExpandedJob) -> list[str]:
         """Build the CLI command for a job.
 
@@ -666,7 +675,7 @@ class JobRunner:
 
         # Source file
         if job.source_path:
-            cmd.append(str(job.source_path))
+            cmd.append(str(job.source_path.resolve()))
 
         # Simulation name
         cmd.append(job.simulation)
@@ -675,14 +684,12 @@ class JobRunner:
         if job.replicates > 1:
             cmd.extend(["--replicates", str(job.replicates)])
 
-        # Config file - use --data flag with the config file
-        # The config path parent directory is used as working dir
-        # so the config file is found by name
-        cmd.extend(["--data", f"editor={job.config_path}"])
+        # Config file via --data flag with absolute path
+        cmd.extend(["--data", f"{job.config_name}={job.config_path.resolve()}"])
 
-        # File mappings
+        # File mappings (use absolute paths)
         for name, path in job.file_mappings.items():
-            cmd.extend(["--data", f"{name}={path}"])
+            cmd.extend(["--data", f"{name}={path.resolve()}"])
 
         # Custom tags (for path template resolution)
         for name, value in job.custom_tags.items():

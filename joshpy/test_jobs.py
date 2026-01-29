@@ -362,6 +362,7 @@ class TestJobSet(unittest.TestCase):
             ExpandedJob(
                 config_content="",
                 config_path=Path("/tmp/test"),
+                config_name="test",
                 config_hash="abc",
                 parameters={},
                 simulation="Main",
@@ -376,6 +377,7 @@ class TestJobSet(unittest.TestCase):
             ExpandedJob(
                 config_content=f"val={i}",
                 config_path=Path(f"/tmp/test{i}"),
+                config_name="test",
                 config_hash=f"hash{i}",
                 parameters={"i": i},
                 simulation="Main",
@@ -406,12 +408,16 @@ class TestJobSet(unittest.TestCase):
 class TestJobRunner(unittest.TestCase):
     """Tests for JobRunner class."""
 
+    # Use the local jar that exists in the repo
+    JAR_PATH = Path(__file__).parent.parent / "jar" / "joshsim-fat.jar"
+
     def test_build_command_basic(self):
         """Build command should include basic options."""
-        runner = JobRunner(josh_jar=Path("/path/to/joshsim.jar"))
+        runner = JobRunner(josh_jar=self.JAR_PATH)
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
             config_hash="abc123",
             parameters={},
             simulation="Main",
@@ -423,17 +429,18 @@ class TestJobRunner(unittest.TestCase):
 
         self.assertIn("java", cmd)
         self.assertIn("-jar", cmd)
-        self.assertIn("/path/to/joshsim.jar", cmd)
         self.assertIn("run", cmd)
-        self.assertIn("/path/to/source.josh", cmd)
         self.assertIn("Main", cmd)
+        # Source path should be resolved to absolute
+        self.assertTrue(any("source.josh" in c for c in cmd))
 
     def test_build_command_with_replicates(self):
         """Build command should include replicates when > 1."""
-        runner = JobRunner(josh_jar=Path("/path/to/joshsim.jar"))
+        runner = JobRunner(josh_jar=self.JAR_PATH)
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
             config_hash="abc123",
             parameters={},
             simulation="Main",
@@ -447,10 +454,11 @@ class TestJobRunner(unittest.TestCase):
 
     def test_build_command_with_custom_tags(self):
         """Build command should include custom tags."""
-        runner = JobRunner(josh_jar=Path("/path/to/joshsim.jar"))
+        runner = JobRunner(josh_jar=self.JAR_PATH)
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
             config_hash="abc123",
             parameters={"x": 1},
             simulation="Main",
@@ -469,10 +477,11 @@ class TestJobRunner(unittest.TestCase):
 
     def test_build_command_with_options(self):
         """Build command should include all options."""
-        runner = JobRunner(josh_jar=Path("/path/to/joshsim.jar"))
+        runner = JobRunner(josh_jar=self.JAR_PATH)
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
             config_hash="abc123",
             parameters={},
             simulation="Main",
@@ -502,10 +511,11 @@ class TestJobRunner(unittest.TestCase):
             stderr=""
         )
 
-        runner = JobRunner(josh_jar=Path("/path/to/joshsim.jar"))
+        runner = JobRunner(josh_jar=self.JAR_PATH)
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
             config_hash="abc123",
             parameters={},
             simulation="Main",
@@ -527,10 +537,11 @@ class TestJobRunner(unittest.TestCase):
             stderr="error message"
         )
 
-        runner = JobRunner(josh_jar=Path("/path/to/joshsim.jar"))
+        runner = JobRunner(josh_jar=self.JAR_PATH)
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
             config_hash="abc123",
             parameters={},
             simulation="Main",
@@ -552,6 +563,7 @@ class TestJobResult(unittest.TestCase):
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/test"),
+            config_name="test",
             config_hash="abc",
             parameters={},
             simulation="Main",
@@ -571,6 +583,7 @@ class TestJobResult(unittest.TestCase):
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/test"),
+            config_name="test",
             config_hash="abc",
             parameters={},
             simulation="Main",

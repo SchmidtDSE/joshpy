@@ -151,7 +151,8 @@ class TestJarManager(unittest.TestCase):
     @patch('requests.get')
     def test_download_failure(self, mock_get):
         """Should handle download failure gracefully."""
-        mock_get.side_effect = Exception("Network error")
+        import requests
+        mock_get.side_effect = requests.RequestException("Network error")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = JarManager(jar_dir=Path(tmpdir))
