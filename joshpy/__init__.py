@@ -40,6 +40,20 @@ try:
 except ImportError:
     HAS_JOBS = False
 
+# Optional registry module (requires duckdb)
+try:
+    from joshpy.registry import (
+        RunRegistry,
+        RegistryCallback,
+        SessionInfo,
+        ConfigInfo,
+        RunInfo,
+        SessionSummary,
+    )
+    HAS_REGISTRY = True
+except ImportError:
+    HAS_REGISTRY = False
+
 
 class Josh:
   """Entrypoint into the Python library for interacting with Josh simulations.
