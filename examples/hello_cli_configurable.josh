@@ -1,5 +1,5 @@
 # A configurable version of hello_cli.josh
-# Uses config variables from editor.jshc for parameterization
+# Uses config variables from sweep_config.jshc for parameterization
 
 start simulation Main
 
@@ -30,8 +30,8 @@ start organism ForeverTree
   age.step = prior.age + 1 year
 
   height.init = 0 meters
-  # maxGrowth is now configurable via editor.jshc
-  height.step = prior.height + sample uniform from 0 meters to config editor.maxGrowth
+  # maxGrowth is now configurable via sweep_config.jshc
+  height.step = prior.height + sample uniform from 0 meters to config sweep_config.maxGrowth
 
 end organism
 

@@ -47,7 +47,7 @@ def main():
     # Paths relative to this script
     script_dir = Path(__file__).parent
     source_path = script_dir / "hello_cli_configurable.josh"
-    template_path = script_dir / "templates/editor.jshc.j2"
+    template_path = script_dir / "templates/sweep_config.jshc.j2"
 
     # Verify files exist
     if not source_path.exists():
@@ -151,7 +151,7 @@ def main():
     from joshpy.jobs import run_sweep
 
     results = run_sweep(
-        template=Path("templates/editor.jshc.j2"),
+        template=Path("templates/sweep_config.jshc.j2"),
         source=Path("hello_cli_configurable.josh"),
         parameters={"maxGrowth": [1, 5, 10]},
         josh_jar=Path("joshsim-fat.jar"),

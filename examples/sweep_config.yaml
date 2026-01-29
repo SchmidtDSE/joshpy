@@ -2,7 +2,7 @@
 # Run with: python -c "from joshpy.jobs import JobConfig; c = JobConfig.from_yaml_file('sweep_config.yaml'); print(c)"
 
 # Template file path (Jinja2 .j2 file)
-template_path: templates/editor.jshc.j2
+template_path: templates/sweep_config.jshc.j2
 
 # Josh source file
 source_path: hello_cli_configurable.josh
