@@ -62,7 +62,7 @@ from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, Job
 
 # Define sweep configuration
 config = JobConfig(
-    template_path=Path("templates/editor.jshc.j2"),
+    template_path=Path("templates/sweep_config.jshc.j2"),
     source_path=Path("simulation.josh"),
     simulation="Main",
     sweep=SweepConfig(
@@ -92,7 +92,7 @@ Define sweeps in YAML for easier management:
 
 ```yaml
 # sweep_config.yaml
-template_path: templates/editor.jshc.j2
+template_path: templates/sweep_config.jshc.j2
 source_path: simulation.josh
 simulation: Main
 replicates: 3

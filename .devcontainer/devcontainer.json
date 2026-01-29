@@ -6,14 +6,15 @@
         "options": ["--platform=linux/amd64"]
     },
     // "runArgs": [
-    //     "--userns=keep-id"
+    //     "--userns=keep-id",
+    //     "--ulimit", "nofile=65536:65536"
     // ],
     "mounts": [
         "source=${localWorkspaceFolderBasename}-pixi,target=/home/vscode/.pixi-env,type=volume"
     ],
-    "updateRemoteUserUID": false,
-    "remoteUser": "vscode",
-    "containerUser": "vscode",
+    "updateRemoteUserUID": true,
+    "remoteUser": "root",
+    "containerUser": "root",
     "postCreateCommand": "ln -sfn /home/vscode/.pixi-env .pixi && pixi install && pixi run install-dev && pixi run get-jars",
     "customizations": {
         "vscode": {
@@ -40,4 +41,3 @@
         }
     }
 }
-icc
