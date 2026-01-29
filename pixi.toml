@@ -10,6 +10,7 @@ python = ">=3.10"
 openjdk = ">=17"
 pip = "*"
 wget = "*"
+gh = ">=2.86.0,<3"
 
 [feature.dev.dependencies]
 pytest = ">=7.0"
