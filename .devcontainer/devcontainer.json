@@ -23,10 +23,11 @@
                 "ms-python.debugpy",
                 "ms-python.vscode-pylance",
                 "charliermarsh.ruff",
-                "ms-toolsai.jupyter",
+                "ms-toolsai.jupyter@2025.7.0",
                 "redhat.vscode-yaml"
             ],
             "settings": {
+                "python.defaultInterpreterPath": "/workspaces/joshpy/.pixi/envs/default/bin/python",
                 "python.testing.pytestEnabled": true,
                 "python.testing.unittestEnabled": false,
                 "editor.formatOnSave": true,
