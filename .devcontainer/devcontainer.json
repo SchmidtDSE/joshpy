@@ -16,6 +16,12 @@
     "remoteUser": "root",
     "containerUser": "root",
     "postCreateCommand": "ln -sfn /home/vscode/.pixi-env .pixi && pixi install && pixi run install-dev && pixi run get-jars",
+    "features": {
+        "ghcr.io/devcontainers/features/github-cli:1": {},
+        "ghcr.io/devcontainers/features/common-utils:2.5.3": {
+            "installSsh": true
+        }
+    },
     "customizations": {
         "vscode": {
             "extensions": [
@@ -31,6 +37,7 @@
                 "python.testing.pytestEnabled": true,
                 "python.testing.unittestEnabled": false,
                 "editor.formatOnSave": true,
+                "terminal.integrated.enableOsc52": true,
                 "[python]": {
                     "editor.defaultFormatter": "charliermarsh.ruff",
                     "editor.codeActionsOnSave": {
