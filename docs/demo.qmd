@@ -1,10 +1,17 @@
 ---
 title: "joshpy Parameter Sweep Demo"
 format: html
-jupyter: python3
 execute:
   warning: false
 ---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
 
 ## Introduction
 
@@ -32,6 +39,12 @@ Ensure the Josh JAR is available at `jar/joshsim-fat.jar` and joshpy is installe
 
 ```bash
 pip install -e '.[all]'
+```
+
+For visualization, ensure R is installed with the following packages:
+
+```r
+install.packages(c("reticulate", "ggplot2", "dplyr"))
 ```
 
 ## Step 1: Setup - Define Parameter Sweep
@@ -77,17 +90,15 @@ print(f"Total runs: {len(MAX_GROWTH_VALUES)} x {config.replicates} = {len(MAX_GR
 Let's examine the source files. The `.josh` file defines the simulation, and
 the `.jshc.j2` template provides parameterized configuration:
 
+#### Josh Source
+
 ```{python}
-print("=" * 60)
-print("Source file (.josh):")
-print("=" * 60)
 print(SOURCE_PATH.read_text())
 ```
 
+#### Template Configuration
+
 ```{python}
-print("=" * 60)
-print("Template file (.jshc.j2):")
-print("=" * 60)
 print(TEMPLATE_PATH.read_text())
 ```
 
@@ -233,7 +244,6 @@ parameter values and timesteps, computing mean and standard deviation across
 replicates.
 
 ```{python}
-import numpy as np
 from joshpy.cell_data import DiagnosticQueries
 
 queries = DiagnosticQueries(registry)
@@ -248,72 +258,86 @@ print(f"Retrieved {len(df)} rows\n")
 if not df.empty:
     print("Sample data (first 15 rows):")
     print(df.head(15).to_string(index=False))
+    # Save to CSV for R visualization
+    df.to_csv("/tmp/sweep_results.csv", index=False)
+    print("\nSaved results to /tmp/sweep_results.csv")
 ```
 
 ## Step 6: Visualize Results
 
-With data in a pandas DataFrame, visualization is straightforward using
-matplotlib. We'll create two plots:
+With data in a pandas DataFrame, we can pass it to R for visualization using
+ggplot2. We'll create two plots:
 
-1. **Time series**: Tree height over simulation steps, colored by `maxGrowth`
+1. **Time series**: Tree height over simulation steps with ribbon for uncertainty
 2. **Bar chart**: Final height vs growth rate parameter with error bars
 
-```{python}
+```{r}
 #| label: fig-timeseries
 #| fig-cap: "Tree height trajectories for different maxGrowth parameter values. Higher growth rates produce taller trees, as expected."
+#| fig-width: 10
+#| fig-height: 6
 
-import matplotlib.pyplot as plt
+# Read results from CSV exported by Python
+df <- read.csv("/tmp/sweep_results.csv")
 
-if not df.empty:
-    fig, ax = plt.subplots(figsize=(10, 6))
-
-    for mg, group in df.groupby("param_value"):
-        ax.plot(group["step"], group["mean_value"], marker="o", label=f"{mg}m")
-
-    ax.set_xlabel("Simulation Step")
-    ax.set_ylabel("Average Tree Height (meters)")
-    ax.set_title("Tree Growth Over Time by maxGrowth Parameter")
-    ax.legend(title="maxGrowth", bbox_to_anchor=(1.05, 1), loc="upper left")
-    ax.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-else:
-    print("No data to plot.")
+if (nrow(df) > 0) {
+  p <- ggplot(df, aes(x = step, y = mean_value, color = factor(param_value), fill = factor(param_value))) +
+    geom_ribbon(aes(ymin = mean_value - std_value, ymax = mean_value + std_value), alpha = 0.2, color = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    labs(
+      x = "Simulation Step",
+      y = "Average Tree Height (meters)",
+      title = "Tree Growth Over Time by maxGrowth Parameter",
+      color = "maxGrowth",
+      fill = "maxGrowth"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "right",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+} else {
+  cat("No data to plot.")
+}
 ```
 
-```{python}
+```{r}
 #| label: fig-final-height
 #| fig-cap: "Final tree height vs growth rate parameter. Error bars show standard deviation across replicates."
+#| fig-width: 10
+#| fig-height: 6
 
-if not df.empty:
-    # Get final timestep data
-    final_df = df[df["step"] == df["step"].max()].copy()
+# Read results from CSV exported by Python
+df <- read.csv("/tmp/sweep_results.csv")
 
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(
-        final_df["param_value"].astype(float),
-        final_df["mean_value"],
-        yerr=final_df["std_value"],
-        capsize=5,
-        alpha=0.7,
-        color="steelblue",
-    )
+if (nrow(df) > 0) {
+  final_df <- df |>
+    dplyr::filter(step == max(step))
 
-    ax.set_xlabel("maxGrowth (meters/step)")
-    ax.set_ylabel("Final Average Height (meters)")
-    ax.set_title("Final Tree Height vs Growth Rate")
-    ax.grid(True, alpha=0.3, axis="y")
-    plt.tight_layout()
-    plt.show()
+  p <- ggplot(final_df, aes(x = param_value, y = mean_value)) +
+    geom_col(fill = "steelblue", alpha = 0.7) +
+    geom_errorbar(
+      aes(ymin = mean_value - std_value, ymax = mean_value + std_value),
+      width = 3,
+      linewidth = 0.6
+    ) +
+    labs(
+      x = "maxGrowth (meters/step)",
+      y = "Final Average Height (meters)",
+      title = "Final Tree Height vs Growth Rate"
+    ) +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+  print(p)
 
-    # Calculate correlation
-    r = np.corrcoef(
-        final_df["param_value"].astype(float),
-        final_df["mean_value"]
-    )[0, 1]
-    print(f"\nCorrelation between maxGrowth and final height: r = {r:.4f}")
-else:
-    print("No data to plot.")
+  # Calculate and print correlation
+  r <- cor(final_df$param_value, final_df$mean_value)
+  cat(sprintf("\nCorrelation between maxGrowth and final height: r = %.4f\n", r))
+} else {
+  cat("No data to plot.")
+}
 ```
 
 ## Summary
@@ -325,10 +349,14 @@ This demo illustrated the core joshpy workflow:
 3. **Execute** simulations via `JobRunner` with automatic tracking
 4. **Load** CSV outputs into queryable DuckDB tables
 5. **Query** results across parameters using `DiagnosticQueries`
-6. **Visualize** parameter sensitivity with standard Python tools
+6. **Visualize** parameter sensitivity with ggplot2 in R
 
 The registry-backed approach ensures reproducibility and enables complex
 queries joining parameters with results across multiple experiments.
+
+This document also demonstrates Quarto's ability to seamlessly combine R and
+Python in the same workflow using `reticulate`. Python handles the simulation
+orchestration and data querying, while R handles visualization with ggplot2.
 
 ## Cleanup
 
