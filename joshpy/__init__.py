@@ -50,6 +50,10 @@ try:
         RunInfo,
         SessionSummary,
     )
+    from joshpy.cell_data import (
+        CellDataLoader,
+        DiagnosticQueries,
+    )
     HAS_REGISTRY = True
 except ImportError:
     HAS_REGISTRY = False

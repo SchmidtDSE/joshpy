@@ -270,6 +270,11 @@ class JobConfig:
         seed: Random seed for reproducibility.
         crs: Coordinate reference system.
         use_float64: Use double precision instead of BigDecimal.
+
+    Note:
+        Export paths should be configured in the .jshc template file itself using
+        Josh's template variable syntax (e.g., exportFiles.patch = "file:///{param}_{replicate}.csv").
+        Josh resolves {param} from --custom-tag arguments and {replicate} automatically.
     """
 
     # Template source (one of these required for sweep)
@@ -702,6 +707,9 @@ class JobRunner:
             cmd.extend(["--upload-config-path", job.upload_config_path])
         if job.upload_data_path:
             cmd.extend(["--upload-data-path", job.upload_data_path])
+
+        # Note: Export paths are configured in the .jshc file itself, not as CLI args.
+        # Josh resolves template variables like {maxGrowth} and {replicate} from --custom-tag args.
 
         # Other options
         if job.output_steps:

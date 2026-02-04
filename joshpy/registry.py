@@ -47,6 +47,13 @@ try:
 except ImportError:
     HAS_DUCKDB = False
 
+try:
+    from pydantic import BaseModel, Field
+
+    HAS_PYDANTIC = True
+except ImportError:
+    HAS_PYDANTIC = False
+
 
 def _check_duckdb() -> None:
     """Raise ImportError if duckdb is not available."""
@@ -100,6 +107,29 @@ CREATE TABLE IF NOT EXISTS run_outputs (
     row_count       INTEGER,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE SEQUENCE IF NOT EXISTS cell_id_seq START 1;
+
+CREATE TABLE IF NOT EXISTS cell_data (
+    cell_id         BIGINT PRIMARY KEY DEFAULT nextval('cell_id_seq'),
+    run_id          VARCHAR REFERENCES job_runs(run_id),
+    config_hash     VARCHAR(12),
+    step            INTEGER NOT NULL,
+    replicate       INTEGER NOT NULL,
+    position_x      DOUBLE,
+    position_y      DOUBLE,
+    longitude       DOUBLE,
+    latitude        DOUBLE,
+    entity_type     VARCHAR,
+    variables       JSON NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cell_run ON cell_data(run_id);
+CREATE INDEX IF NOT EXISTS idx_cell_config ON cell_data(config_hash);
+CREATE INDEX IF NOT EXISTS idx_cell_step ON cell_data(step);
+CREATE INDEX IF NOT EXISTS idx_cell_replicate ON cell_data(replicate);
+CREATE INDEX IF NOT EXISTS idx_cell_spatial ON cell_data(longitude, latitude);
+CREATE INDEX IF NOT EXISTS idx_cell_step_replicate ON cell_data(step, replicate);
 """
 
 
@@ -840,7 +870,7 @@ class RegistryCallback:
     session_id: str
     _run_ids: dict[str, str] = field(default_factory=dict, repr=False)
 
-    def __call__(self, result: Any) -> None:
+    def __call__(self, result: Any) -> str | None:
         """Record a job result in the registry.
 
         This is called by JobRunner after each job completes. It records
@@ -848,12 +878,15 @@ class RegistryCallback:
 
         Args:
             result: JobResult from the completed job.
+
+        Returns:
+            The run_id for the recorded run, or None if result is invalid.
         """
         # Import here to avoid circular dependency
         from joshpy.jobs import JobResult
 
         if not isinstance(result, JobResult):
-            return
+            return None
 
         job = result.job
 
@@ -872,3 +905,5 @@ class RegistryCallback:
             exit_code=result.exit_code,
             error_message=error_msg,
         )
+
+        return run_id
