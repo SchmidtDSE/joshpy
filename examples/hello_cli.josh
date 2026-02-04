@@ -26,14 +26,11 @@ end patch
 
 start organism ForeverTree
 
-  maxGrowth.init = config sweep_config.maxGrowth
-
   age.init = 0 year
   age.step = prior.age + 1 year
 
   height.init = 0 meters
-  # maxGrowth is configurable via sweep_config.jshc
-  height.step = prior.height + sample uniform from 0 meters to maxGrowth
+  height.step = prior.height + sample uniform from 0 meters to 1 meters
 
 end organism
 
