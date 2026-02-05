@@ -1,0 +1,1023 @@
+# joshpy - Python Client for Josh Ecological Simulations
+
+joshpy is a Python client library for [Josh](https://joshsim.org), a domain-specific language (DSL) for ecological modeling. This library enables Python users to interact with Josh simulations through multiple interfaces: HTTP API, command-line interface (CLI), and parameter sweep orchestration.
+
+## Purpose
+
+joshpy bridges Python's scientific computing ecosystem with Josh's ecological simulation capabilities. It supports:
+
+1. **HTTP API Client**: Run simulations via remote Josh servers
+2. **CLI Wrapper**: Execute Josh CLI commands (run, preprocess, validate, etc.) via subprocess
+3. **Parameter Sweeps**: Generate configuration files from Jinja templates and orchestrate batch execution
+4. **Experiment Tracking**: Track simulation runs, configurations, and results in DuckDB
+
+## Installation
+
+```bash
+# Basic installation
+pip install joshpy
+
+# With parameter sweep support (Jinja templating)
+pip install joshpy[jobs]
+
+# With experiment tracking (DuckDB registry)
+pip install joshpy[registry]
+
+# With all optional dependencies
+pip install joshpy[all]
+```
+
+## Module Overview
+
+```
+joshpy/
+├── __init__.py      # Public API exports and Josh HTTP client
+├── cli.py           # CLI wrapper (JoshCLI, RunConfig, etc.)
+├── jobs.py          # Parameter sweep orchestration
+├── registry.py      # DuckDB experiment tracking
+├── cell_data.py     # Spatiotemporal data loading
+├── jar.py           # JAR file management
+├── metadata.py      # Simulation metadata
+├── virtual_file.py  # Virtual file system support
+├── parse.py         # Response parsing utilities
+├── remote.py        # Remote HTTP backend
+├── strategy.py      # Backend interface
+├── geocode.py       # Coordinate conversion
+└── definitions.py   # Type definitions
+```
+
+---
+
+## HTTP API Client
+
+The `Josh` class provides a high-level interface for running simulations via HTTP.
+
+### Basic Usage
+
+```python
+from joshpy import Josh
+
+# Create client (uses public endpoint by default)
+client = Josh()
+
+# Or with custom server and API key
+client = Josh(server="https://your-josh-server.com", api_key="your-key")
+
+# Check for syntax errors
+code = """
+start simulation Main
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  steps.low = 0 count
+  steps.high = 10 count
+end simulation
+"""
+
+error = client.get_error(code)
+if error:
+    print(f"Syntax error: {error}")
+
+# Get list of simulations in code
+simulations = client.get_simulations(code)
+print(f"Found simulations: {simulations}")
+
+# Get simulation metadata
+metadata = client.get_metadata(code, "Main")
+print(f"Grid size: {metadata.get_patch_size()}")
+print(f"Bounds: ({metadata.get_start_x()}, {metadata.get_start_y()}) to ({metadata.get_end_x()}, {metadata.get_end_y()})")
+
+# Run simulation
+results = client.run_simulation(
+    code=code,
+    name="Main",
+    virtual_files=[],  # Optional external data files
+    replicates=3,
+    geocode=True,  # Add longitude/latitude to results
+)
+
+# Results is a list of replicates, each containing data points
+for replicate_idx, replicate_data in enumerate(results):
+    print(f"Replicate {replicate_idx}: {len(replicate_data)} data points")
+```
+
+### Josh Class Methods
+
+| Method | Description |
+|--------|-------------|
+| `get_error(code)` | Returns first syntax error or None if valid |
+| `get_simulations(code)` | Returns list of simulation names in code |
+| `get_metadata(code, name)` | Returns SimulationMetadata for named simulation |
+| `run_simulation(code, name, virtual_files, replicates, geocode)` | Executes simulation and returns results |
+
+### SimulationMetadata
+
+Contains grid and spatial information:
+
+```python
+metadata.get_start_x()      # Minimum X in grid space
+metadata.get_start_y()      # Minimum Y in grid space
+metadata.get_end_x()        # Maximum X in grid space
+metadata.get_end_y()        # Maximum Y in grid space
+metadata.get_patch_size()   # Size of each grid cell
+metadata.get_min_longitude()  # Minimum longitude (if in degrees)
+metadata.get_max_longitude()  # Maximum longitude (if in degrees)
+metadata.get_min_latitude()   # Minimum latitude (if in degrees)
+metadata.get_max_latitude()   # Maximum latitude (if in degrees)
+metadata.has_degrees()        # True if lat/lon specified
+```
+
+### Virtual Files
+
+Provide external data to sandboxed simulations:
+
+```python
+from joshpy.virtual_file import VirtualFile, serialize_files
+
+# Text file
+config_file = VirtualFile(
+    name="config.txt",
+    content="maxGrowth = 10",
+    is_binary=False
+)
+
+# Binary file (base64 encoded)
+import base64
+with open("data.bin", "rb") as f:
+    encoded = base64.b64encode(f.read()).decode()
+
+data_file = VirtualFile(
+    name="data.bin",
+    content=encoded,
+    is_binary=True
+)
+
+# Pass to simulation
+results = client.run_simulation(
+    code=code,
+    name="Main",
+    virtual_files=[config_file, data_file],
+    replicates=1
+)
+```
+
+---
+
+## CLI Wrapper
+
+The `cli` module provides a Pythonic interface to Josh CLI commands via subprocess.
+
+### JoshCLI Class
+
+```python
+from pathlib import Path
+from joshpy.cli import JoshCLI, RunConfig, PreprocessConfig, ValidateConfig
+from joshpy.jar import JarMode
+
+# Use production JAR (downloads automatically if needed)
+cli = JoshCLI()
+
+# Use development JAR
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+# Use specific JAR file
+cli = JoshCLI(josh_jar=Path("path/to/joshsim-fat.jar"))
+
+# Configure Java path and working directory
+cli = JoshCLI(
+    josh_jar=JarMode.PROD,
+    java_path="/usr/bin/java",
+    working_dir=Path("/my/project"),
+    auto_download=True,  # Download JAR if missing
+)
+```
+
+### Running Simulations
+
+```python
+from joshpy.cli import JoshCLI, RunConfig
+
+cli = JoshCLI()
+
+result = cli.run(RunConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    replicates=5,
+    data={
+        "config": Path("config.jshc"),
+        "climate": Path("climate.jshd"),
+    },
+    custom_tags={"experiment": "baseline"},
+    output=Path("results.csv"),
+    output_format="csv",
+    seed=42,
+    use_float64=True,  # Faster but less precise
+    parallel=True,     # Parallel patch processing
+    verbose=True,
+))
+
+if result.success:
+    print(f"Simulation completed successfully")
+    print(result.stdout)
+else:
+    print(f"Simulation failed with exit code {result.exit_code}")
+    print(result.stderr)
+```
+
+### RunConfig Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `script` | Path | Path to .josh simulation file (required) |
+| `simulation` | str | Name of simulation to run (required) |
+| `replicates` | int | Number of replicates (default: 1) |
+| `data` | dict[str, Path] | Map of data file names to paths |
+| `custom_tags` | dict[str, str] | Custom tags for template resolution |
+| `crs` | str | Coordinate Reference System |
+| `output_format` | str | Output format: csv, netcdf, geotiff |
+| `output` | Path | Output file path |
+| `parallel` | bool | Enable parallel patch processing |
+| `use_float64` | bool | Use double precision (faster) |
+| `verbose` | bool | Enable verbose output |
+| `upload_source` | bool | Upload source to MinIO |
+| `upload_config` | bool | Upload config to MinIO |
+| `upload_data` | bool | Upload data to MinIO |
+| `output_steps` | str | Step range to output (e.g., "0-10,50") |
+| `seed` | int | Random seed for reproducibility |
+
+### Preprocessing Geospatial Data
+
+Convert NetCDF or GeoTIFF to Josh's optimized .jshd format:
+
+```python
+from joshpy.cli import JoshCLI, PreprocessConfig
+
+cli = JoshCLI()
+
+# Basic preprocessing
+result = cli.preprocess(PreprocessConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    data_file=Path("temperature.nc"),
+    variable="temp",
+    units="K",
+    output=Path("temperature.jshd"),
+))
+
+# With coordinate mapping
+result = cli.preprocess(PreprocessConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    data_file=Path("precip.nc"),
+    variable="rainfall",
+    units="mm/year",
+    output=Path("climate.jshd"),
+    amend=True,  # Add to existing file
+    x_coord="longitude",
+    y_coord="latitude",
+    time_coord="time",
+    crs="EPSG:4326",
+    verbose=True,
+))
+
+if not result.success:
+    print(f"Preprocessing failed: {result.stderr}")
+```
+
+### PreprocessConfig Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `script` | Path | Path to .josh file (required) |
+| `simulation` | str | Simulation name (required) |
+| `data_file` | Path | Input data file (required) |
+| `variable` | str | Variable name to extract (required) |
+| `units` | str | Units of the data (required) |
+| `output` | Path | Output .jshd file path (required) |
+| `amend` | bool | Amend existing file (default: False) |
+| `crs` | str | Coordinate Reference System |
+| `x_coord` | str | Name of X coordinate dimension |
+| `y_coord` | str | Name of Y coordinate dimension |
+| `time_coord` | str | Name of time dimension |
+| `verbose` | bool | Enable verbose output |
+
+### Validating Scripts
+
+```python
+from joshpy.cli import JoshCLI, ValidateConfig
+
+cli = JoshCLI()
+
+result = cli.validate(ValidateConfig(
+    script=Path("simulation.josh"),
+    verbose=True,
+))
+
+if result.success:
+    print("Script is valid")
+else:
+    print(f"Validation errors:\n{result.stderr}")
+```
+
+### Discovering Configuration Variables
+
+Find all configuration variables used in a script:
+
+```python
+from joshpy.cli import JoshCLI, DiscoverConfigConfig
+
+cli = JoshCLI()
+
+result = cli.discover_config(DiscoverConfigConfig(
+    script=Path("simulation.josh")
+))
+
+if result.success:
+    print(f"Configuration variables:\n{result.stdout}")
+```
+
+### Inspecting JSHD Files
+
+Debug preprocessed data files:
+
+```python
+from joshpy.cli import JoshCLI, InspectJshdConfig
+
+cli = JoshCLI()
+
+result = cli.inspect_jshd(InspectJshdConfig(
+    jshd_file=Path("climate.jshd"),
+    variable="temperature",
+    timestep=0,
+    x=10,
+    y=20,
+))
+
+print(f"Value at (10, 20) timestep 0: {result.stdout}")
+```
+
+### Remote Execution (Josh Cloud)
+
+```python
+from joshpy.cli import JoshCLI, RunRemoteConfig
+
+cli = JoshCLI()
+
+result = cli.run_remote(RunRemoteConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    api_key="your-api-key",
+    replicates=10,
+    endpoint="https://custom.josh.cloud",  # Optional
+    data={"config": Path("config.jshc")},
+    custom_tags={"experiment": "remote_test"},
+))
+```
+
+### CLIResult
+
+All CLI methods return a `CLIResult`:
+
+```python
+result.success     # True if exit_code == 0
+result.exit_code   # Process exit code
+result.stdout      # Standard output
+result.stderr      # Standard error
+result.command     # List of command arguments
+```
+
+---
+
+## Parameter Sweeps
+
+The `jobs` module enables parameter sweep orchestration using Jinja templating.
+
+### Workflow Overview
+
+1. Define a Jinja template for .jshc configuration files
+2. Specify parameter values to sweep over
+3. Expand template to generate concrete configurations
+4. Execute jobs via JoshCLI
+
+### Basic Example
+
+```python
+from pathlib import Path
+from joshpy.jobs import (
+    JobConfig,
+    SweepConfig,
+    SweepParameter,
+    JobExpander,
+    to_run_config,
+)
+from joshpy.cli import JoshCLI
+
+# Define sweep configuration
+config = JobConfig(
+    template_path=Path("templates/config.jshc.j2"),
+    source_path=Path("simulation.josh"),
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        parameters=[
+            SweepParameter(name="maxGrowth", values=[10, 50, 100]),
+            SweepParameter(name="mortality", values=[0.1, 0.2]),
+        ]
+    ),
+)
+
+# Expand to concrete jobs (3x2 = 6 jobs)
+expander = JobExpander()
+job_set = expander.expand(config)
+
+print(f"Generated {len(job_set)} jobs")
+
+# Execute via CLI
+cli = JoshCLI()
+for job in job_set:
+    run_config = to_run_config(job)
+    result = cli.run(run_config)
+    status = "OK" if result.success else "FAIL"
+    print(f"[{status}] {job.parameters}")
+
+# Cleanup temporary files
+job_set.cleanup()
+```
+
+### Template File (config.jshc.j2)
+
+Jinja template for configuration:
+
+```jinja
+# Generated config for maxGrowth={{ maxGrowth }}, mortality={{ mortality }}
+maxGrowth = {{ maxGrowth }} meters
+mortalityRate = {{ mortality }} percent
+```
+
+### Inline Templates
+
+Use template strings directly:
+
+```python
+config = JobConfig(
+    template_string="maxGrowth = {{ maxGrowth }} meters",
+    source_path=Path("simulation.josh"),
+    sweep=SweepConfig(
+        parameters=[
+            SweepParameter(name="maxGrowth", values=[10, 50, 100])
+        ]
+    ),
+)
+```
+
+### Range Specifications
+
+Define parameter ranges instead of explicit values:
+
+```python
+# Like numpy.arange(start, stop, step)
+SweepParameter(
+    name="survivalProb",
+    values={"start": 80, "stop": 100, "step": 5}
+)
+# Result: [80, 85, 90, 95]
+
+# Like numpy.linspace(start, stop, num)
+SweepParameter(
+    name="seedCount",
+    values={"start": 1000, "stop": 5000, "num": 5}
+)
+# Result: [1000.0, 2000.0, 3000.0, 4000.0, 5000.0]
+```
+
+### YAML Configuration
+
+Define sweeps in YAML files:
+
+```yaml
+# sweep_config.yaml
+template_path: templates/config.jshc.j2
+source_path: simulation.josh
+simulation: Main
+replicates: 3
+
+sweep:
+  parameters:
+    - name: scenario
+      values: [baseline, optimistic, pessimistic]
+    
+    - name: survivalProb
+      range: {start: 80, stop: 100, step: 5}
+    
+    - name: seedCount
+      range: {start: 1000, stop: 5000, num: 5}
+```
+
+Load and execute:
+
+```python
+config = JobConfig.from_yaml_file(Path("sweep_config.yaml"))
+job_set = JobExpander().expand(config)
+```
+
+### JobConfig Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `template_path` | Path | Path to Jinja template file |
+| `template_string` | str | Inline Jinja template |
+| `source_path` | Path | Path to .josh source file |
+| `simulation` | str | Simulation name (default: "Main") |
+| `replicates` | int | Replicates per job (default: 1) |
+| `sweep` | SweepConfig | Parameter sweep configuration |
+| `file_mappings` | dict[str, Path] | Additional data file mappings |
+| `output_steps` | str | Step range to output |
+| `seed` | int | Random seed |
+| `crs` | str | Coordinate Reference System |
+| `use_float64` | bool | Use double precision |
+
+### ExpandedJob Attributes
+
+Each expanded job contains:
+
+```python
+job.config_content   # Rendered configuration text
+job.config_path      # Path to written .jshc file
+job.config_name      # Logical name for --data flag
+job.config_hash      # MD5 hash (12 chars) for identification
+job.parameters       # Dict of parameter values
+job.simulation       # Simulation name
+job.replicates       # Number of replicates
+job.source_path      # Path to .josh file
+job.file_mappings    # Additional data files
+job.custom_tags      # Tags for CLI (derived from parameters)
+```
+
+### Converting Jobs to CLI Configs
+
+```python
+from joshpy.jobs import to_run_config, to_run_remote_config
+
+# For local execution
+run_config = to_run_config(job)
+result = cli.run(run_config)
+
+# For cloud execution
+run_remote_config = to_run_remote_config(
+    job,
+    api_key="your-api-key",
+    endpoint="https://josh.cloud"
+)
+result = cli.run_remote(run_remote_config)
+```
+
+---
+
+## Experiment Registry
+
+The `registry` module provides DuckDB-backed tracking for experiments.
+
+### Setup
+
+```python
+from joshpy.registry import RunRegistry
+
+# In-memory database
+registry = RunRegistry(":memory:")
+
+# Persistent database
+registry = RunRegistry("experiments.duckdb")
+
+# Use as context manager
+with RunRegistry("experiments.duckdb") as registry:
+    # ... use registry
+    pass  # Automatically closed
+```
+
+### Session Management
+
+Sessions group related job runs:
+
+```python
+# Create a session
+session_id = registry.create_session(
+    experiment_name="jotr_sensitivity",
+    simulation="JoshuaTreeSim",
+    total_jobs=9,
+    total_replicates=27,
+    template_path="templates/config.jshc.j2",
+    metadata={"description": "Sensitivity analysis"}
+)
+
+# Update session status
+registry.update_session_status(session_id, "running")
+registry.update_session_status(session_id, "completed")
+
+# Query sessions
+sessions = registry.list_sessions(experiment_name="jotr_sensitivity")
+session = registry.get_session(session_id)
+summary = registry.get_session_summary(session_id)
+```
+
+### Configuration Registration
+
+```python
+# Register job configurations
+for job in job_set:
+    registry.register_config(
+        session_id=session_id,
+        config_hash=job.config_hash,
+        config_content=job.config_content,
+        parameters=job.parameters,
+    )
+
+# Query configurations
+configs = registry.get_configs_for_session(session_id)
+config = registry.get_config_by_hash("abc123def456")
+```
+
+### Run Tracking
+
+```python
+# Start a run
+run_id = registry.start_run(
+    config_hash=job.config_hash,
+    replicate=0,
+    output_path="/tmp/results",
+    metadata={"parameters": job.parameters}
+)
+
+# Complete the run
+registry.complete_run(
+    run_id=run_id,
+    exit_code=0,  # Or non-zero for failure
+    error_message=None,  # Or error string
+)
+
+# Query runs
+runs = registry.get_runs_for_config(config_hash)
+run = registry.get_run(run_id)
+```
+
+### Registry Callback
+
+Integrate tracking with CLI execution:
+
+```python
+from joshpy.registry import RunRegistry, RegistryCallback
+from joshpy.cli import JoshCLI
+from joshpy.jobs import to_run_config
+
+registry = RunRegistry("experiments.duckdb")
+session_id = registry.create_session(...)
+
+callback = RegistryCallback(registry, session_id)
+cli = JoshCLI()
+
+for job in job_set:
+    # Register config
+    registry.register_config(
+        session_id=session_id,
+        config_hash=job.config_hash,
+        config_content=job.config_content,
+        parameters=job.parameters,
+    )
+    
+    # Execute
+    run_config = to_run_config(job)
+    result = cli.run(run_config)
+    
+    # Record result
+    callback.record(job, result)
+```
+
+### Querying Results
+
+```python
+# Query runs by parameters
+runs = registry.get_runs_by_parameters(
+    session_id=session_id,
+    parameters={"maxGrowth": 50}
+)
+
+# Get session summary
+summary = registry.get_session_summary(session_id)
+print(f"Completed: {summary.completed_runs}/{summary.total_runs}")
+print(f"Failed: {summary.failed_runs}")
+
+# Export to pandas DataFrame (requires pandas)
+df = registry.export_results_df(session_id)
+```
+
+---
+
+## Cell Data Loading
+
+The `cell_data` module loads simulation outputs for analysis.
+
+### Loading CSV Exports
+
+```python
+from joshpy.registry import RunRegistry
+from joshpy.cell_data import CellDataLoader, DiagnosticQueries
+
+registry = RunRegistry("experiments.duckdb")
+loader = CellDataLoader(registry)
+
+# Load CSV export
+rows_loaded = loader.load_csv(
+    csv_path=Path("output.csv"),
+    run_id="abc123",
+    config_hash="def456",
+    entity_type="patch",
+)
+print(f"Loaded {rows_loaded} rows")
+```
+
+### Expected CSV Format
+
+CSV exports should have columns:
+- `step`: Simulation timestep
+- `replicate`: Replicate number
+- `position.x`, `position.y`: Grid coordinates
+- `position.longitude`, `position.latitude`: Earth coordinates (optional)
+- Variable columns (e.g., `treeCount`, `biomass`)
+
+### Diagnostic Queries
+
+```python
+queries = DiagnosticQueries(registry)
+
+# Time series for a specific location
+df = queries.get_cell_timeseries(
+    longitude=-116.1,
+    latitude=33.9,
+    variable="treeCount",
+)
+
+# Parameter comparison
+df = queries.get_parameter_comparison(
+    variable="totalBiomass",
+    param_name="maxGrowth",
+    session_id=session_id,
+)
+```
+
+---
+
+## JAR Management
+
+The `jar` module manages Josh JAR files.
+
+### Automatic Download
+
+```python
+from joshpy.jar import JarManager, JarMode, get_jar, download_jars
+
+# Get JAR path (downloads if needed)
+jar_path = get_jar(JarMode.PROD)
+jar_path = get_jar(JarMode.DEV)
+
+# Download both prod and dev JARs
+results = download_jars()
+for mode, result in results.items():
+    if result.success:
+        print(f"{mode.value}: {result.jar_path}")
+```
+
+### JarManager Class
+
+```python
+manager = JarManager(jar_dir=Path("./jar"))
+
+# Check if JAR exists
+exists = manager.jar_exists(JarMode.PROD)
+
+# Get JAR path
+jar_path = manager.get_jar(JarMode.PROD, auto_download=True)
+
+# Download specific JAR
+result = manager.download_jar(JarMode.DEV, force=True)
+if result.was_updated:
+    print(f"Updated from {result.old_version} to {result.new_version}")
+
+# Get JAR info
+info = manager.get_info(JarMode.PROD)
+print(f"Version: {info['version']}")
+print(f"Hash: {info['hash']}")
+```
+
+### JarMode Options
+
+| Mode | Description |
+|------|-------------|
+| `JarMode.PROD` | Production JAR from joshsim.org |
+| `JarMode.DEV` | Development JAR from joshsim.org |
+| `JarMode.LOCAL` | Local JAR at jar/joshsim-fat.jar |
+
+---
+
+## Configuration Files (.jshc)
+
+Josh configuration files parameterize simulations without modifying source code.
+
+### Format
+
+```
+# Comment lines start with #
+variableName = value units
+maxGrowth = 10 meters
+mortalityRate = 0.15 percent
+scenario = "baseline" string
+```
+
+### Usage in Josh Code
+
+```josh
+start simulation Main
+  # Access config value
+  tree.maxHeight.init = config editor.maxGrowth
+end simulation
+```
+
+### Discovering Variables
+
+Use CLI to find all config variables:
+
+```python
+result = cli.discover_config(DiscoverConfigConfig(
+    script=Path("simulation.josh")
+))
+# Output lists all config references like "editor.maxGrowth"
+```
+
+---
+
+## Complete Example
+
+End-to-end parameter sweep with tracking:
+
+```python
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, to_run_config
+from joshpy.cli import JoshCLI
+from joshpy.registry import RunRegistry, RegistryCallback
+
+# Setup
+registry = RunRegistry("experiment.duckdb")
+cli = JoshCLI()
+
+# Define sweep
+config = JobConfig(
+    template_string="""
+# Sensitivity analysis config
+maxGrowth = {{ maxGrowth }} meters
+survivalProb = {{ survivalProb }} percent
+""",
+    source_path=Path("joshua_tree.josh"),
+    simulation="JoshuaTreeSim",
+    replicates=5,
+    sweep=SweepConfig(parameters=[
+        SweepParameter(name="maxGrowth", values=[5, 10, 20]),
+        SweepParameter(name="survivalProb", values={"start": 80, "stop": 100, "step": 5}),
+    ]),
+)
+
+# Expand jobs
+expander = JobExpander()
+job_set = expander.expand(config)
+print(f"Generated {len(job_set)} jobs")
+
+# Create session
+session_id = registry.create_session(
+    experiment_name="jotr_sensitivity",
+    simulation=config.simulation,
+    total_jobs=len(job_set),
+    total_replicates=len(job_set) * config.replicates,
+)
+
+# Register configs and execute
+callback = RegistryCallback(registry, session_id)
+results = []
+
+for job in job_set:
+    registry.register_config(
+        session_id=session_id,
+        config_hash=job.config_hash,
+        config_content=job.config_content,
+        parameters=job.parameters,
+    )
+    
+    run_config = to_run_config(job)
+    result = cli.run(run_config)
+    results.append(result)
+    
+    callback.record(job, result)
+    
+    status = "OK" if result.success else "FAIL"
+    print(f"[{status}] maxGrowth={job.parameters['maxGrowth']}, survivalProb={job.parameters['survivalProb']}")
+
+# Cleanup
+job_set.cleanup()
+registry.update_session_status(session_id, "completed")
+
+# Summary
+summary = registry.get_session_summary(session_id)
+print(f"\nCompleted: {summary.completed_runs}/{summary.total_runs}")
+print(f"Failed: {summary.failed_runs}")
+
+registry.close()
+```
+
+---
+
+## Error Handling
+
+### CLI Errors
+
+```python
+result = cli.run(config)
+if not result.success:
+    if result.exit_code == -1:
+        # Timeout or exception
+        print(f"Execution error: {result.stderr}")
+    else:
+        # Non-zero exit code from JAR
+        print(f"Simulation failed (exit {result.exit_code}): {result.stderr}")
+```
+
+### HTTP API Errors
+
+```python
+try:
+    results = client.run_simulation(code, "Main", [], 1)
+except RuntimeError as e:
+    print(f"Simulation error: {e}")
+```
+
+### Import Errors
+
+Optional dependencies raise ImportError if missing:
+
+```python
+try:
+    from joshpy.registry import RunRegistry
+except ImportError:
+    print("Install with: pip install joshpy[registry]")
+```
+
+---
+
+## Type Definitions
+
+### SimulationResults
+
+```python
+# List of replicates, each containing data points
+SimulationResults = List[List[Dict]]
+
+# Example structure:
+[
+    # Replicate 0
+    [
+        {"target": "patch", "attributes": {"position.x": 0, "position.y": 0, "treeCount": 5}},
+        {"target": "patch", "attributes": {"position.x": 1, "position.y": 0, "treeCount": 3}},
+    ],
+    # Replicate 1
+    [...],
+]
+```
+
+### FlatFiles
+
+```python
+FlatFiles = List[VirtualFile]
+```
+
+---
+
+## Dependencies
+
+### Required
+- `requests ~= 2.32.3`
+
+### Optional (via extras)
+- `jinja2>=3.0` - Template rendering ([jobs])
+- `pyyaml>=6.0` - YAML configuration ([jobs])
+- `numpy>=1.24` - Range specifications ([numpy])
+- `duckdb>=0.9` - Experiment registry ([registry])
+- `pydantic>=2.0` - Data validation ([registry])
+- `pandas>=2.0` - DataFrame exports ([registry])
+
+---
+
+## Links
+
+- [Josh Language Documentation](https://joshsim.org)
+- [Josh GitHub Repository](https://github.com/SchmidtDSE/josh)
+- [joshpy GitHub Repository](https://github.com/SchmidtDSE/joshpy)
+- [Issue Tracker](https://github.com/SchmidtDSE/joshpy/issues)
+
+## License
+
+BSD-3-Clause
