@@ -58,7 +58,8 @@ Generate multiple configuration files from a single template:
 
 ```python
 from pathlib import Path
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, JobRunner
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, to_run_config
+from joshpy.cli import JoshCLI
 
 # Define sweep configuration
 config = JobConfig(
@@ -78,12 +79,48 @@ expander = JobExpander()
 job_set = expander.expand(config)
 
 # Execute via Josh CLI
-runner = JobRunner(josh_jar=Path("joshsim-fat.jar"))
-results = runner.run_all(job_set)
-
-for result in results:
+cli = JoshCLI()
+for job in job_set:
+    run_config = to_run_config(job)
+    result = cli.run(run_config)
     status = "OK" if result.success else "FAIL"
-    print(f"[{status}] {result.job.parameters}")
+    print(f"[{status}] {job.parameters}")
+```
+
+### Direct CLI Usage
+
+Use the CLI wrapper directly for individual commands:
+
+```python
+from pathlib import Path
+from joshpy.cli import JoshCLI, RunConfig, PreprocessConfig, ValidateConfig
+
+cli = JoshCLI()
+
+# Validate a Josh script
+result = cli.validate(ValidateConfig(script=Path("simulation.josh")))
+if not result.success:
+    print(f"Validation failed: {result.stderr}")
+
+# Preprocess external data
+result = cli.preprocess(PreprocessConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    data_file=Path("temperature.nc"),
+    variable="temp",
+    units="K",
+    output=Path("temperature.jshd"),
+))
+
+# Run a simulation
+result = cli.run(RunConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    replicates=5,
+    data={"climate": Path("temperature.jshd")},
+    output=Path("results.csv"),
+    output_format="csv",
+))
 ```
 
 ### YAML Configuration
@@ -115,24 +152,16 @@ sweep:
 Load and run:
 
 ```python
+from joshpy.jobs import JobExpander, to_run_config
+from joshpy.cli import JoshCLI
+
 config = JobConfig.from_yaml_file(Path("sweep_config.yaml"))
 job_set = JobExpander().expand(config)
-results = JobRunner(josh_jar=Path("joshsim.jar")).run_all(job_set)
-```
 
-### Convenience Function
-
-For simple sweeps:
-
-```python
-from joshpy.jobs import run_sweep
-
-results = run_sweep(
-    template="maxGrowth = {{ maxGrowth }} meters",
-    source=Path("simulation.josh"),
-    parameters={"maxGrowth": [1, 5, 10]},
-    josh_jar=Path("joshsim.jar"),
-)
+cli = JoshCLI()
+for job in job_set:
+    result = cli.run(to_run_config(job))
+    print(f"[{'OK' if result.success else 'FAIL'}] {job.parameters}")
 ```
 
 ## Development

@@ -5,7 +5,7 @@ This script demonstrates the Jinja templating workflow:
 1. Define a template for .jshc configuration files
 2. Define parameter values to sweep over
 3. Expand the template for each parameter combination
-4. Execute jobs against the Josh runtime
+4. Execute jobs against the Josh runtime via JoshCLI
 
 Prerequisites:
     pip install joshpy[jobs]
@@ -18,15 +18,15 @@ Usage:
 import argparse
 from pathlib import Path
 
-# Import joshpy jobs module
+# Import joshpy jobs and CLI modules
 from joshpy.jobs import (
     JobConfig,
     SweepConfig,
     SweepParameter,
     JobExpander,
-    JobRunner,
-    run_sweep,
+    to_run_config,
 )
+from joshpy.cli import JoshCLI
 
 
 def main():
@@ -75,7 +75,7 @@ def main():
     print()
 
     # ==================================================================
-    # Method 1: Using JobConfig + JobExpander + JobRunner (full control)
+    # Method 1: Using JobConfig + JobExpander + JoshCLI (full control)
     # ==================================================================
     print("Method 1: Full JobConfig workflow")
     print("-" * 40)
@@ -111,25 +111,29 @@ def main():
         print()
 
     if args.dry_run:
-        print("DRY RUN - Commands that would be executed:")
-        runner = JobRunner(josh_jar=args.jar)
+        print("DRY RUN - Jobs that would be executed:")
         for job in job_set.jobs:
-            cmd = runner.build_command(job)
-            print(f"  {' '.join(cmd)}")
+            run_config = to_run_config(job)
+            print(f"  Simulation: {run_config.simulation}")
+            print(f"    Script: {run_config.script}")
+            print(f"    Data: {run_config.data}")
         job_set.cleanup()
     else:
-        # Execute jobs
+        # Execute jobs using JoshCLI
         print("Executing jobs...")
-        runner = JobRunner(josh_jar=args.jar)
+        cli = JoshCLI(josh_jar=args.jar)
+        results = []
 
-        def on_complete(result):
+        for job in job_set.jobs:
+            run_config = to_run_config(job)
+            result = cli.run(run_config)
+            results.append(result)
             status = "OK" if result.success else "FAIL"
-            params = result.job.parameters
-            print(f"  [{status}] maxGrowth={params.get('maxGrowth')}")
+            print(f"  [{status}] maxGrowth={job.parameters.get('maxGrowth')}")
             if not result.success:
                 print(f"    Error: {result.stderr[:200]}")
 
-        results = runner.run_all(job_set, on_complete=on_complete)
+        job_set.cleanup()
 
         # Summary
         print()
@@ -141,31 +145,25 @@ def main():
     print("=" * 60)
 
     # ==================================================================
-    # Method 2: Using run_sweep() convenience function
+    # Method 2: Using JoshCLI directly
     # ==================================================================
-    print("Method 2: Using run_sweep() convenience function")
+    print("Method 2: Using JoshCLI directly")
     print("-" * 40)
 
     print("Code example:")
     print('''
-    from joshpy.jobs import run_sweep
+    from joshpy.jobs import JobExpander, to_run_config
+    from joshpy.cli import JoshCLI
 
-    results = run_sweep(
-        template=Path("templates/sweep_config.jshc.j2"),
-        source=Path("hello_cli_configurable.josh"),
-        parameters={"maxGrowth": [1, 5, 10]},
-        josh_jar=Path("joshsim-fat.jar"),
-    )
+    expander = JobExpander()
+    job_set = expander.expand(config)
+
+    cli = JoshCLI()
+    for job in job_set:
+        run_config = to_run_config(job)
+        result = cli.run(run_config)
+        print(f"[{'OK' if result.success else 'FAIL'}] {job.parameters}")
     ''')
-
-    if not args.dry_run:
-        results = run_sweep(
-            template=template_path,
-            source=source_path,
-            parameters={"maxGrowth": [1, 5, 10]},
-            josh_jar=args.jar,
-        )
-        print(f"Results: {sum(1 for r in results if r.success)}/{len(results)} succeeded")
 
     print()
     print("=" * 60)

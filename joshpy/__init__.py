@@ -22,6 +22,18 @@ from joshpy.jar import (
     get_jar_version,
 )
 
+# CLI module (always available)
+from joshpy.cli import (
+    JoshCLI,
+    CLIResult,
+    RunConfig,
+    RunRemoteConfig,
+    PreprocessConfig,
+    ValidateConfig,
+    DiscoverConfigConfig,
+    InspectJshdConfig,
+)
+
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
@@ -31,9 +43,8 @@ try:
         ExpandedJob,
         JobSet,
         JobExpander,
-        JobRunner,
-        JobResult,
-        run_sweep,
+        to_run_config,
+        to_run_remote_config,
         compute_config_hash,
     )
     HAS_JOBS = True
