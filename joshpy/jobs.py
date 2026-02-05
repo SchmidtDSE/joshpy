@@ -54,7 +54,7 @@ except ImportError:
     HAS_NUMPY = False
 
 try:
-    from jinja2 import BaseLoader, Environment, FileSystemLoader
+    from jinja2 import Environment, FileSystemLoader
 
     HAS_JINJA2 = True
 except ImportError:
@@ -494,7 +494,10 @@ class JobExpander:
             self.jinja_env = Environment(autoescape=False)
 
     def expand(
-        self, config: JobConfig, output_dir: Path | None = None, config_name: str = "sweep_config.jshc"
+        self,
+        config: JobConfig,
+        output_dir: Path | None = None,
+        config_name: str = "sweep_config.jshc",
     ) -> JobSet:
         """Expand a JobConfig into a JobSet with one ExpandedJob per parameter combo.
 
