@@ -1,12 +1,14 @@
 """Job orchestration for parameter sweeps with Jinja templating.
 
 This module enables Python users to programmatically generate .jshc configuration
-files using Jinja templating, expand parameter sweeps into concrete job combinations,
-and execute them against the Josh runtime.
+files using Jinja templating and expand parameter sweeps into concrete job combinations.
+
+For execution, use the JoshCLI class from joshpy.cli module.
 
 Example usage:
     from pathlib import Path
-    from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, JobRunner
+    from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, to_run_config
+    from joshpy.cli import JoshCLI
 
     config = JobConfig(
         template_path=Path("templates/forestsim.jshc.j2"),
@@ -23,8 +25,11 @@ Example usage:
     expander = JobExpander()
     job_set = expander.expand(config)
 
-    runner = JobRunner(josh_jar=Path("joshsim.jar"))
-    results = runner.run_all(job_set)
+    cli = JoshCLI()
+    for job in job_set:
+        run_config = to_run_config(job)
+        result = cli.run(run_config)
+        print(f"[{'OK' if result.success else 'FAIL'}] {job.parameters}")
 """
 
 from __future__ import annotations
@@ -32,12 +37,14 @@ from __future__ import annotations
 import hashlib
 import itertools
 import shutil
-import subprocess
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from joshpy.cli import RunConfig, RunRemoteConfig
 
 try:
     import numpy as np
@@ -578,302 +585,103 @@ class JobExpander:
         )
 
 
-@dataclass
-class JobResult:
-    """Result from executing a single job.
+def to_run_config(job: ExpandedJob) -> RunConfig:
+    """Convert an ExpandedJob to a RunConfig for CLI execution.
 
-    Attributes:
-        job: The executed job.
-        exit_code: Process exit code.
-        stdout: Standard output.
-        stderr: Standard error.
-        command: The command that was executed.
-    """
-
-    job: ExpandedJob
-    exit_code: int
-    stdout: str
-    stderr: str
-    command: list[str]
-
-    @property
-    def success(self) -> bool:
-        """Return True if job completed successfully."""
-        return self.exit_code == 0
-
-
-@dataclass
-class JobRunner:
-    """Executes ExpandedJobs via subprocess (calls Josh CLI).
-
-    Supports three jar modes:
-    - Path: Use a specific jar file
-    - JarMode.PROD: Use production jar from joshsim.org (default)
-    - JarMode.DEV: Use development jar from joshsim.org
-    - JarMode.LOCAL: Use local jar from jar/joshsim-fat.jar
-
-    Attributes:
-        josh_jar: Path to jar, JarMode enum, or None for default (PROD).
-        java_path: Path to java executable.
-        working_dir: Working directory for job execution.
-        jar_dir: Directory for downloaded jars (default: ./jar/).
-        auto_download: If True, download jars automatically if needed.
-
-    Example:
-        # Use production jar (downloads if needed)
-        runner = JobRunner()
-
-        # Use development jar
-        runner = JobRunner(josh_jar=JarMode.DEV)
-
-        # Use specific jar file
-        runner = JobRunner(josh_jar=Path("my-custom.jar"))
-    """
-
-    josh_jar: Path | None = None  # None means use default (PROD)
-    java_path: str = "java"
-    working_dir: Path | None = None
-    jar_dir: Path | None = None
-    auto_download: bool = True
-
-    # Resolved jar path (set in __post_init__)
-    _resolved_jar: Path = field(default=None, init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        """Resolve jar path based on josh_jar setting."""
-        from joshpy.jar import JarManager, JarMode
-
-        manager = JarManager(jar_dir=self.jar_dir, java_path=self.java_path)
-
-        if self.josh_jar is None:
-            # Default to PROD
-            self._resolved_jar = manager.get_jar(JarMode.PROD, auto_download=self.auto_download)
-        elif isinstance(self.josh_jar, JarMode):
-            # JarMode enum
-            self._resolved_jar = manager.get_jar(self.josh_jar, auto_download=self.auto_download)
-        elif isinstance(self.josh_jar, (str, Path)):
-            # Explicit path
-            self._resolved_jar = Path(self.josh_jar)
-            if not self._resolved_jar.exists():
-                raise FileNotFoundError(f"JAR file not found: {self._resolved_jar}")
-        else:
-            raise TypeError(f"josh_jar must be Path, JarMode, or None, got {type(self.josh_jar)}")
-
-        # Ensure jar path is absolute since we may change working directories
-        self._resolved_jar = self._resolved_jar.resolve()
-
-    def build_command(self, job: ExpandedJob) -> list[str]:
-        """Build the CLI command for a job.
-
-        Args:
-            job: The job to build command for.
-
-        Returns:
-            List of command arguments.
-        """
-        cmd = [
-            self.java_path,
-            "-jar",
-            str(self._resolved_jar),
-            "run",
-        ]
-
-        # Source file
-        if job.source_path:
-            cmd.append(str(job.source_path.resolve()))
-
-        # Simulation name
-        cmd.append(job.simulation)
-
-        # Replicates
-        if job.replicates > 1:
-            cmd.extend(["--replicates", str(job.replicates)])
-
-        # Config file via --data flag with absolute path
-        cmd.extend(["--data", f"{job.config_name}={job.config_path.resolve()}"])
-
-        # File mappings (use absolute paths)
-        for name, path in job.file_mappings.items():
-            cmd.extend(["--data", f"{name}={path.resolve()}"])
-
-        # Custom tags (for path template resolution)
-        for name, value in job.custom_tags.items():
-            cmd.extend(["--custom-tag", f"{name}={value}"])
-
-        # Upload paths
-        if job.upload_source_path:
-            cmd.extend(["--upload-source-path", job.upload_source_path])
-        if job.upload_config_path:
-            cmd.extend(["--upload-config-path", job.upload_config_path])
-        if job.upload_data_path:
-            cmd.extend(["--upload-data-path", job.upload_data_path])
-
-        # Note: Export paths are configured in the .jshc file itself, not as CLI args.
-        # Josh resolves template variables like {maxGrowth} and {replicate} from --custom-tag args.
-
-        # Other options
-        if job.output_steps:
-            cmd.extend(["--output-steps", job.output_steps])
-        if job.seed is not None:
-            cmd.extend(["--seed", str(job.seed)])
-        if job.crs:
-            cmd.extend(["--crs", job.crs])
-        if job.use_float64:
-            cmd.append("--use-float-64")
-
-        return cmd
-
-    def run(
-        self, job: ExpandedJob, timeout: float | None = None, capture_output: bool = True
-    ) -> JobResult:
-        """Execute a single job.
-
-        Args:
-            job: The job to execute.
-            timeout: Timeout in seconds (None for no timeout).
-            capture_output: Whether to capture stdout/stderr.
-
-        Returns:
-            JobResult with execution details.
-        """
-        cmd = self.build_command(job)
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=capture_output,
-                text=True,
-                timeout=timeout,
-                cwd=self.working_dir,
-            )
-            return JobResult(
-                job=job,
-                exit_code=proc.returncode,
-                stdout=proc.stdout if capture_output else "",
-                stderr=proc.stderr if capture_output else "",
-                command=cmd,
-            )
-        except subprocess.TimeoutExpired:
-            return JobResult(
-                job=job,
-                exit_code=-1,
-                stdout="",
-                stderr=f"Job timed out after {timeout} seconds",
-                command=cmd,
-            )
-        except Exception as e:
-            return JobResult(
-                job=job,
-                exit_code=-1,
-                stdout="",
-                stderr=str(e),
-                command=cmd,
-            )
-
-    def run_all(
-        self,
-        job_set: JobSet,
-        *,
-        cleanup: bool = True,
-        timeout: float | None = None,
-        on_complete: Callable[[JobResult], None] | None = None,
-    ) -> list[JobResult]:
-        """Execute all jobs in a JobSet sequentially.
-
-        Args:
-            job_set: Collection of jobs to execute.
-            cleanup: Whether to cleanup temp files after completion.
-            timeout: Timeout per job in seconds.
-            on_complete: Callback called after each job completes.
-
-        Returns:
-            List of JobResults in same order as jobs.
-        """
-        results = []
-
-        try:
-            for job in job_set.jobs:
-                result = self.run(job, timeout=timeout)
-                results.append(result)
-                if on_complete:
-                    on_complete(result)
-        finally:
-            if cleanup:
-                job_set.cleanup()
-
-        return results
-
-
-# Convenience function for simple sweeps
-def run_sweep(
-    template: str | Path,
-    source: Path,
-    parameters: dict[str, Sequence[Any]],
-    josh_jar: Path | None = None,
-    simulation: str = "Main",
-    replicates: int = 1,
-    **kwargs: Any,
-) -> list[JobResult]:
-    """Convenience function to run a parameter sweep.
+    This helper function bridges the job expansion system with the CLI layer,
+    allowing expanded jobs to be executed via JoshCLI.
 
     Args:
-        template: Jinja template string or path to template file.
-        source: Path to .josh source file.
-        parameters: Dict mapping parameter names to lists of values.
-        josh_jar: Path to jar, JarMode, or None for default (PROD).
-        simulation: Simulation name.
-        replicates: Number of replicates per job.
-        **kwargs: Additional arguments passed to JobConfig.
+        job: The expanded job to convert.
 
     Returns:
-        List of JobResults.
+        RunConfig ready for use with JoshCLI.run().
+
+    Raises:
+        ValueError: If job.source_path is None.
 
     Example:
-        # Using default (production) jar
-        results = run_sweep(
-            template="maxGrowth = {{ maxGrowth }} meters",
-            source=Path("hello.josh"),
-            parameters={"maxGrowth": [1, 5, 10]},
-        )
+        from joshpy.jobs import JobExpander, to_run_config
+        from joshpy.cli import JoshCLI
 
-        # Using development jar
-        from joshpy.jar import JarMode
-        results = run_sweep(
-            template="maxGrowth = {{ maxGrowth }} meters",
-            source=Path("hello.josh"),
-            parameters={"maxGrowth": [1, 5, 10]},
-            josh_jar=JarMode.DEV,
-        )
+        expander = JobExpander()
+        job_set = expander.expand(config)
+
+        cli = JoshCLI()
+        for job in job_set:
+            run_config = to_run_config(job)
+            result = cli.run(run_config)
     """
-    # Build sweep config
-    sweep_params = [
-        SweepParameter(name=name, values=list(values)) for name, values in parameters.items()
-    ]
-    sweep = SweepConfig(parameters=sweep_params)
+    from joshpy.cli import RunConfig
 
-    # Build job config
-    if isinstance(template, Path):
-        config = JobConfig(
-            template_path=template,
-            source_path=source,
-            simulation=simulation,
-            replicates=replicates,
-            sweep=sweep,
-            **kwargs,
-        )
-    else:
-        config = JobConfig(
-            template_string=template,
-            source_path=source,
-            simulation=simulation,
-            replicates=replicates,
-            sweep=sweep,
-            **kwargs,
-        )
+    if job.source_path is None:
+        raise ValueError("ExpandedJob.source_path is required for to_run_config()")
 
-    # Expand and run
-    expander = JobExpander()
-    job_set = expander.expand(config)
+    # Build data dict: config file + any additional file mappings
+    data = {job.config_name: job.config_path}
+    data.update(job.file_mappings)
 
-    runner = JobRunner(josh_jar=josh_jar)
-    return runner.run_all(job_set)
+    return RunConfig(
+        script=job.source_path,
+        simulation=job.simulation,
+        replicates=job.replicates,
+        data=data,
+        custom_tags=job.custom_tags,
+        crs=job.crs,
+        use_float64=job.use_float64,
+        output_steps=job.output_steps,
+        seed=job.seed,
+    )
+
+
+def to_run_remote_config(
+    job: ExpandedJob,
+    api_key: str,
+    endpoint: str | None = None,
+) -> RunRemoteConfig:
+    """Convert an ExpandedJob to a RunRemoteConfig for cloud execution.
+
+    This helper function bridges the job expansion system with the CLI layer,
+    allowing expanded jobs to be executed on Josh Cloud via JoshCLI.
+
+    Args:
+        job: The expanded job to convert.
+        api_key: Josh Cloud API key.
+        endpoint: Custom Josh Cloud endpoint URL (optional).
+
+    Returns:
+        RunRemoteConfig ready for use with JoshCLI.run_remote().
+
+    Raises:
+        ValueError: If job.source_path is None.
+
+    Example:
+        from joshpy.jobs import JobExpander, to_run_remote_config
+        from joshpy.cli import JoshCLI
+
+        expander = JobExpander()
+        job_set = expander.expand(config)
+
+        cli = JoshCLI()
+        for job in job_set:
+            run_config = to_run_remote_config(job, api_key="your-api-key")
+            result = cli.run_remote(run_config)
+    """
+    from joshpy.cli import RunRemoteConfig
+
+    if job.source_path is None:
+        raise ValueError("ExpandedJob.source_path is required for to_run_remote_config()")
+
+    # Build data dict: config file + any additional file mappings
+    data = {job.config_name: job.config_path}
+    data.update(job.file_mappings)
+
+    return RunRemoteConfig(
+        script=job.source_path,
+        simulation=job.simulation,
+        api_key=api_key,
+        replicates=job.replicates,
+        endpoint=endpoint,
+        data=data,
+        custom_tags=job.custom_tags,
+    )
