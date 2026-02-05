@@ -3,7 +3,6 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 from joshpy.jobs import (
     SweepParameter,
@@ -12,11 +11,10 @@ from joshpy.jobs import (
     ExpandedJob,
     JobSet,
     JobExpander,
-    JobRunner,
-    JobResult,
     compute_config_hash,
     _normalize_values,
-    run_sweep,
+    to_run_config,
+    to_run_remote_config,
 )
 
 
@@ -405,15 +403,11 @@ class TestJobSet(unittest.TestCase):
             self.assertIsNone(job_set.temp_dir)
 
 
-class TestJobRunner(unittest.TestCase):
-    """Tests for JobRunner class."""
+class TestToRunConfig(unittest.TestCase):
+    """Tests for to_run_config function."""
 
-    # Use the local jar that exists in the repo
-    JAR_PATH = Path(__file__).parent.parent / "jar" / "joshsim-fat.jar"
-
-    def test_build_command_basic(self):
-        """Build command should include basic options."""
-        runner = JobRunner(josh_jar=self.JAR_PATH)
+    def test_basic_conversion(self):
+        """Basic job should convert to RunConfig."""
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
@@ -425,18 +419,16 @@ class TestJobRunner(unittest.TestCase):
             source_path=Path("/path/to/source.josh"),
         )
 
-        cmd = runner.build_command(job)
+        run_config = to_run_config(job)
 
-        self.assertIn("java", cmd)
-        self.assertIn("-jar", cmd)
-        self.assertIn("run", cmd)
-        self.assertIn("Main", cmd)
-        # Source path should be resolved to absolute
-        self.assertTrue(any("source.josh" in c for c in cmd))
+        self.assertEqual(run_config.script, Path("/path/to/source.josh"))
+        self.assertEqual(run_config.simulation, "Main")
+        self.assertEqual(run_config.replicates, 1)
+        self.assertIn("editor", run_config.data)
+        self.assertEqual(run_config.data["editor"], Path("/tmp/editor.jshc"))
 
-    def test_build_command_with_replicates(self):
-        """Build command should include replicates when > 1."""
-        runner = JobRunner(josh_jar=self.JAR_PATH)
+    def test_with_replicates(self):
+        """Job with replicates should convert correctly."""
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
@@ -445,16 +437,15 @@ class TestJobRunner(unittest.TestCase):
             parameters={},
             simulation="Main",
             replicates=5,
+            source_path=Path("/path/to/source.josh"),
         )
 
-        cmd = runner.build_command(job)
+        run_config = to_run_config(job)
 
-        replicates_idx = cmd.index("--replicates")
-        self.assertEqual(cmd[replicates_idx + 1], "5")
+        self.assertEqual(run_config.replicates, 5)
 
-    def test_build_command_with_custom_tags(self):
-        """Build command should include custom tags."""
-        runner = JobRunner(josh_jar=self.JAR_PATH)
+    def test_with_custom_tags(self):
+        """Job with custom tags should include them in config."""
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
@@ -463,21 +454,17 @@ class TestJobRunner(unittest.TestCase):
             parameters={"x": 1},
             simulation="Main",
             replicates=1,
+            source_path=Path("/path/to/source.josh"),
             custom_tags={"x": "1", "y": "test"},
         )
 
-        cmd = runner.build_command(job)
+        run_config = to_run_config(job)
 
-        # Check custom tags are included
-        self.assertIn("--custom-tag", cmd)
-        tag_indices = [i for i, c in enumerate(cmd) if c == "--custom-tag"]
-        tags = [cmd[i + 1] for i in tag_indices]
-        self.assertIn("x=1", tags)
-        self.assertIn("y=test", tags)
+        self.assertEqual(run_config.custom_tags["x"], "1")
+        self.assertEqual(run_config.custom_tags["y"], "test")
 
-    def test_build_command_with_options(self):
-        """Build command should include all options."""
-        runner = JobRunner(josh_jar=self.JAR_PATH)
+    def test_with_options(self):
+        """Job with options should include them in config."""
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
@@ -486,32 +473,22 @@ class TestJobRunner(unittest.TestCase):
             parameters={},
             simulation="Main",
             replicates=1,
+            source_path=Path("/path/to/source.josh"),
             seed=42,
             crs="EPSG:4326",
             use_float64=True,
             output_steps="0-10",
         )
 
-        cmd = runner.build_command(job)
+        run_config = to_run_config(job)
 
-        self.assertIn("--seed", cmd)
-        self.assertIn("42", cmd)
-        self.assertIn("--crs", cmd)
-        self.assertIn("EPSG:4326", cmd)
-        self.assertIn("--use-float-64", cmd)
-        self.assertIn("--output-steps", cmd)
-        self.assertIn("0-10", cmd)
+        self.assertEqual(run_config.seed, 42)
+        self.assertEqual(run_config.crs, "EPSG:4326")
+        self.assertTrue(run_config.use_float64)
+        self.assertEqual(run_config.output_steps, "0-10")
 
-    @patch('subprocess.run')
-    def test_run_success(self, mock_run):
-        """Run should return success result on exit code 0."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="output",
-            stderr=""
-        )
-
-        runner = JobRunner(josh_jar=self.JAR_PATH)
+    def test_with_file_mappings(self):
+        """Job with file mappings should include them in data dict."""
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
@@ -520,24 +497,18 @@ class TestJobRunner(unittest.TestCase):
             parameters={},
             simulation="Main",
             replicates=1,
+            source_path=Path("/path/to/source.josh"),
+            file_mappings={"data": Path("/path/to/data.jshd")},
         )
 
-        result = runner.run(job)
+        run_config = to_run_config(job)
 
-        self.assertTrue(result.success)
-        self.assertEqual(result.exit_code, 0)
-        self.assertEqual(result.stdout, "output")
+        self.assertIn("editor", run_config.data)
+        self.assertIn("data", run_config.data)
+        self.assertEqual(run_config.data["data"], Path("/path/to/data.jshd"))
 
-    @patch('subprocess.run')
-    def test_run_failure(self, mock_run):
-        """Run should return failure result on non-zero exit code."""
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-            stderr="error message"
-        )
-
-        runner = JobRunner(josh_jar=self.JAR_PATH)
+    def test_missing_source_path_raises(self):
+        """Job without source_path should raise ValueError."""
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
@@ -546,57 +517,89 @@ class TestJobRunner(unittest.TestCase):
             parameters={},
             simulation="Main",
             replicates=1,
+            source_path=None,
         )
 
-        result = runner.run(job)
-
-        self.assertFalse(result.success)
-        self.assertEqual(result.exit_code, 1)
-        self.assertEqual(result.stderr, "error message")
+        with self.assertRaises(ValueError):
+            to_run_config(job)
 
 
-class TestJobResult(unittest.TestCase):
-    """Tests for JobResult class."""
+class TestToRunRemoteConfig(unittest.TestCase):
+    """Tests for to_run_remote_config function."""
 
-    def test_success_property(self):
-        """success should be True for exit_code 0."""
+    def test_basic_conversion(self):
+        """Basic job should convert to RunRemoteConfig."""
         job = ExpandedJob(
             config_content="test",
-            config_path=Path("/tmp/test"),
-            config_name="test",
-            config_hash="abc",
+            config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
+            config_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
+            source_path=Path("/path/to/source.josh"),
         )
-        result = JobResult(
-            job=job,
-            exit_code=0,
-            stdout="",
-            stderr="",
-            command=["java", "-jar", "test.jar"],
-        )
-        self.assertTrue(result.success)
 
-    def test_failure_property(self):
-        """success should be False for non-zero exit_code."""
+        run_config = to_run_remote_config(job, api_key="test-key")
+
+        self.assertEqual(run_config.script, Path("/path/to/source.josh"))
+        self.assertEqual(run_config.simulation, "Main")
+        self.assertEqual(run_config.api_key, "test-key")
+        self.assertIsNone(run_config.endpoint)
+
+    def test_with_endpoint(self):
+        """Job should convert with custom endpoint."""
         job = ExpandedJob(
             config_content="test",
-            config_path=Path("/tmp/test"),
-            config_name="test",
-            config_hash="abc",
+            config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
+            config_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
+            source_path=Path("/path/to/source.josh"),
         )
-        result = JobResult(
-            job=job,
-            exit_code=1,
-            stdout="",
-            stderr="",
-            command=["java", "-jar", "test.jar"],
+
+        run_config = to_run_remote_config(
+            job, api_key="test-key", endpoint="https://custom.josh.cloud"
         )
-        self.assertFalse(result.success)
+
+        self.assertEqual(run_config.endpoint, "https://custom.josh.cloud")
+
+    def test_with_custom_tags(self):
+        """Job with custom tags should include them in config."""
+        job = ExpandedJob(
+            config_content="test",
+            config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
+            config_hash="abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=Path("/path/to/source.josh"),
+            custom_tags={"x": "1", "param": "value"},
+        )
+
+        run_config = to_run_remote_config(job, api_key="test-key")
+
+        self.assertEqual(run_config.custom_tags["x"], "1")
+        self.assertEqual(run_config.custom_tags["param"], "value")
+
+    def test_missing_source_path_raises(self):
+        """Job without source_path should raise ValueError."""
+        job = ExpandedJob(
+            config_content="test",
+            config_path=Path("/tmp/editor.jshc"),
+            config_name="editor",
+            config_hash="abc123",
+            parameters={},
+            simulation="Main",
+            replicates=1,
+            source_path=None,
+        )
+
+        with self.assertRaises(ValueError):
+            to_run_remote_config(job, api_key="test-key")
 
 
 if __name__ == '__main__':

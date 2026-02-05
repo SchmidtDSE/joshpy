@@ -543,12 +543,13 @@ class TestRegistryCallback(unittest.TestCase):
 
     def test_callback_records_success(self):
         """Callback should record successful run."""
-        from joshpy.jobs import ExpandedJob, JobResult
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import ExpandedJob
         from joshpy.registry import RegistryCallback
 
         callback = RegistryCallback(self.registry, self.session_id)
 
-        # Create mock job result
+        # Create mock job and result
         job = ExpandedJob(
             config_content="test",
             config_path=Path("/tmp/test.jshc"),
@@ -558,16 +559,15 @@ class TestRegistryCallback(unittest.TestCase):
             simulation="Main",
             replicates=1,
         )
-        result = JobResult(
-            job=job,
+        result = CLIResult(
             exit_code=0,
             stdout="success",
             stderr="",
             command=["java", "-jar", "test.jar"],
         )
 
-        # Call the callback
-        callback(result)
+        # Call the callback's record method
+        callback.record(job, result)
 
         # Verify run was recorded
         runs = self.registry.get_runs_for_config("test_hash")
@@ -577,7 +577,8 @@ class TestRegistryCallback(unittest.TestCase):
 
     def test_callback_records_failure(self):
         """Callback should record failed run with error message."""
-        from joshpy.jobs import ExpandedJob, JobResult
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import ExpandedJob
         from joshpy.registry import RegistryCallback
 
         callback = RegistryCallback(self.registry, self.session_id)
@@ -591,31 +592,29 @@ class TestRegistryCallback(unittest.TestCase):
             simulation="Main",
             replicates=1,
         )
-        result = JobResult(
-            job=job,
+        result = CLIResult(
             exit_code=1,
             stdout="",
             stderr="Error: simulation failed",
             command=["java", "-jar", "test.jar"],
         )
 
-        callback(result)
+        callback.record(job, result)
 
         runs = self.registry.get_runs_for_config("test_hash")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].exit_code, 1)
         self.assertEqual(runs[0].error_message, "Error: simulation failed")
 
-    def test_callback_ignores_non_job_result(self):
-        """Callback should ignore non-JobResult arguments."""
+    def test_callback_rejects_invalid_types(self):
+        """Callback should raise TypeError for invalid arguments."""
         from joshpy.registry import RegistryCallback
 
         callback = RegistryCallback(self.registry, self.session_id)
 
-        # Should not raise
-        callback("not a job result")
-        callback(None)
-        callback({"dict": "value"})
+        # Should raise TypeError for invalid job type
+        with self.assertRaises(TypeError):
+            callback.record("not a job", "not a result")
 
         # No runs should be recorded
         runs = self.registry.get_runs_for_config("test_hash")
