@@ -847,53 +847,57 @@ class RunRegistry:
 
 @dataclass
 class RegistryCallback:
-    """Callback helper for integrating RunRegistry with JobRunner.
+    """Helper for recording CLI results in the registry.
 
-    This class provides a callable that can be passed to JobRunner.run_all()
-    as the on_complete callback. It automatically records run starts and
-    completions in the registry.
+    This class helps record the results of CLI executions in the registry,
+    tracking run starts and completions.
 
     Attributes:
         registry: The RunRegistry to record runs in.
         session_id: The session ID for the current sweep.
-        _run_ids: Internal mapping of config_hash+replicate to run_id.
 
     Example:
+        from joshpy.cli import JoshCLI
+        from joshpy.jobs import JobExpander, to_run_config
+
         registry = RunRegistry("experiment.duckdb")
         session_id = registry.create_session(...)
 
         callback = RegistryCallback(registry, session_id)
-        results = runner.run_all(job_set, on_complete=callback)
+        cli = JoshCLI()
+
+        for job in job_set:
+            run_config = to_run_config(job)
+            result = cli.run(run_config)
+            callback.record(job, result)
     """
 
     registry: RunRegistry
     session_id: str
-    _run_ids: dict[str, str] = field(default_factory=dict, repr=False)
 
-    def __call__(self, result: Any) -> str | None:
-        """Record a job result in the registry.
-
-        This is called by JobRunner after each job completes. It records
-        the run start and completion in a single operation.
+    def record(self, job: Any, result: Any) -> str:
+        """Record a job execution result in the registry.
 
         Args:
-            result: JobResult from the completed job.
+            job: ExpandedJob that was executed.
+            result: CLIResult from the CLI execution.
 
         Returns:
-            The run_id for the recorded run, or None if result is invalid.
+            The run_id for the recorded run.
         """
         # Import here to avoid circular dependency
-        from joshpy.jobs import JobResult
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import ExpandedJob
 
-        if not isinstance(result, JobResult):
-            return None
-
-        job = result.job
+        if not isinstance(job, ExpandedJob):
+            raise TypeError(f"Expected ExpandedJob, got {type(job)}")
+        if not isinstance(result, CLIResult):
+            raise TypeError(f"Expected CLIResult, got {type(result)}")
 
         # Create run record (records both start and completion)
         run_id = self.registry.start_run(
             config_hash=job.config_hash,
-            replicate=0,  # JobRunner runs all replicates at once
+            replicate=0,  # CLI runs all replicates at once
             output_path=str(job.config_path.parent) if job.config_path else None,
             metadata={"parameters": job.parameters},
         )
