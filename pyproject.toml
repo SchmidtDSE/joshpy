@@ -1,7 +1,8 @@
 [project]
 name = "joshpy"
-version = "0.0.1"
+version = "0.0.2"
 authors = [
+  { name="Nick Gondek", email="npg@berkeley.edu" },
   { name="A Samuel Pottinger", email="sam.pottinger@berkeley.edu" },
 ]
 description = "Tools for interacting with Josh simluations from Python."
