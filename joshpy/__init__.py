@@ -60,11 +60,13 @@ try:
         ConfigInfo,
         RunInfo,
         SessionSummary,
+        DataSummary,
     )
     from joshpy.cell_data import (
         CellDataLoader,
         DiagnosticQueries,
     )
+    from joshpy.diagnostics import SimulationDiagnostics
     HAS_REGISTRY = True
 except ImportError:
     HAS_REGISTRY = False
