@@ -27,7 +27,8 @@ This demo assumes familiarity with Josh's simulation language and runtime.
   config tracking
 - **Data Loading**: Import cell-level CSV exports into queryable tables
 - **Analysis**: Query results across parameter values and replicates
-- **Visualization**: Create plots comparing simulation outcomes
+- **Diagnostics**: Quick matplotlib visualizations for simulation sanity checks
+- **Visualization**: Create publication-quality plots with R/ggplot2 integration
 
 This demo walks through a complete parameter sweep workflow. We vary the
 `maxGrowth` parameter from 10 to 100 meters/step across 10 experiments, each
@@ -151,8 +152,9 @@ for job in job_set.jobs:
 
 ## Step 3: Run the Simulations
 
-The `JobRunner` executes jobs via the Josh CLI. It builds the appropriate
-command-line invocation including:
+The `JoshCLI` executes jobs via the Josh command-line interface. The `to_run_config()`
+helper converts an `ExpandedJob` to a `RunConfig` dataclass that maps directly to
+CLI arguments:
 
 - Source file and simulation name
 - Config file path (via `--data` flag)
@@ -162,14 +164,15 @@ command-line invocation including:
 The `RegistryCallback` automatically records run metadata as each job completes.
 
 ```{python}
-from joshpy.jobs import JobRunner
+from joshpy.cli import JoshCLI
+from joshpy.jobs import to_run_config
 from joshpy.registry import RegistryCallback
 
 # Update session status
 registry.update_session_status(session_id, "running")
 
-# Create runner targeting the local fat JAR
-runner = JobRunner(josh_jar=Path("../jar/joshsim-fat.jar"))
+# Create CLI targeting the local fat JAR
+cli = JoshCLI(josh_jar=Path("../jar/joshsim-fat.jar"))
 callback = RegistryCallback(registry, session_id)
 
 print("Running 10 experiments (3 replicates each)...")
@@ -177,16 +180,17 @@ print("=" * 60)
 
 results = []
 for job in job_set.jobs:
-    result = runner.run(job)
-    callback(result)
-    results.append(result)
+    run_config = to_run_config(job)
+    result = cli.run(run_config)
+    callback.record(job, result)
+    results.append((job, result))
     status = "OK" if result.success else "FAIL"
     print(f"[{status}] maxGrowth={job.parameters['maxGrowth']}")
     if not result.success:
         print(f"       Error: {result.stderr[:200]}...")
 
 print("=" * 60)
-succeeded = sum(1 for r in results if r.success)
+succeeded = sum(1 for _, r in results if r.success)
 print(f"Completed: {succeeded}/{len(results)} succeeded")
 
 # Update final session status
@@ -210,11 +214,10 @@ print("Loading CSV exports into registry...")
 total_loaded = 0
 files_found = 0
 
-for result in results:
+for job, result in results:
     if not result.success:
         continue
 
-    job = result.job
     mg = job.parameters["maxGrowth"]
 
     # Get run_id from registry (created by RegistryCallback)
@@ -236,12 +239,110 @@ for result in results:
 print(f"\nLoaded {total_loaded:,} rows from {files_found} files")
 ```
 
-## Step 5: Query Results
+## Step 5: Diagnostic Plotting (Python)
 
-The `DiagnosticQueries` class provides ready-made queries for common analysis
-patterns. The `get_parameter_comparison()` method aggregates a variable across
-parameter values and timesteps, computing mean and standard deviation across
-replicates.
+The `SimulationDiagnostics` class provides quick matplotlib-based visualizations
+for simulation sanity checks - useful for verifying that simulations behave as
+expected before deeper analysis.
+
+### Discover Available Data
+
+First, let's see what data is available in the registry:
+
+```{python}
+# Get summary of loaded data
+summary = registry.get_data_summary()
+print(summary)
+```
+
+We can also query individual lists:
+
+```{python}
+print(f"Variables: {registry.list_variables()}")
+print(f"Parameters: {registry.list_parameters()}")
+print(f"Entity types: {registry.list_entity_types()}")
+```
+
+### Time Series Visualization
+
+The `plot_timeseries()` method shows how a variable evolves over simulation steps.
+By default, it spatially aggregates across patches and shows uncertainty bands
+across replicates.
+
+```{python}
+#| label: fig-diag-timeseries
+#| fig-cap: "Tree height over time for maxGrowth=50, with uncertainty bands across replicates."
+
+from joshpy.diagnostics import SimulationDiagnostics
+
+diag = SimulationDiagnostics(registry)
+
+# Plot time series for a specific parameter value
+# Filter by maxGrowth=50 to see a single experiment
+diag.plot_timeseries(
+    "averageHeight",
+    maxGrowth=50,
+    title="Average Tree Height Over Time (maxGrowth=50)",
+    show=True,
+)
+```
+
+### Parameter Comparison
+
+The `plot_comparison()` method compares a variable across different parameter
+values - ideal for visualizing parameter sweep results.
+
+```{python}
+#| label: fig-diag-comparison
+#| fig-cap: "Tree height trajectories across all maxGrowth parameter values."
+
+# Compare averageHeight across all maxGrowth values
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    title="Tree Height by Growth Rate Parameter",
+    show=True,
+)
+```
+
+We can also create a bar chart at a specific timestep:
+
+```{python}
+#| label: fig-diag-barchart
+#| fig-cap: "Final tree height at step 10 for each maxGrowth value."
+
+# Bar chart at final step
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    step=10,
+    title="Final Tree Height vs Growth Rate",
+    show=True,
+)
+```
+
+### Saving Figures
+
+All plot methods return a matplotlib Figure that can be saved:
+
+```{python}
+# Save to file instead of showing inline
+fig = diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    show=False,
+)
+fig.savefig("/tmp/diagnostic_comparison.png", dpi=150, bbox_inches="tight")
+print("Saved to /tmp/diagnostic_comparison.png")
+```
+
+## Step 6: Visualize Results (R)
+
+For publication-quality figures or more customized visualizations, we can pass
+data to R for visualization using ggplot2. The `DiagnosticQueries` class provides
+ready-made queries that return pandas DataFrames, which we can export to CSV for R.
+
+First, let's query the data and export it:
 
 ```{python}
 from joshpy.cell_data import DiagnosticQueries
@@ -263,10 +364,7 @@ if not df.empty:
     print("\nSaved results to /tmp/sweep_results.csv")
 ```
 
-## Step 6: Visualize Results
-
-With data in a pandas DataFrame, we can pass it to R for visualization using
-ggplot2. We'll create two plots:
+Now we can use ggplot2 in R to create publication-quality figures:
 
 1. **Time series**: Tree height over simulation steps with ribbon for uncertainty
 2. **Bar chart**: Final height vs growth rate parameter with error bars
@@ -349,14 +447,27 @@ This demo illustrated the core joshpy workflow:
 3. **Execute** simulations via `JobRunner` with automatic tracking
 4. **Load** CSV outputs into queryable DuckDB tables
 5. **Query** results across parameters using `DiagnosticQueries`
-6. **Visualize** parameter sensitivity with ggplot2 in R
+6. **Diagnose** simulation behavior with `SimulationDiagnostics` (Python/matplotlib)
+7. **Visualize** publication-quality figures with ggplot2 (R)
 
 The registry-backed approach ensures reproducibility and enables complex
 queries joining parameters with results across multiple experiments.
 
+**Diagnostic Plotting**: The `SimulationDiagnostics` class provides quick
+matplotlib-based visualizations for sanity checks during development:
+
+- `plot_timeseries()`: Variable evolution over time with uncertainty bands
+- `plot_comparison()`: Compare across parameter values (time series or bar chart)
+- `plot_spatial()`: Spatial snapshots at specific timesteps
+
+**Discovery Methods**: Before plotting, use `registry.get_data_summary()`,
+`registry.list_variables()`, and `registry.list_parameters()` to see what
+data is available.
+
 This document also demonstrates Quarto's ability to seamlessly combine R and
 Python in the same workflow using `reticulate`. Python handles the simulation
-orchestration and data querying, while R handles visualization with ggplot2.
+orchestration, data querying, and quick diagnostics, while R handles
+publication-quality visualization with ggplot2.
 
 ## Cleanup
 
