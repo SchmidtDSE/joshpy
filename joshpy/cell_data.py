@@ -233,6 +233,18 @@ class CellDataLoader:
 
         conn.execute(insert_sql)
 
+        # Populate geometry column if spatial is enabled
+        if hasattr(self.registry, 'enable_spatial') and self.registry.enable_spatial:
+            try:
+                conn.execute("""
+                    UPDATE cell_data
+                    SET geom = ST_Point(longitude, latitude)
+                    WHERE geom IS NULL AND longitude IS NOT NULL AND latitude IS NOT NULL
+                """)
+            except Exception:
+                # Spatial extension may not be available or geometry column may not exist
+                pass
+
         # Get row count
         count_result = conn.execute(
             f"SELECT COUNT(*) FROM read_csv_auto('{csv_path_str}')"
@@ -301,6 +313,22 @@ class DiagnosticQueries:
 
         self.registry = registry
 
+    def _print_sql(self, sql: str, params: list) -> None:
+        """Print SQL query for copy/paste modification.
+
+        Args:
+            sql: The SQL query string.
+            params: List of parameter values.
+        """
+        print("Replicate this query using:")
+        print("    df = registry.query('''")
+        # Clean up the SQL for display
+        cleaned_sql = sql.strip()
+        for line in cleaned_sql.split("\n"):
+            print(f"        {line.strip()}")
+        print(f"    ''', {params}).df()")
+        print()
+
     def get_cell_timeseries(
         self,
         longitude: float,
@@ -308,6 +336,7 @@ class DiagnosticQueries:
         variable: str,
         config_hash: str | None = None,
         tolerance: float = 0.01,
+        show_sql: bool = False,
     ) -> Any:
         """Get time series for a specific location.
 
@@ -317,6 +346,7 @@ class DiagnosticQueries:
             variable: Variable name to extract (e.g., "treeCount").
             config_hash: Optional filter by config hash.
             tolerance: Spatial tolerance in degrees (default: ~1km at equator).
+            show_sql: If True, print the SQL query for copy/paste modification.
 
         Returns:
             DataFrame with columns: step, replicate, value, config_hash.
@@ -333,7 +363,7 @@ class DiagnosticQueries:
             WHERE longitude BETWEEN ? AND ?
               AND latitude BETWEEN ? AND ?
         """
-        params = [
+        params: list = [
             f"$.{variable}",
             longitude - tolerance,
             longitude + tolerance,
@@ -346,6 +376,9 @@ class DiagnosticQueries:
             params.append(config_hash)
 
         query += " ORDER BY config_hash, replicate, step"
+
+        if show_sql:
+            self._print_sql(query, params)
 
         return self.registry.conn.execute(query, params).df()
 
@@ -392,6 +425,7 @@ class DiagnosticQueries:
         param_name: str,
         step: int | None = None,
         aggregation: str = "AVG",
+        show_sql: bool = False,
     ) -> Any:
         """Compare a variable across parameter values.
 
@@ -400,6 +434,7 @@ class DiagnosticQueries:
             param_name: Parameter name to group by.
             step: Optional timestep filter (if None, groups by step).
             aggregation: Aggregation function (AVG, MIN, MAX, SUM).
+            show_sql: If True, print the SQL query for copy/paste modification.
 
         Returns:
             DataFrame with columns: param_value, step, mean_value, std_value, n_cells.
@@ -424,6 +459,10 @@ class DiagnosticQueries:
         """
 
         params = [step] if step else []
+
+        if show_sql:
+            self._print_sql(query, params)
+
         return self.registry.conn.execute(query, params).df()
 
     def get_replicate_uncertainty(
