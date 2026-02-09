@@ -58,8 +58,9 @@ Generate multiple configuration files from a single template:
 
 ```python
 from pathlib import Path
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, to_run_config
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, run_sweep
 from joshpy.cli import JoshCLI
+from joshpy.registry import RunRegistry, RegistryCallback
 
 # Define sweep configuration
 config = JobConfig(
@@ -77,14 +78,17 @@ config = JobConfig(
 # Expand to 3x3 = 9 concrete jobs
 expander = JobExpander()
 job_set = expander.expand(config)
+print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicates)")
 
-# Execute via Josh CLI
+# Setup tracking (optional)
+registry = RunRegistry("experiment.duckdb")
+session_id = registry.create_session(experiment_name="my_sweep")
+callback = RegistryCallback(registry, session_id)
+
+# Execute with run_sweep()
 cli = JoshCLI()
-for job in job_set:
-    run_config = to_run_config(job)
-    result = cli.run(run_config)
-    status = "OK" if result.success else "FAIL"
-    print(f"[{status}] {job.parameters}")
+results = run_sweep(cli, job_set, callback=callback.record)
+print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
 ```
 
 ### Direct CLI Usage
@@ -180,6 +184,8 @@ loader.load_csv(Path("output.csv"), run_id, config_hash)
 
 # Discover what's available
 print(registry.get_data_summary())
+print(f"Export variables: {registry.list_export_variables()}")
+print(f"Config parameters: {registry.list_config_parameters()}")
 
 # Create diagnostics helper
 diag = SimulationDiagnostics(registry)
@@ -187,14 +193,15 @@ diag = SimulationDiagnostics(registry)
 # Time series with uncertainty bands
 diag.plot_timeseries("averageAge", config_hash="abc123")
 
-# Compare across parameter sweep
-diag.plot_comparison("averageAge", group_by="maxGrowth")
+# Compare across parameter sweep (group_by auto-detects config params vs export vars)
+diag.plot_comparison("averageAge", group_by="maxGrowth")  # config parameter
+diag.plot_comparison("height", group_by="FIRE_REGIME")    # export variable
 
 # Spatial snapshot
 diag.plot_spatial("treeCount", step=50, config_hash="abc123")
 
-# Filter by parameters
-diag.plot_timeseries("averageAge", maxGrowth=10, survivalProb=0.9)
+# Show SQL for learning/debugging
+diag.plot_comparison("averageAge", group_by="maxGrowth", show_sql=True)
 ```
 
 ## Development

@@ -572,6 +572,89 @@ run_remote_config = to_run_remote_config(
 result = cli.run_remote(run_remote_config)
 ```
 
+### Running Sweeps with run_sweep()
+
+The `run_sweep()` convenience function handles the common case of executing
+all jobs in a JobSet with optional callbacks for tracking:
+
+```python
+from joshpy.jobs import run_sweep, SweepResult
+from joshpy.cli import JoshCLI
+from joshpy.registry import RunRegistry, RegistryCallback
+
+# Setup
+cli = JoshCLI()
+registry = RunRegistry("experiment.duckdb")
+session_id = registry.create_session(experiment_name="my_sweep")
+callback = RegistryCallback(registry, session_id)
+
+# Run all jobs with tracking
+results = run_sweep(cli, job_set, callback=callback.record)
+
+# Check results
+print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+
+# Iterate over job results
+for job, result in results:
+    if result.success:
+        print(f"Job {job.config_hash} succeeded")
+```
+
+#### run_sweep Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `cli` | JoshCLI | JoshCLI instance to use for execution (required) |
+| `job_set` | JobSet | Expanded jobs to run (required) |
+| `callback` | Callable | Optional callback invoked after each job (e.g., `callback.record`) |
+| `stop_on_failure` | bool | If True, stop on first failure (default: False) |
+| `dry_run` | bool | If True, print plan without executing (default: False) |
+| `quiet` | bool | If True, suppress progress output (default: False) |
+
+#### SweepResult
+
+The return value provides access to results:
+
+```python
+results.succeeded      # Count of successful jobs
+results.failed         # Count of failed jobs
+results.job_results    # List of (ExpandedJob, CLIResult) tuples
+
+# Iterate directly
+for job, result in results:
+    print(job.parameters, result.success)
+
+# Length
+len(results)  # Total number of jobs run
+```
+
+#### Dry Run Mode
+
+Preview what will run without executing:
+
+```python
+# Preview the sweep plan
+results = run_sweep(cli, job_set, dry_run=True)
+# Prints:
+#   Will run 9 jobs (27 total replicates)
+#   Job 1/9: maxGrowth=10, survivalProb=0.8
+#   Job 2/9: maxGrowth=10, survivalProb=0.9
+#   ...
+```
+
+### JobSet Properties
+
+JobSet provides computed properties for job/replicate counts:
+
+```python
+expander = JobExpander()
+job_set = expander.expand(config)
+
+# Computed properties
+print(f"Total jobs: {job_set.total_jobs}")           # Number of job configurations
+print(f"Total replicates: {job_set.total_replicates}")  # Sum of replicates across all jobs
+```
+
 ---
 
 ## Experiment Registry
@@ -586,8 +669,11 @@ from joshpy.registry import RunRegistry
 # In-memory database
 registry = RunRegistry(":memory:")
 
-# Persistent database
+# Persistent database with spatial support (default)
 registry = RunRegistry("experiments.duckdb")
+
+# Disable spatial support if not needed
+registry = RunRegistry("experiments.duckdb", enable_spatial=False)
 
 # Use as context manager
 with RunRegistry("experiments.duckdb") as registry:
@@ -595,17 +681,55 @@ with RunRegistry("experiments.duckdb") as registry:
     pass  # Automatically closed
 ```
 
+### Direct DuckDB Access
+
+Access the underlying DuckDB connection for custom queries:
+
+```python
+# Direct connection access
+df = registry.conn.execute("SELECT * FROM cell_data LIMIT 10").df()
+
+# Parameterized queries
+df = registry.query(
+    "SELECT * FROM cell_data WHERE step BETWEEN ? AND ?",
+    [0, 10]
+).df()
+
+# Export to Parquet (recommended for R/Python analysis)
+registry.to_parquet("results.parquet")
+
+# Export to CSV
+registry.to_csv("results.csv")
+```
+
+### Spatial and Temporal Filtering
+
+Use context managers to filter all queries:
+
+```python
+# Spatial filter with bounding box
+with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
+    df = queries.get_timeseries("height", config_hash="abc123")
+
+# Temporal filter
+with registry.time_filter(step_range=(0, 50)):
+    df = queries.get_timeseries("height", config_hash="abc123")
+
+# Nested filters
+with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
+    with registry.time_filter(step_range=(10, 20)):
+        df = queries.get_comparison("height", group_by="maxGrowth")
+```
+
 ### Session Management
 
 Sessions group related job runs:
 
 ```python
-# Create a session
+# Create a session (total_jobs/total_replicates are computed from JobSet)
 session_id = registry.create_session(
     experiment_name="jotr_sensitivity",
     simulation="JoshuaTreeSim",
-    total_jobs=9,
-    total_replicates=27,
     template_path="templates/config.jshc.j2",
     metadata={"description": "Sensitivity analysis"}
 )
@@ -762,6 +886,25 @@ df = queries.get_parameter_comparison(
     param_name="maxGrowth",
     session_id=session_id,
 )
+
+# Show SQL for learning and debugging
+df = queries.get_cell_timeseries(
+    longitude=-116.1,
+    latitude=33.9,
+    variable="treeCount",
+    show_sql=True,  # Prints the SQL query
+)
+# Prints:
+#   Replicate this query using:
+#       df = registry.query('''
+#           SELECT step, replicate, ...
+#       ''', [-116.1, 33.9]).df()
+
+df = queries.get_parameter_comparison(
+    variable="totalBiomass",
+    param_name="maxGrowth",
+    show_sql=True,  # Prints the SQL query
+)
 ```
 
 ---
@@ -789,21 +932,25 @@ print(summary)
 # Runs:     27
 # Rows:     10,000
 #
-# Variables: averageAge, averageHeight
+# Export variables: averageAge, averageHeight
 # Entity types: patch
-# Parameters: maxGrowth, survivalProb
+# Config parameters: maxGrowth, survivalProb
 # Steps: 0 - 10
 # Replicates: 0 - 2
 # Spatial extent: lon [-116.40, -115.40], lat [33.70, 34.00]
 
-# Individual queries
-registry.list_variables()      # ['averageAge', 'averageHeight']
-registry.list_parameters()     # ['maxGrowth', 'survivalProb']
-registry.list_entity_types()   # ['patch']
+# Individual queries - use descriptive names
+registry.list_export_variables()    # ['averageAge', 'averageHeight']
+registry.list_config_parameters()   # ['maxGrowth', 'survivalProb']
+registry.list_entity_types()        # ['patch']
+
+# Legacy aliases still work for backward compatibility
+registry.list_variables()           # same as list_export_variables()
+registry.list_parameters()          # same as list_config_parameters()
 
 # Filter by session
 registry.get_data_summary(session_id="...")
-registry.list_variables(session_id="...")
+registry.list_export_variables(session_id="...")
 ```
 
 ### DataSummary
@@ -879,9 +1026,15 @@ fig.savefig("diagnostic.png", dpi=150)
 
 ### Parameter Comparison Plotting
 
+The `group_by` parameter auto-detects whether the grouping variable is a
+config parameter (from your sweep) or an export variable (from simulation output):
+
 ```python
-# Time series comparison across parameter values
+# Group by config parameter (from sweep)
 diag.plot_comparison("averageAge", group_by="maxGrowth")
+
+# Group by export variable (from simulation output)
+diag.plot_comparison("height", group_by="FIRE_REGIME")
 
 # Bar chart at specific step
 diag.plot_comparison("averageAge", group_by="maxGrowth", step=100)
@@ -892,20 +1045,28 @@ diag.plot_comparison("treeCount", group_by="maxGrowth", aggregate="sum")
 # Filter by session or additional parameters
 diag.plot_comparison("averageAge", group_by="maxGrowth", session_id="...")
 diag.plot_comparison("averageAge", group_by="maxGrowth", scenario="baseline")
+
+# Show the underlying SQL query
+diag.plot_comparison("averageAge", group_by="maxGrowth", show_sql=True)
 ```
 
 ### plot_comparison Options
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `variable` | str | Variable name to plot (required) |
-| `group_by` | str | Parameter name to group by (required) |
+| `variable` | str | Export variable name to plot (required) |
+| `group_by` | str | Variable to group by - can be either a config parameter or export variable (required) |
 | `aggregate` | str | Spatial aggregation: "mean" (default), "sum", "min", "max" |
 | `step` | int | If provided, creates bar chart; else time series |
 | `session_id` | str | Filter to specific session |
+| `show_sql` | bool | If True, print the SQL query (default: False) |
 | `title` | str | Custom plot title |
 | `show` | bool | Display inline (default: True) |
 | `**params` | Any | Additional parameter filters |
+
+Note: `group_by` works best with discrete values. Continuous values will create
+one group per unique value, which may be unwieldy. For continuous variables,
+consider binning in a custom SQL query.
 
 ### Spatial Plotting
 
@@ -1060,7 +1221,7 @@ End-to-end parameter sweep with tracking:
 
 ```python
 from pathlib import Path
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, to_run_config
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, run_sweep
 from joshpy.cli import JoshCLI
 from joshpy.registry import RunRegistry, RegistryCallback
 
@@ -1084,23 +1245,18 @@ survivalProb = {{ survivalProb }} percent
     ]),
 )
 
-# Expand jobs
+# Expand jobs - computed properties available
 expander = JobExpander()
 job_set = expander.expand(config)
-print(f"Generated {len(job_set)} jobs")
+print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicates)")
 
-# Create session
+# Create session (total_jobs/total_replicates no longer needed)
 session_id = registry.create_session(
     experiment_name="jotr_sensitivity",
     simulation=config.simulation,
-    total_jobs=len(job_set),
-    total_replicates=len(job_set) * config.replicates,
 )
 
-# Register configs and execute
-callback = RegistryCallback(registry, session_id)
-results = []
-
+# Register configs
 for job in job_set:
     registry.register_config(
         session_id=session_id,
@@ -1108,15 +1264,12 @@ for job in job_set:
         config_content=job.config_content,
         parameters=job.parameters,
     )
-    
-    run_config = to_run_config(job)
-    result = cli.run(run_config)
-    results.append(result)
-    
-    callback.record(job, result)
-    
-    status = "OK" if result.success else "FAIL"
-    print(f"[{status}] maxGrowth={job.parameters['maxGrowth']}, survivalProb={job.parameters['survivalProb']}")
+
+# Execute with run_sweep() - handles iteration and callbacks
+callback = RegistryCallback(registry, session_id)
+results = run_sweep(cli, job_set, callback=callback.record)
+
+print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
 
 # Cleanup
 job_set.cleanup()
@@ -1124,7 +1277,7 @@ registry.update_session_status(session_id, "completed")
 
 # Summary
 summary = registry.get_session_summary(session_id)
-print(f"\nCompleted: {summary.completed_runs}/{summary.total_runs}")
+print(f"\nSession: {summary.completed_runs}/{summary.total_runs}")
 print(f"Failed: {summary.failed_runs}")
 
 registry.close()
