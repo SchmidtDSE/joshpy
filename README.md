@@ -164,6 +164,39 @@ for job in job_set:
     print(f"[{'OK' if result.success else 'FAIL'}] {job.parameters}")
 ```
 
+### Diagnostic Plotting
+
+Quick visualization for simulation sanity checks:
+
+```python
+from joshpy.registry import RunRegistry
+from joshpy.cell_data import CellDataLoader
+from joshpy.diagnostics import SimulationDiagnostics
+
+# Load simulation outputs into registry
+registry = RunRegistry("experiment.duckdb")
+loader = CellDataLoader(registry)
+loader.load_csv(Path("output.csv"), run_id, config_hash)
+
+# Discover what's available
+print(registry.get_data_summary())
+
+# Create diagnostics helper
+diag = SimulationDiagnostics(registry)
+
+# Time series with uncertainty bands
+diag.plot_timeseries("averageAge", config_hash="abc123")
+
+# Compare across parameter sweep
+diag.plot_comparison("averageAge", group_by="maxGrowth")
+
+# Spatial snapshot
+diag.plot_spatial("treeCount", step=50, config_hash="abc123")
+
+# Filter by parameters
+diag.plot_timeseries("averageAge", maxGrowth=10, survivalProb=0.9)
+```
+
 ## Development
 
 ### Using DevContainer (Recommended)

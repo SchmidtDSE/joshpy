@@ -36,6 +36,7 @@ joshpy/
 ├── jobs.py          # Parameter sweep orchestration
 ├── registry.py      # DuckDB experiment tracking
 ├── cell_data.py     # Spatiotemporal data loading
+├── diagnostics.py   # Diagnostic plotting (SimulationDiagnostics)
 ├── jar.py           # JAR file management
 ├── metadata.py      # Simulation metadata
 ├── virtual_file.py  # Virtual file system support
@@ -761,6 +762,206 @@ df = queries.get_parameter_comparison(
     param_name="maxGrowth",
     session_id=session_id,
 )
+```
+
+---
+
+## Diagnostic Plotting
+
+The `diagnostics` module provides quick visualization primitives for simulation sanity checks.
+
+### Discovery Methods
+
+Before plotting, discover what data is available in the registry:
+
+```python
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry("experiment.duckdb")
+
+# Get full data summary
+summary = registry.get_data_summary()
+print(summary)
+# Registry Data Summary
+# ========================================
+# Sessions: 1
+# Configs:  9
+# Runs:     27
+# Rows:     10,000
+#
+# Variables: averageAge, averageHeight
+# Entity types: patch
+# Parameters: maxGrowth, survivalProb
+# Steps: 0 - 10
+# Replicates: 0 - 2
+# Spatial extent: lon [-116.40, -115.40], lat [33.70, 34.00]
+
+# Individual queries
+registry.list_variables()      # ['averageAge', 'averageHeight']
+registry.list_parameters()     # ['maxGrowth', 'survivalProb']
+registry.list_entity_types()   # ['patch']
+
+# Filter by session
+registry.get_data_summary(session_id="...")
+registry.list_variables(session_id="...")
+```
+
+### DataSummary
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `sessions` | int | Number of sweep sessions |
+| `configs` | int | Number of job configurations |
+| `runs` | int | Number of job runs |
+| `cell_data_rows` | int | Number of rows in cell_data table |
+| `variables` | list[str] | Variable names from cell_data |
+| `entity_types` | list[str] | Entity types from cell_data |
+| `step_range` | tuple[int, int] | (min, max) step values |
+| `replicate_range` | tuple[int, int] | (min, max) replicate values |
+| `spatial_extent` | dict | {'lon': (min, max), 'lat': (min, max)} |
+| `parameters` | list[str] | Parameter names from job_configs |
+
+### SimulationDiagnostics Class
+
+```python
+from joshpy.registry import RunRegistry
+from joshpy.diagnostics import SimulationDiagnostics
+
+registry = RunRegistry("experiment.duckdb")
+diag = SimulationDiagnostics(registry)
+```
+
+### Time Series Plotting
+
+```python
+# Basic time series (spatially aggregated mean with replicate uncertainty)
+diag.plot_timeseries("averageAge", config_hash="abc123")
+
+# Different aggregation modes
+diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="sum")
+diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="min")
+diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="max")
+
+# Per-patch time series (one line per spatial cell, low alpha)
+# Warning: can be busy for large grids
+diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="none")
+
+# Filter by step range
+diag.plot_timeseries("averageAge", config_hash="abc123", step_range=(0, 50))
+
+# Filter by arbitrary parameters
+diag.plot_timeseries("averageAge", maxGrowth=10, survivalProb=0.9)
+
+# Filter by session
+diag.plot_timeseries("averageAge", session_id="...")
+
+# Custom title
+diag.plot_timeseries("averageAge", config_hash="abc123", title="Tree Age Over Time")
+
+# Save to file instead of showing inline
+fig = diag.plot_timeseries("averageAge", config_hash="abc123", show=False)
+fig.savefig("diagnostic.png", dpi=150)
+```
+
+### plot_timeseries Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `variable` | str | Variable name to plot (required) |
+| `config_hash` | str | Filter to specific config |
+| `session_id` | str | Filter to specific session |
+| `aggregate` | str | Spatial aggregation: "mean" (default), "sum", "min", "max", "none" |
+| `show_replicates` | bool | Show uncertainty band across replicates (default: True) |
+| `step_range` | tuple[int, int] | Filter to step range |
+| `title` | str | Custom plot title |
+| `show` | bool | Display inline (default: True) |
+| `**params` | Any | Filter by parameter values |
+
+### Parameter Comparison Plotting
+
+```python
+# Time series comparison across parameter values
+diag.plot_comparison("averageAge", group_by="maxGrowth")
+
+# Bar chart at specific step
+diag.plot_comparison("averageAge", group_by="maxGrowth", step=100)
+
+# Different aggregation
+diag.plot_comparison("treeCount", group_by="maxGrowth", aggregate="sum")
+
+# Filter by session or additional parameters
+diag.plot_comparison("averageAge", group_by="maxGrowth", session_id="...")
+diag.plot_comparison("averageAge", group_by="maxGrowth", scenario="baseline")
+```
+
+### plot_comparison Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `variable` | str | Variable name to plot (required) |
+| `group_by` | str | Parameter name to group by (required) |
+| `aggregate` | str | Spatial aggregation: "mean" (default), "sum", "min", "max" |
+| `step` | int | If provided, creates bar chart; else time series |
+| `session_id` | str | Filter to specific session |
+| `title` | str | Custom plot title |
+| `show` | bool | Display inline (default: True) |
+| `**params` | Any | Additional parameter filters |
+
+### Spatial Plotting
+
+```python
+# Scatter plot colored by value at a specific timestep
+diag.plot_spatial("treeCount", step=50, config_hash="abc123")
+
+# Specific replicate
+diag.plot_spatial("treeCount", step=50, config_hash="abc123", replicate=2)
+
+# Save to file
+fig = diag.plot_spatial("treeCount", step=50, config_hash="abc123", show=False)
+fig.savefig("spatial_snapshot.png")
+```
+
+### plot_spatial Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `variable` | str | Variable name to plot (required) |
+| `step` | int | Timestep to visualize (required) |
+| `config_hash` | str | Config hash to filter by (required) |
+| `replicate` | int | Replicate number (default: 0) |
+| `title` | str | Custom plot title |
+| `show` | bool | Display inline (default: True) |
+
+### Error Handling
+
+Methods raise `ValueError` with helpful messages:
+
+```python
+# Variable not found
+diag.plot_timeseries("nonexistent", config_hash="abc123")
+# ValueError: Variable 'nonexistent' not found. Available: averageAge, averageHeight
+
+# Parameter not found
+diag.plot_comparison("averageAge", group_by="nonexistent")
+# ValueError: Parameter 'nonexistent' not found. Available: maxGrowth, survivalProb
+
+# No matching data
+diag.plot_timeseries("averageAge", config_hash="invalid")
+# ValueError: No data found matching filters. Check session_id/config_hash/parameters.
+```
+
+### Warnings
+
+The module emits warnings in certain situations:
+
+```python
+# Multiple configs match - warns but still plots with legend
+diag.plot_timeseries("averageAge", session_id="...")
+# UserWarning: Matched 5 configs. Consider filtering by config_hash for clarity.
+
+# Per-patch plotting - warns about potential busy plot
+diag.plot_timeseries("averageAge", config_hash="abc123", aggregate="none")
+# UserWarning: aggregate='none' plots one line per patch, which may be busy for large grids.
 ```
 
 ---
