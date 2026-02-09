@@ -19,7 +19,8 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-  "requests ~= 2.32.3"
+  "requests ~= 2.32.3",
+  "matplotlib>=3.5",
 ]
 
 [tool.setuptools.package-data]
