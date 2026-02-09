@@ -237,6 +237,63 @@ class SessionSummary:
     runs_pending: int
 
 
+@dataclass
+class DataSummary:
+    """Summary of data loaded in the registry.
+
+    Attributes:
+        sessions: Number of sweep sessions.
+        configs: Number of job configurations.
+        runs: Number of job runs.
+        cell_data_rows: Number of rows in cell_data table.
+        variables: List of variable names found in cell_data.
+        entity_types: List of entity types found in cell_data.
+        step_range: (min, max) step values, or None if no data.
+        replicate_range: (min, max) replicate values, or None if no data.
+        spatial_extent: Dict with 'lon' and 'lat' tuples, or None if no spatial data.
+        parameters: List of parameter names found in job_configs.
+    """
+
+    sessions: int
+    configs: int
+    runs: int
+    cell_data_rows: int
+    variables: list[str]
+    entity_types: list[str]
+    step_range: tuple[int, int] | None
+    replicate_range: tuple[int, int] | None
+    spatial_extent: dict[str, tuple[float, float]] | None
+    parameters: list[str]
+
+    def __str__(self) -> str:
+        """Human-readable summary."""
+        lines = [
+            "Registry Data Summary",
+            "=" * 40,
+            f"Sessions: {self.sessions}",
+            f"Configs:  {self.configs}",
+            f"Runs:     {self.runs}",
+            f"Rows:     {self.cell_data_rows:,}",
+            "",
+            f"Variables: {', '.join(self.variables) if self.variables else '(none)'}",
+            f"Entity types: {', '.join(self.entity_types) if self.entity_types else '(none)'}",
+            f"Parameters: {', '.join(self.parameters) if self.parameters else '(none)'}",
+        ]
+        if self.step_range:
+            lines.append(f"Steps: {self.step_range[0]} - {self.step_range[1]}")
+        if self.replicate_range:
+            lines.append(f"Replicates: {self.replicate_range[0]} - {self.replicate_range[1]}")
+        if self.spatial_extent:
+            lon = self.spatial_extent.get("lon")
+            lat = self.spatial_extent.get("lat")
+            if lon and lat:
+                lines.append(
+                    f"Spatial extent: lon [{lon[0]:.2f}, {lon[1]:.2f}], "
+                    f"lat [{lat[0]:.2f}, {lat[1]:.2f}]"
+                )
+        return "\n".join(lines)
+
+
 def _generate_id() -> str:
     """Generate a unique ID."""
     return str(uuid.uuid4())
@@ -843,6 +900,221 @@ class RunRegistry:
             rows.append(row_dict)
 
         return pd.DataFrame(rows)
+
+    # ========== Discovery Methods ==========
+
+    def list_variables(self, session_id: str | None = None) -> list[str]:
+        """List all variable names found in cell_data.
+
+        Extracts distinct keys from the JSON variables column.
+
+        Args:
+            session_id: Optional session ID to filter by.
+
+        Returns:
+            Sorted list of variable names.
+        """
+        if session_id:
+            result = self.conn.execute(
+                """
+                SELECT DISTINCT unnest(json_keys(variables)) as var_name
+                FROM cell_data cd
+                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                WHERE jc.session_id = ?
+                ORDER BY var_name
+                """,
+                [session_id],
+            ).fetchall()
+        else:
+            result = self.conn.execute(
+                """
+                SELECT DISTINCT unnest(json_keys(variables)) as var_name
+                FROM cell_data
+                ORDER BY var_name
+                """
+            ).fetchall()
+
+        return [row[0] for row in result]
+
+    def list_parameters(self, session_id: str | None = None) -> list[str]:
+        """List all parameter names found in job_configs.
+
+        Extracts distinct keys from the JSON parameters column.
+
+        Args:
+            session_id: Optional session ID to filter by.
+
+        Returns:
+            Sorted list of parameter names.
+        """
+        if session_id:
+            result = self.conn.execute(
+                """
+                SELECT DISTINCT unnest(json_keys(parameters)) as param_name
+                FROM job_configs
+                WHERE session_id = ?
+                ORDER BY param_name
+                """,
+                [session_id],
+            ).fetchall()
+        else:
+            result = self.conn.execute(
+                """
+                SELECT DISTINCT unnest(json_keys(parameters)) as param_name
+                FROM job_configs
+                ORDER BY param_name
+                """
+            ).fetchall()
+
+        return [row[0] for row in result]
+
+    def list_entity_types(self, session_id: str | None = None) -> list[str]:
+        """List all entity types found in cell_data.
+
+        Args:
+            session_id: Optional session ID to filter by.
+
+        Returns:
+            Sorted list of entity type names.
+        """
+        if session_id:
+            result = self.conn.execute(
+                """
+                SELECT DISTINCT entity_type
+                FROM cell_data cd
+                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                WHERE jc.session_id = ? AND entity_type IS NOT NULL
+                ORDER BY entity_type
+                """,
+                [session_id],
+            ).fetchall()
+        else:
+            result = self.conn.execute(
+                """
+                SELECT DISTINCT entity_type
+                FROM cell_data
+                WHERE entity_type IS NOT NULL
+                ORDER BY entity_type
+                """
+            ).fetchall()
+
+        return [row[0] for row in result]
+
+    def get_data_summary(self, session_id: str | None = None) -> DataSummary:
+        """Get summary of all data in registry.
+
+        Provides counts, available variables, parameters, and data ranges
+        for diagnostic purposes.
+
+        Args:
+            session_id: Optional session ID to filter by.
+
+        Returns:
+            DataSummary with counts and metadata.
+        """
+        # Get counts
+        if session_id:
+            sessions_count = 1
+            configs_count = self.conn.execute(
+                "SELECT COUNT(*) FROM job_configs WHERE session_id = ?",
+                [session_id],
+            ).fetchone()[0]
+            runs_count = self.conn.execute(
+                """
+                SELECT COUNT(*) FROM job_runs r
+                JOIN job_configs c ON r.config_hash = c.config_hash
+                WHERE c.session_id = ?
+                """,
+                [session_id],
+            ).fetchone()[0]
+            rows_count = self.conn.execute(
+                """
+                SELECT COUNT(*) FROM cell_data cd
+                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                WHERE jc.session_id = ?
+                """,
+                [session_id],
+            ).fetchone()[0]
+        else:
+            sessions_count = self.conn.execute(
+                "SELECT COUNT(*) FROM sweep_sessions"
+            ).fetchone()[0]
+            configs_count = self.conn.execute(
+                "SELECT COUNT(*) FROM job_configs"
+            ).fetchone()[0]
+            runs_count = self.conn.execute(
+                "SELECT COUNT(*) FROM job_runs"
+            ).fetchone()[0]
+            rows_count = self.conn.execute(
+                "SELECT COUNT(*) FROM cell_data"
+            ).fetchone()[0]
+
+        # Get variables, parameters, entity types
+        variables = self.list_variables(session_id)
+        parameters = self.list_parameters(session_id)
+        entity_types = self.list_entity_types(session_id)
+
+        # Get step/replicate ranges
+        if session_id:
+            range_result = self.conn.execute(
+                """
+                SELECT MIN(step), MAX(step), MIN(replicate), MAX(replicate)
+                FROM cell_data cd
+                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                WHERE jc.session_id = ?
+                """,
+                [session_id],
+            ).fetchone()
+        else:
+            range_result = self.conn.execute(
+                "SELECT MIN(step), MAX(step), MIN(replicate), MAX(replicate) FROM cell_data"
+            ).fetchone()
+
+        step_range = None
+        replicate_range = None
+        if range_result and range_result[0] is not None:
+            step_range = (range_result[0], range_result[1])
+            replicate_range = (range_result[2], range_result[3])
+
+        # Get spatial extent
+        if session_id:
+            spatial_result = self.conn.execute(
+                """
+                SELECT MIN(longitude), MAX(longitude), MIN(latitude), MAX(latitude)
+                FROM cell_data cd
+                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                WHERE jc.session_id = ? AND longitude IS NOT NULL
+                """,
+                [session_id],
+            ).fetchone()
+        else:
+            spatial_result = self.conn.execute(
+                """
+                SELECT MIN(longitude), MAX(longitude), MIN(latitude), MAX(latitude)
+                FROM cell_data
+                WHERE longitude IS NOT NULL
+                """
+            ).fetchone()
+
+        spatial_extent = None
+        if spatial_result and spatial_result[0] is not None:
+            spatial_extent = {
+                "lon": (spatial_result[0], spatial_result[1]),
+                "lat": (spatial_result[2], spatial_result[3]),
+            }
+
+        return DataSummary(
+            sessions=sessions_count,
+            configs=configs_count,
+            runs=runs_count,
+            cell_data_rows=rows_count,
+            variables=variables,
+            entity_types=entity_types,
+            step_range=step_range,
+            replicate_range=replicate_range,
+            spatial_extent=spatial_extent,
+            parameters=parameters,
+        )
 
 
 @dataclass
