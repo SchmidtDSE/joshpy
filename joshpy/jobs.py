@@ -38,13 +38,13 @@ import hashlib
 import itertools
 import shutil
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from joshpy.cli import RunConfig, RunRemoteConfig
+    from joshpy.cli import CLIResult, JoshCLI, RunConfig, RunRemoteConfig
 
 try:
     import numpy as np
@@ -464,6 +464,26 @@ class JobSet:
     temp_dir: Path | None = None
     template_path: Path | None = None
 
+    @property
+    def total_jobs(self) -> int:
+        """Total number of job configurations.
+
+        Example:
+            job_set = expander.expand(config)
+            print(f"Will run {job_set.total_jobs} jobs")
+        """
+        return len(self.jobs)
+
+    @property
+    def total_replicates(self) -> int:
+        """Total number of replicates across all jobs.
+
+        Example:
+            job_set = expander.expand(config)
+            print(f"Total replicates: {job_set.total_replicates}")
+        """
+        return sum(job.replicates for job in self.jobs)
+
     def cleanup(self) -> None:
         """Remove temporary config files."""
         if self.temp_dir and self.temp_dir.exists():
@@ -687,4 +707,141 @@ def to_run_remote_config(
         endpoint=endpoint,
         data=data,
         custom_tags=job.custom_tags,
+    )
+
+
+@dataclass
+class SweepResult:
+    """Results from running a parameter sweep.
+
+    Attributes:
+        job_results: List of (ExpandedJob, CLIResult) tuples.
+        succeeded: Number of successful jobs.
+        failed: Number of failed jobs.
+
+    Example:
+        results = run_sweep(cli, job_set)
+        print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+
+        for job, result in results:
+            if not result.success:
+                print(f"Failed: {job.parameters}")
+    """
+
+    job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
+    succeeded: int = 0
+    failed: int = 0
+
+    def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
+        """Iterate over (job, result) tuples."""
+        return iter(self.job_results)
+
+    def __len__(self) -> int:
+        """Return total number of job results."""
+        return len(self.job_results)
+
+
+def run_sweep(
+    cli: "JoshCLI",
+    job_set: JobSet,
+    *,
+    callback: Callable[[ExpandedJob, Any], None] | None = None,
+    stop_on_failure: bool = False,
+    dry_run: bool = False,
+    quiet: bool = False,
+) -> SweepResult:
+    """Execute all jobs in a JobSet.
+
+    This is a convenience function that handles the common case of running
+    all jobs in a sweep with optional progress output and callbacks.
+
+    Args:
+        cli: JoshCLI instance to use for execution.
+        job_set: Expanded jobs to run.
+        callback: Optional callback invoked after each job completes.
+                  Signature: callback(job, result) -> None.
+                  Use with RegistryCallback.record for automatic tracking.
+        stop_on_failure: If True, stop on first failure.
+        dry_run: If True, print plan without executing.
+        quiet: If True, suppress progress output.
+
+    Returns:
+        SweepResult with all job outcomes.
+
+    Example:
+        from joshpy.jobs import run_sweep, JobExpander
+        from joshpy.cli import JoshCLI
+        from joshpy.registry import RunRegistry, RegistryCallback
+
+        cli = JoshCLI()
+        registry = RunRegistry("experiment.duckdb")
+        session_id = registry.create_session(experiment_name="my_sweep")
+        callback = RegistryCallback(registry, session_id)
+
+        # Register configs
+        for job in job_set:
+            registry.register_config(
+                session_id=session_id,
+                config_hash=job.config_hash,
+                config_content=job.config_content,
+                parameters=job.parameters,
+            )
+
+        # Run with tracking
+        results = run_sweep(cli, job_set, callback=callback.record)
+        print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+
+        # Or dry run first:
+        results = run_sweep(cli, job_set, dry_run=True)
+    """
+    total_jobs = job_set.total_jobs
+    total_replicates = job_set.total_replicates
+
+    if not quiet:
+        print(f"Running {total_jobs} jobs ({total_replicates} total replicates)")
+
+    if dry_run:
+        if not quiet:
+            print("Dry run - no jobs will be executed")
+            for i, job in enumerate(job_set):
+                print(f"  [{i+1}/{total_jobs}] {job.parameters}")
+        return SweepResult()
+
+    job_results: list[tuple[ExpandedJob, Any]] = []
+    succeeded = 0
+    failed = 0
+
+    for i, job in enumerate(job_set):
+        if not quiet:
+            print(f"[{i+1}/{total_jobs}] Running: {job.parameters}")
+
+        run_config = to_run_config(job)
+        result = cli.run(run_config)
+
+        job_results.append((job, result))
+
+        if result.success:
+            succeeded += 1
+            if not quiet:
+                print(f"  [OK] Completed successfully")
+        else:
+            failed += 1
+            if not quiet:
+                print(f"  [FAIL] Exit code: {result.exit_code}")
+
+        if callback is not None:
+            callback(job, result)
+
+        if stop_on_failure and not result.success:
+            if not quiet:
+                print(f"Stopping due to failure (stop_on_failure=True)")
+            break
+
+    if not quiet:
+        print(f"Completed: {succeeded} succeeded, {failed} failed")
+
+    return SweepResult(
+        job_results=job_results,
+        succeeded=succeeded,
+        failed=failed,
     )
