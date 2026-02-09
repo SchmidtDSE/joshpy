@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -307,7 +309,8 @@ class RunRegistry:
 
     Attributes:
         db_path: Path to the DuckDB database file, or ":memory:" for in-memory.
-        conn: DuckDB connection (created automatically).
+        enable_spatial: If True, load spatial extension and create geometry column.
+        _conn: DuckDB connection (created automatically).
 
     Example:
         # File-based (persistent)
@@ -316,31 +319,75 @@ class RunRegistry:
         # In-memory (for testing)
         registry = RunRegistry(":memory:")
 
+        # With spatial support enabled (default)
+        registry = RunRegistry("experiment.duckdb", enable_spatial=True)
+
         # Context manager
         with RunRegistry("experiment.duckdb") as registry:
             session_id = registry.create_session(...)
     """
 
     db_path: Path | str = "josh_runs.duckdb"
-    conn: Any = field(default=None, repr=False)
+    enable_spatial: bool = True
+    _conn: Any = field(default=None, repr=False)
+
+    # Filter state for context managers
+    _spatial_filter_bbox: tuple[float, float, float, float] | None = field(
+        default=None, repr=False
+    )
+    _spatial_filter_geojson: str | dict | None = field(default=None, repr=False)
+    _time_filter_range: tuple[int, int] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize database connection and schema."""
         _check_duckdb()
-        if self.conn is None:
+        if self._conn is None:
             db_str = str(self.db_path)
-            self.conn = duckdb.connect(db_str)
+            self._conn = duckdb.connect(db_str)
             self._init_schema()
+            if self.enable_spatial:
+                self._init_spatial()
+
+    @property
+    def conn(self) -> Any:
+        """Direct access to DuckDB connection for custom queries.
+
+        Returns:
+            DuckDB connection object.
+
+        Example:
+            df = registry.conn.execute("SELECT * FROM cell_data LIMIT 10").df()
+        """
+        return self._conn
 
     def _init_schema(self) -> None:
         """Create database schema if it doesn't exist."""
-        self.conn.execute(SCHEMA_SQL)
+        self._conn.execute(SCHEMA_SQL)
+
+    def _init_spatial(self) -> None:
+        """Initialize DuckDB spatial extension and geometry column."""
+        try:
+            self._conn.execute("INSTALL spatial; LOAD spatial;")
+            # Add geometry column if it doesn't exist
+            # Check if column exists first
+            columns = self._conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'cell_data' AND column_name = 'geom'"
+            ).fetchall()
+            if not columns:
+                self._conn.execute(
+                    "ALTER TABLE cell_data ADD COLUMN geom GEOMETRY;"
+                )
+        except Exception:
+            # Spatial extension may not be available in all DuckDB builds
+            # Silently continue without spatial support
+            pass
 
     def close(self) -> None:
         """Close the database connection."""
-        if self.conn is not None:
-            self.conn.close()
-            self.conn = None
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
     def __enter__(self) -> RunRegistry:
         """Context manager entry."""
@@ -350,14 +397,192 @@ class RunRegistry:
         """Context manager exit - close connection."""
         self.close()
 
+    # ========== DuckDB Direct Access ==========
+
+    def query(self, sql: str, params: list | None = None) -> Any:
+        """Execute a SQL query with parameters.
+
+        This provides direct access to DuckDB for custom queries beyond
+        the pre-built methods. Use this when you need to run complex
+        queries or explore the data in ways not covered by the API.
+
+        Args:
+            sql: SQL query with ? placeholders for parameters.
+            params: List of parameter values.
+
+        Returns:
+            DuckDB relation (call .df() for DataFrame, .fetchall() for tuples).
+
+        Example:
+            # Get DataFrame
+            df = registry.query(
+                "SELECT * FROM cell_data WHERE step BETWEEN ? AND ?",
+                [0, 10]
+            ).df()
+
+            # Get raw results
+            rows = registry.query(
+                "SELECT COUNT(*) FROM cell_data WHERE config_hash = ?",
+                ["abc123"]
+            ).fetchone()
+        """
+        return self._conn.execute(sql, params or [])
+
+    def to_parquet(self, path: str | Path, table: str = "cell_data") -> None:
+        """Export a table to Parquet format.
+
+        Parquet is recommended for R/Python analysis due to compression
+        and type preservation.
+
+        Args:
+            path: Output file path.
+            table: Table name to export (default: cell_data).
+
+        Example:
+            registry.to_parquet("results.parquet")
+
+            # In R:
+            # df <- arrow::read_parquet("results.parquet")
+
+            # In Python:
+            # import pandas as pd
+            # df = pd.read_parquet("results.parquet")
+        """
+        path_str = str(path)
+        self._conn.execute(f"COPY {table} TO '{path_str}' (FORMAT PARQUET)")
+
+    def to_csv(self, path: str | Path, table: str = "cell_data") -> None:
+        """Export a table to CSV format.
+
+        Args:
+            path: Output file path.
+            table: Table name to export (default: cell_data).
+
+        Example:
+            registry.to_csv("results.csv")
+
+            # In R:
+            # df <- readr::read_csv("results.csv")
+        """
+        path_str = str(path)
+        self._conn.execute(f"COPY {table} TO '{path_str}' (FORMAT CSV, HEADER)")
+
+    # ========== Filter Context Managers ==========
+
+    @contextmanager
+    def spatial_filter(
+        self,
+        bbox: tuple[float, float, float, float] | None = None,
+        geojson: str | dict | None = None,
+    ) -> Iterator[None]:
+        """Context manager for spatial filtering of queries.
+
+        All DiagnosticQueries within this context will be spatially filtered.
+        Can be nested with time_filter().
+
+        Args:
+            bbox: Bounding box as (min_lon, max_lon, min_lat, max_lat).
+            geojson: GeoJSON polygon string or dict.
+
+        Raises:
+            ValueError: If both bbox and geojson are provided.
+
+        Example:
+            with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
+                df = queries.get_timeseries("height", config_hash="abc123")
+
+            # Nested with time filter
+            with registry.spatial_filter(geojson=park_boundary):
+                with registry.time_filter(step_range=(0, 50)):
+                    df = queries.get_timeseries("height", config_hash="abc123")
+        """
+        if bbox and geojson:
+            raise ValueError("Specify either bbox or geojson, not both")
+
+        # Save previous state (for nested calls)
+        prev_bbox = self._spatial_filter_bbox
+        prev_geojson = self._spatial_filter_geojson
+
+        self._spatial_filter_bbox = bbox
+        self._spatial_filter_geojson = geojson
+        try:
+            yield
+        finally:
+            self._spatial_filter_bbox = prev_bbox
+            self._spatial_filter_geojson = prev_geojson
+
+    @contextmanager
+    def time_filter(
+        self,
+        step_range: tuple[int, int],
+    ) -> Iterator[None]:
+        """Context manager for temporal filtering of queries.
+
+        All DiagnosticQueries within this context will be filtered to
+        the specified step range. Can be nested with spatial_filter().
+
+        Args:
+            step_range: Tuple of (min_step, max_step) inclusive.
+
+        Example:
+            with registry.time_filter(step_range=(0, 50)):
+                df = queries.get_timeseries("height", config_hash="abc123")
+
+            # Nested with spatial filter
+            with registry.time_filter(step_range=(10, 20)):
+                with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
+                    df = queries.get_comparison("height", group_by="maxGrowth")
+        """
+        prev_range = self._time_filter_range
+        self._time_filter_range = step_range
+        try:
+            yield
+        finally:
+            self._time_filter_range = prev_range
+
+    def _get_filter_clauses(self) -> tuple[str, list]:
+        """Get SQL WHERE clauses for all active filters.
+
+        This is used internally by DiagnosticQueries to apply active
+        spatial and temporal filters.
+
+        Returns:
+            Tuple of (where_clause_string, params_list).
+            The where_clause_string starts with " AND " if there are clauses.
+        """
+        clauses = []
+        params: list = []
+
+        # Spatial filter
+        if self._spatial_filter_bbox:
+            min_lon, max_lon, min_lat, max_lat = self._spatial_filter_bbox
+            clauses.append("longitude BETWEEN ? AND ? AND latitude BETWEEN ? AND ?")
+            params.extend([min_lon, max_lon, min_lat, max_lat])
+        elif self._spatial_filter_geojson:
+            geojson_str = (
+                json.dumps(self._spatial_filter_geojson)
+                if isinstance(self._spatial_filter_geojson, dict)
+                else self._spatial_filter_geojson
+            )
+            clauses.append("ST_Within(geom, ST_GeomFromGeoJSON(?))")
+            params.append(geojson_str)
+
+        # Time filter
+        if self._time_filter_range:
+            min_step, max_step = self._time_filter_range
+            clauses.append("step BETWEEN ? AND ?")
+            params.extend([min_step, max_step])
+
+        if clauses:
+            return (" AND " + " AND ".join(clauses), params)
+        return ("", [])
+
     # ========== Session Management ==========
 
     def create_session(
         self,
         experiment_name: str | None = None,
         simulation: str | None = None,
-        total_jobs: int | None = None,
-        total_replicates: int | None = None,
         template_path: str | None = None,
         template_hash: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -367,14 +592,16 @@ class RunRegistry:
         Args:
             experiment_name: Name for the experiment (used in path templates).
             simulation: Name of the simulation being run.
-            total_jobs: Total number of job configurations.
-            total_replicates: Total number of replicates across all jobs.
             template_path: Path to the Jinja template file.
             template_hash: Hash of the template content.
             metadata: Additional metadata dictionary.
 
         Returns:
             The generated session ID.
+
+        Note:
+            total_jobs and total_replicates are computed from the JobSet
+            after job expansion. Use job_set.total_jobs and job_set.total_replicates.
         """
         session_id = _generate_id()
         metadata_json = json.dumps(metadata) if metadata else None
@@ -382,16 +609,14 @@ class RunRegistry:
         self.conn.execute(
             """
             INSERT INTO sweep_sessions
-            (session_id, experiment_name, simulation, total_jobs, total_replicates,
+            (session_id, experiment_name, simulation,
              template_path, template_hash, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
                 session_id,
                 experiment_name,
                 simulation,
-                total_jobs,
-                total_replicates,
                 template_path,
                 template_hash,
                 metadata_json,
@@ -817,6 +1042,12 @@ class RunRegistry:
         if session is None:
             return None
 
+        # Count configs (total_jobs) for this session
+        configs_count = self.conn.execute(
+            "SELECT COUNT(*) FROM job_configs WHERE session_id = ?",
+            [session_id],
+        ).fetchone()[0]
+
         # Count runs by status
         result = self.conn.execute(
             """
@@ -843,8 +1074,8 @@ class RunRegistry:
             experiment_name=session.experiment_name,
             simulation=session.simulation,
             status=session.status,
-            total_jobs=session.total_jobs or 0,
-            total_replicates=session.total_replicates or 0,
+            total_jobs=configs_count,
+            total_replicates=total_runs,  # Use actual run count
             runs_completed=completed,
             runs_succeeded=succeeded,
             runs_failed=failed,
@@ -903,16 +1134,21 @@ class RunRegistry:
 
     # ========== Discovery Methods ==========
 
-    def list_variables(self, session_id: str | None = None) -> list[str]:
-        """List all variable names found in cell_data.
+    def list_export_variables(self, session_id: str | None = None) -> list[str]:
+        """List all export variable names from simulation outputs.
 
-        Extracts distinct keys from the JSON variables column.
+        These are the variables exported by Josh simulations,
+        stored in the cell_data table's variables JSON column.
 
         Args:
             session_id: Optional session ID to filter by.
 
         Returns:
             Sorted list of variable names.
+
+        Example:
+            >>> registry.list_export_variables()
+            ['averageAge', 'averageHeight', 'treeCount']
         """
         if session_id:
             result = self.conn.execute(
@@ -936,16 +1172,26 @@ class RunRegistry:
 
         return [row[0] for row in result]
 
-    def list_parameters(self, session_id: str | None = None) -> list[str]:
-        """List all parameter names found in job_configs.
+    # Alias for backward compatibility
+    def list_variables(self, session_id: str | None = None) -> list[str]:
+        """Alias for list_export_variables(). Deprecated, use list_export_variables()."""
+        return self.list_export_variables(session_id)
 
-        Extracts distinct keys from the JSON parameters column.
+    def list_config_parameters(self, session_id: str | None = None) -> list[str]:
+        """List all config parameter names from sweep configurations.
+
+        These are the parameters you defined in your JobConfig sweep,
+        stored in the job_configs table's parameters JSON column.
 
         Args:
             session_id: Optional session ID to filter by.
 
         Returns:
             Sorted list of parameter names.
+
+        Example:
+            >>> registry.list_config_parameters()
+            ['maxGrowth', 'scenario', 'survivalProb']
         """
         if session_id:
             result = self.conn.execute(
@@ -967,6 +1213,11 @@ class RunRegistry:
             ).fetchall()
 
         return [row[0] for row in result]
+
+    # Alias for backward compatibility
+    def list_parameters(self, session_id: str | None = None) -> list[str]:
+        """Alias for list_config_parameters(). Deprecated, use list_config_parameters()."""
+        return self.list_config_parameters(session_id)
 
     def list_entity_types(self, session_id: str | None = None) -> list[str]:
         """List all entity types found in cell_data.
@@ -1050,8 +1301,8 @@ class RunRegistry:
             ).fetchone()[0]
 
         # Get variables, parameters, entity types
-        variables = self.list_variables(session_id)
-        parameters = self.list_parameters(session_id)
+        variables = self.list_export_variables(session_id)
+        parameters = self.list_config_parameters(session_id)
         entity_types = self.list_entity_types(session_id)
 
         # Get step/replicate ranges
