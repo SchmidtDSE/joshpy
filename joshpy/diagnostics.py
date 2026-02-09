@@ -100,11 +100,11 @@ class SimulationDiagnostics:
         Raises:
             ValueError: If variable not found, with list of available variables.
         """
-        available = self.registry.list_variables()
+        available = self.registry.list_export_variables()
         if variable not in available:
             available_str = ", ".join(available) if available else "(none)"
             raise ValueError(
-                f"Variable '{variable}' not found. Available: {available_str}"
+                f"Export variable '{variable}' not found. Available: {available_str}"
             )
 
     def _validate_parameter(self, param_name: str) -> None:
@@ -116,11 +116,11 @@ class SimulationDiagnostics:
         Raises:
             ValueError: If parameter not found, with list of available parameters.
         """
-        available = self.registry.list_parameters()
+        available = self.registry.list_config_parameters()
         if param_name not in available:
             available_str = ", ".join(available) if available else "(none)"
             raise ValueError(
-                f"Parameter '{param_name}' not found. Available: {available_str}"
+                f"Config parameter '{param_name}' not found. Available: {available_str}"
             )
 
     def _validate_aggregation(self, aggregate: str) -> None:
@@ -434,34 +434,65 @@ class SimulationDiagnostics:
         session_id: str | None = None,
         title: str | None = None,
         show: bool = True,
+        show_sql: bool = False,
         **params: Any,
     ) -> plt.Figure:
         """Compare variable across parameter values.
 
+        The group_by argument is auto-detected: it can be either a config
+        parameter (from your sweep, e.g., 'maxGrowth') or an export variable
+        (from simulation output, e.g., 'FIRE_REGIME').
+
         Args:
             variable: Variable name to plot.
-            group_by: Parameter name to group by (e.g., "maxGrowth").
+            group_by: Variable to group by - can be either:
+                - A config parameter (from your sweep, e.g., 'maxGrowth')
+                - An export variable (from simulation, e.g., 'FIRE_REGIME')
             aggregate: Spatial aggregation mode: "mean", "sum", "min", "max".
             step: If provided, creates bar chart at that step; else time series.
             session_id: Filter to specific session.
             title: Plot title.
             show: If True, display plot inline.
+            show_sql: If True, print the SQL query for copy/paste modification.
             **params: Additional parameter filters.
 
         Returns:
             matplotlib Figure.
 
         Raises:
-            ValueError: If variable or parameter not found, or no data.
+            ValueError: If variable or group_by not found, or no data.
+
+        Note:
+            group_by works best with discrete values. Continuous values
+            will create one group per unique value, which may be unwieldy.
+            For continuous variables, consider binning in a custom SQL query.
         """
         self._validate_variable(variable)
-        self._validate_parameter(group_by)
         self._validate_aggregation(aggregate)
 
         if aggregate == "none":
             raise ValueError(
                 "aggregate='none' is not supported for plot_comparison. "
                 "Use 'mean', 'sum', 'min', or 'max'."
+            )
+
+        # Auto-detect group_by source
+        config_params = self.registry.list_config_parameters()
+        export_vars = self.registry.list_export_variables()
+
+        if group_by in config_params:
+            group_source = "config_parameter"
+            group_expr = f"json_extract_string(jc.parameters, '$.{group_by}')"
+            needs_join = True
+        elif group_by in export_vars:
+            group_source = "export_variable"
+            group_expr = f"json_extract_string(cd.variables, '$.{group_by}')"
+            needs_join = False
+        else:
+            raise ValueError(
+                f"'{group_by}' not found.\n"
+                f"  Config parameters: {config_params}\n"
+                f"  Export variables: {export_vars}"
             )
 
         agg_func = aggregate.upper()
@@ -484,19 +515,29 @@ class SimulationDiagnostics:
         if param_conditions:
             where_clause = " AND " + " AND ".join(param_conditions)
 
+        # Build join clause - always needed if we have param filters or grouping by config
+        join_clause = "JOIN job_configs jc ON cd.config_hash = jc.config_hash" if (needs_join or param_conditions) else ""
+
         if step is not None:
             # Bar chart at specific step
             query = f"""
                 SELECT
-                    json_extract_string(jc.parameters, '$.{group_by}') as param_value,
+                    {group_expr} as group_value,
                     {agg_func}(CAST(json_extract_string(cd.variables, '$.{variable}') AS DOUBLE)) as value
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                {join_clause}
                 WHERE cd.step = ? {where_clause}
-                GROUP BY param_value
-                ORDER BY param_value
+                GROUP BY group_value
+                ORDER BY group_value
             """
             values = [step] + param_values
+
+            if show_sql:
+                print("SQL Query:")
+                print(query)
+                print(f"Parameters: {values}")
+                print()
+
             result = self.registry.conn.execute(query, values).fetchall()
 
             if not result:
@@ -508,10 +549,10 @@ class SimulationDiagnostics:
 
             # Sort results by parameter value (numeric then string)
             sorted_result = sorted(result, key=lambda r: _sort_key_numeric_then_string(str(r[0])))
-            param_vals = [str(row[0]) for row in sorted_result]
+            group_vals = [str(row[0]) for row in sorted_result]
             data_vals = [row[1] for row in sorted_result]
 
-            ax.bar(param_vals, data_vals)
+            ax.bar(group_vals, data_vals)
             ax.set_xlabel(group_by)
             ax.set_ylabel(f"{variable} ({aggregate})")
             if title:
@@ -523,15 +564,22 @@ class SimulationDiagnostics:
             # Time series comparison
             query = f"""
                 SELECT
-                    json_extract_string(jc.parameters, '$.{group_by}') as param_value,
+                    {group_expr} as group_value,
                     cd.step,
                     {agg_func}(CAST(json_extract_string(cd.variables, '$.{variable}') AS DOUBLE)) as value
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                {join_clause}
                 WHERE 1=1 {where_clause}
-                GROUP BY param_value, cd.step
-                ORDER BY param_value, cd.step
+                GROUP BY group_value, cd.step
+                ORDER BY group_value, cd.step
             """
+
+            if show_sql:
+                print("SQL Query:")
+                print(query)
+                print(f"Parameters: {param_values}")
+                print()
+
             result = self.registry.conn.execute(query, param_values).fetchall()
 
             if not result:
@@ -540,23 +588,23 @@ class SimulationDiagnostics:
             # Group by parameter value
             from collections import defaultdict
 
-            param_data: dict[str, tuple[list[int], list[float]]] = defaultdict(
+            group_data: dict[str, tuple[list[int], list[float]]] = defaultdict(
                 lambda: ([], [])
             )
             for row in result:
-                param_val, step_val, value = row
-                param_data[str(param_val)][0].append(step_val)
-                param_data[str(param_val)][1].append(value)
+                group_val, step_val, value = row
+                group_data[str(group_val)][0].append(step_val)
+                group_data[str(group_val)][1].append(value)
 
             fig, ax = plt.subplots(figsize=(10, 6))
 
             colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
-            # Sort parameter values numerically then alphabetically
-            sorted_params = sorted(param_data.keys(), key=_sort_key_numeric_then_string)
-            for idx, param_val in enumerate(sorted_params):
-                steps, values_list = param_data[param_val]
+            # Sort values numerically then alphabetically
+            sorted_groups = sorted(group_data.keys(), key=_sort_key_numeric_then_string)
+            for idx, group_val in enumerate(sorted_groups):
+                steps, values_list = group_data[group_val]
                 color = colors[idx % len(colors)]
-                ax.plot(steps, values_list, color=color, label=f"{group_by}={param_val}")
+                ax.plot(steps, values_list, color=color, label=f"{group_by}={group_val}")
 
             ax.set_xlabel("Step")
             ax.set_ylabel(f"{variable} ({aggregate})")
