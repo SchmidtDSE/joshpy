@@ -124,19 +124,21 @@ from joshpy.registry import RunRegistry
 # Create in-memory registry for this demo
 registry = RunRegistry(":memory:")
 
+# Expand config into individual jobs first so we can show totals
+expander = JobExpander()
+job_set = expander.expand(config)
+
 # Create a session to track this experiment
+# (total_jobs/total_replicates are now computed from JobSet)
 session_id = registry.create_session(
     experiment_name="growth_rate_sweep",
     simulation="Main",
-    total_jobs=len(MAX_GROWTH_VALUES),
-    total_replicates=len(MAX_GROWTH_VALUES) * config.replicates,
     template_path=str(TEMPLATE_PATH),
 )
 print(f"Session ID: {session_id}")
+print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicates)")
 
-# Expand config into individual jobs
-expander = JobExpander()
-job_set = expander.expand(config)
+# Jobs already expanded above, show count
 print(f"Expanded to {len(job_set)} jobs")
 
 # Register each job's config in the registry
@@ -175,8 +177,7 @@ registry.update_session_status(session_id, "running")
 cli = JoshCLI(josh_jar=Path("../jar/joshsim-fat.jar"))
 callback = RegistryCallback(registry, session_id)
 
-print("Running 10 experiments (3 replicates each)...")
-print("=" * 60)
+print("Running 10 experiments (3 replicates each)...\n\n")
 
 results = []
 for job in job_set.jobs:
@@ -189,9 +190,8 @@ for job in job_set.jobs:
     if not result.success:
         print(f"       Error: {result.stderr[:200]}...")
 
-print("=" * 60)
 succeeded = sum(1 for _, r in results if r.success)
-print(f"Completed: {succeeded}/{len(results)} succeeded")
+print(f"\n\nCompleted: {succeeded}/{len(results)} succeeded")
 
 # Update final session status
 final_status = "completed" if succeeded == len(results) else "failed"
@@ -258,8 +258,8 @@ print(summary)
 We can also query individual lists:
 
 ```{python}
-print(f"Variables: {registry.list_variables()}")
-print(f"Parameters: {registry.list_parameters()}")
+print(f"Export variables: {registry.list_export_variables()}")
+print(f"Config parameters: {registry.list_config_parameters()}")
 print(f"Entity types: {registry.list_entity_types()}")
 ```
 
@@ -461,7 +461,7 @@ matplotlib-based visualizations for sanity checks during development:
 - `plot_spatial()`: Spatial snapshots at specific timesteps
 
 **Discovery Methods**: Before plotting, use `registry.get_data_summary()`,
-`registry.list_variables()`, and `registry.list_parameters()` to see what
+`registry.list_export_variables()`, and `registry.list_config_parameters()` to see what
 data is available.
 
 This document also demonstrates Quarto's ability to seamlessly combine R and
