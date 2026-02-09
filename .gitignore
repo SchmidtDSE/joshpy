@@ -73,3 +73,4 @@ temp/
 
 # AI context
 .claude
+.opencode
