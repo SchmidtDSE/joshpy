@@ -90,8 +90,6 @@ class TestDiscoveryMethods:
         session_id = self.registry.create_session(
             experiment_name="test_experiment",
             simulation="TestSim",
-            total_jobs=2,
-            total_replicates=4,
         )
         self.session_id = session_id
 
@@ -230,8 +228,6 @@ class TestSimulationDiagnostics:
         session_id = self.registry.create_session(
             experiment_name="test_experiment",
             simulation="TestSim",
-            total_jobs=2,
-            total_replicates=6,
         )
         self.session_id = session_id
 
@@ -291,12 +287,12 @@ class TestSimulationDiagnostics:
 
     def test_validate_variable_raises_for_missing(self):
         """Test that missing variables raise ValueError."""
-        with pytest.raises(ValueError, match="Variable 'nonexistent' not found"):
+        with pytest.raises(ValueError, match="Export variable 'nonexistent' not found"):
             self.diag._validate_variable("nonexistent")
 
     def test_validate_parameter_raises_for_missing(self):
         """Test that missing parameters raise ValueError."""
-        with pytest.raises(ValueError, match="Parameter 'nonexistent' not found"):
+        with pytest.raises(ValueError, match="Config parameter 'nonexistent' not found"):
             self.diag._validate_parameter("nonexistent")
 
     def test_validate_aggregation_raises_for_invalid(self):
@@ -383,7 +379,7 @@ class TestSimulationDiagnostics:
 
     def test_plot_timeseries_missing_variable_raises(self):
         """Test that missing variable raises ValueError."""
-        with pytest.raises(ValueError, match="Variable 'missing' not found"):
+        with pytest.raises(ValueError, match="Export variable 'missing' not found"):
             self.diag.plot_timeseries("missing", config_hash="abc123", show=False)
 
     def test_plot_comparison_timeseries(self):
@@ -414,7 +410,7 @@ class TestSimulationDiagnostics:
 
     def test_plot_comparison_missing_parameter_raises(self):
         """Test that missing parameter raises ValueError."""
-        with pytest.raises(ValueError, match="Parameter 'missing' not found"):
+        with pytest.raises(ValueError, match="'missing' not found"):
             self.diag.plot_comparison(
                 "treeCount", group_by="missing", show=False
             )
@@ -436,7 +432,7 @@ class TestSimulationDiagnostics:
 
     def test_plot_spatial_missing_variable_raises(self):
         """Test that missing variable raises ValueError."""
-        with pytest.raises(ValueError, match="Variable 'missing' not found"):
+        with pytest.raises(ValueError, match="Export variable 'missing' not found"):
             self.diag.plot_spatial(
                 "missing", step=2, config_hash="abc123", show=False
             )
@@ -462,7 +458,7 @@ class TestDiagnosticsEdgeCases:
         registry = RunRegistry(":memory:")
         diag = SimulationDiagnostics(registry)
 
-        with pytest.raises(ValueError, match="Variable .* not found"):
+        with pytest.raises(ValueError, match="Export variable .* not found"):
             diag.plot_timeseries("anything", show=False)
 
     def test_valid_aggregation_modes(self):

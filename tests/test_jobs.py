@@ -11,10 +11,12 @@ from joshpy.jobs import (
     ExpandedJob,
     JobSet,
     JobExpander,
+    SweepResult,
     compute_config_hash,
     _normalize_values,
     to_run_config,
     to_run_remote_config,
+    run_sweep,
 )
 
 
@@ -369,6 +371,54 @@ class TestJobSet(unittest.TestCase):
         ])
         self.assertEqual(len(job_set), 1)
 
+    def test_total_jobs_property(self):
+        """total_jobs should return number of job configurations."""
+        jobs = [
+            ExpandedJob(
+                config_content=f"val={i}",
+                config_path=Path(f"/tmp/test{i}"),
+                config_name="test",
+                config_hash=f"hash{i}",
+                parameters={"i": i},
+                simulation="Main",
+                replicates=3,
+            )
+            for i in range(5)
+        ]
+        job_set = JobSet(jobs=jobs)
+        self.assertEqual(job_set.total_jobs, 5)
+
+    def test_total_replicates_property(self):
+        """total_replicates should sum replicates across all jobs."""
+        jobs = [
+            ExpandedJob(
+                config_content="val=1",
+                config_path=Path("/tmp/test1"),
+                config_name="test",
+                config_hash="hash1",
+                parameters={},
+                simulation="Main",
+                replicates=3,
+            ),
+            ExpandedJob(
+                config_content="val=2",
+                config_path=Path("/tmp/test2"),
+                config_name="test",
+                config_hash="hash2",
+                parameters={},
+                simulation="Main",
+                replicates=5,
+            ),
+        ]
+        job_set = JobSet(jobs=jobs)
+        self.assertEqual(job_set.total_replicates, 8)
+
+    def test_total_replicates_empty(self):
+        """total_replicates should be 0 for empty JobSet."""
+        job_set = JobSet()
+        self.assertEqual(job_set.total_replicates, 0)
+        self.assertEqual(job_set.total_jobs, 0)
+
     def test_iteration(self):
         """Should be iterable over jobs."""
         jobs = [
@@ -600,6 +650,147 @@ class TestToRunRemoteConfig(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             to_run_remote_config(job, api_key="test-key")
+
+
+class TestSweepResult(unittest.TestCase):
+    """Tests for SweepResult class."""
+
+    def test_empty_result(self):
+        """Empty result should have zero counts."""
+        result = SweepResult()
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(len(result), 0)
+
+    def test_iteration(self):
+        """Should be iterable over job_results."""
+        job = ExpandedJob(
+            config_content="test",
+            config_path=Path("/tmp/test.jshc"),
+            config_name="test",
+            config_hash="abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+        )
+        result = SweepResult(
+            job_results=[(job, {"success": True})],
+            succeeded=1,
+            failed=0,
+        )
+
+        collected = list(result)
+        self.assertEqual(len(collected), 1)
+        self.assertEqual(collected[0][0], job)
+
+    def test_len(self):
+        """Length should match number of job_results."""
+        job = ExpandedJob(
+            config_content="test",
+            config_path=Path("/tmp/test.jshc"),
+            config_name="test",
+            config_hash="abc123",
+            parameters={},
+            simulation="Main",
+            replicates=1,
+        )
+        result = SweepResult(
+            job_results=[(job, None), (job, None), (job, None)],
+            succeeded=2,
+            failed=1,
+        )
+        self.assertEqual(len(result), 3)
+
+
+class TestRunSweep(unittest.TestCase):
+    """Tests for run_sweep function."""
+
+    def test_dry_run_returns_empty(self):
+        """Dry run should return empty SweepResult."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content="test",
+                config_path=Path("/tmp/test.jshc"),
+                config_name="test",
+                config_hash="abc123",
+                parameters={"x": 1},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+        ])
+
+        result = run_sweep(cli, job_set, dry_run=True, quiet=True)
+
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(len(result), 0)
+        # CLI.run should not be called
+        cli.run.assert_not_called()
+
+    def test_run_with_callback(self):
+        """Callback should be called for each job."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        cli.run.return_value = MagicMock(success=True, exit_code=0)
+
+        callback = MagicMock()
+
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content="test",
+                config_path=Path("/tmp/test.jshc"),
+                config_name="test",
+                config_hash="abc123",
+                parameters={"x": 1},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+        ])
+
+        result = run_sweep(cli, job_set, callback=callback, quiet=True)
+
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(callback.call_count, 1)
+
+    def test_stop_on_failure(self):
+        """Should stop on first failure when stop_on_failure=True."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        # First call succeeds, second fails
+        cli.run.side_effect = [
+            MagicMock(success=True, exit_code=0),
+            MagicMock(success=False, exit_code=1),
+            MagicMock(success=True, exit_code=0),
+        ]
+
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content=f"test{i}",
+                config_path=Path(f"/tmp/test{i}.jshc"),
+                config_name="test",
+                config_hash=f"hash{i}",
+                parameters={"i": i},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+            for i in range(3)
+        ])
+
+        result = run_sweep(cli, job_set, stop_on_failure=True, quiet=True)
+
+        # Should stop after the second job (which failed)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, 1)
 
 
 if __name__ == '__main__':

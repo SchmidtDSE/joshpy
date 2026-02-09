@@ -30,7 +30,8 @@ class TestRunRegistry(unittest.TestCase):
 
         with RunRegistry(":memory:") as registry:
             self.assertIsNotNone(registry.conn)
-        self.assertIsNone(registry.conn)
+        # After close, _conn is None but conn property still works (returns None)
+        self.assertIsNone(registry._conn)
 
     def test_schema_created(self):
         """Schema tables should be created on init."""
@@ -46,6 +47,22 @@ class TestRunRegistry(unittest.TestCase):
             self.assertIn("job_configs", table_names)
             self.assertIn("job_runs", table_names)
             self.assertIn("run_outputs", table_names)
+
+    def test_spatial_disabled(self):
+        """Should work without spatial extension."""
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:", enable_spatial=False)
+        self.assertIsNotNone(registry.conn)
+        registry.close()
+
+    def test_enable_spatial_default(self):
+        """enable_spatial should default to True."""
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+        self.assertTrue(registry.enable_spatial)
+        registry.close()
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
@@ -67,8 +84,6 @@ class TestSessionManagement(unittest.TestCase):
         session_id = self.registry.create_session(
             experiment_name="test_experiment",
             simulation="TestSim",
-            total_jobs=10,
-            total_replicates=30,
         )
         self.assertIsInstance(session_id, str)
         self.assertTrue(len(session_id) > 0)
@@ -78,8 +93,6 @@ class TestSessionManagement(unittest.TestCase):
         session_id = self.registry.create_session(
             experiment_name="sensitivity_analysis",
             simulation="JoshuaTreeSim",
-            total_jobs=50,
-            total_replicates=150,
             template_path="/path/to/template.j2",
             template_hash="abc123def456",
             metadata={"author": "test", "version": "1.0"},
@@ -88,8 +101,9 @@ class TestSessionManagement(unittest.TestCase):
         session = self.registry.get_session(session_id)
         self.assertEqual(session.experiment_name, "sensitivity_analysis")
         self.assertEqual(session.simulation, "JoshuaTreeSim")
-        self.assertEqual(session.total_jobs, 50)
-        self.assertEqual(session.total_replicates, 150)
+        # total_jobs and total_replicates are now computed from actual data
+        self.assertIsNone(session.total_jobs)
+        self.assertIsNone(session.total_replicates)
         self.assertEqual(session.template_path, "/path/to/template.j2")
         self.assertEqual(session.template_hash, "abc123def456")
         self.assertEqual(session.metadata, {"author": "test", "version": "1.0"})
@@ -374,8 +388,6 @@ class TestQueryMethods(unittest.TestCase):
         self.session_id = self.registry.create_session(
             experiment_name="test",
             simulation="TestSim",
-            total_jobs=3,
-            total_replicates=9,
         )
 
         # Create configs with different parameters
@@ -442,8 +454,10 @@ class TestQueryMethods(unittest.TestCase):
         self.assertEqual(summary.session_id, self.session_id)
         self.assertEqual(summary.experiment_name, "test")
         self.assertEqual(summary.simulation, "TestSim")
+        # total_jobs is computed from registered configs (3)
         self.assertEqual(summary.total_jobs, 3)
-        self.assertEqual(summary.total_replicates, 9)
+        # total_replicates is computed from actual runs (3)
+        self.assertEqual(summary.total_replicates, 3)
         self.assertEqual(summary.runs_completed, 3)
         self.assertEqual(summary.runs_succeeded, 2)
         self.assertEqual(summary.runs_failed, 1)

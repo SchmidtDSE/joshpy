@@ -49,7 +49,7 @@ class TestCellDataLoader:
         loader = CellDataLoader(registry)
 
         # Create session and config
-        session_id = registry.create_session("test", "TestSim", 1, 1)
+        session_id = registry.create_session(experiment_name="test", simulation="TestSim")
         registry.register_config(session_id, "abc123", "test", {})
         # Create run record (required for foreign key)
         registry.start_run("abc123")
@@ -140,7 +140,7 @@ class TestCellDataLoader:
         loader = CellDataLoader(registry)
 
         # Create session, config, and run
-        session_id = registry.create_session("test", "TestSim", 1, 1)
+        session_id = registry.create_session(experiment_name="test", simulation="TestSim")
         registry.register_config(session_id, "abc", "test", {})
         run_id = registry.start_run("abc")
 
@@ -172,7 +172,7 @@ class TestCellDataLoader:
         loader = CellDataLoader(registry)
 
         # Create session, configs, and runs
-        session_id = registry.create_session("test", "TestSim", 2, 2)
+        session_id = registry.create_session(experiment_name="test", simulation="TestSim")
         files = []
         for i in range(2):
             config_hash = f"hash_{i}"
@@ -211,8 +211,6 @@ class TestDiagnosticQueries:
         session_id = self.registry.create_session(
             experiment_name="test",
             simulation="TestSim",
-            total_jobs=1,
-            total_replicates=3,
         )
         self.registry.register_config(
             session_id=session_id,
@@ -304,7 +302,7 @@ class TestDiagnosticQueries:
         """Test comparing variables across parameter values."""
         skip_if_no_pandas()
         # Add another config with different parameter
-        session2 = self.registry.create_session("test2", "TestSim", 1, 1)
+        session2 = self.registry.create_session(experiment_name="test2", simulation="TestSim")
         self.registry.register_config(
             session_id=session2,
             config_hash="def456",
