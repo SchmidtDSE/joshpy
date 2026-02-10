@@ -7,6 +7,9 @@ from unittest.mock import MagicMock, patch
 from joshpy.cli import (
     CLIResult,
     DiscoverConfigConfig,
+    ExportFileInfo,
+    ExportPaths,
+    InspectExportsConfig,
     InspectJshdConfig,
     JoshCLI,
     PreprocessConfig,
@@ -473,6 +476,340 @@ class TestJoshCLI(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.exit_code, -1)
         self.assertIn("Java not found", result.stderr)
+
+
+class TestInspectExportsConfig(unittest.TestCase):
+    """Tests for InspectExportsConfig dataclass."""
+
+    def test_basic_creation(self):
+        """Basic config with required fields."""
+        config = InspectExportsConfig(
+            script=Path("simulation.josh"),
+            simulation="Main",
+        )
+        self.assertEqual(config.script, Path("simulation.josh"))
+        self.assertEqual(config.simulation, "Main")
+        self.assertTrue(config.json_output)
+
+    def test_frozen(self):
+        """Config should be immutable."""
+        config = InspectExportsConfig(
+            script=Path("simulation.josh"),
+            simulation="Main",
+        )
+        with self.assertRaises(AttributeError):
+            config.simulation = "Other"  # type: ignore
+
+
+class TestExportFileInfo(unittest.TestCase):
+    """Tests for ExportFileInfo dataclass."""
+
+    def test_basic_creation(self):
+        """Basic creation with all fields."""
+        info = ExportFileInfo(
+            raw='"file:///tmp/output.csv"',
+            protocol="file",
+            host="",
+            path="/tmp/output.csv",
+            file_type="csv",
+        )
+        self.assertEqual(info.protocol, "file")
+        self.assertEqual(info.path, "/tmp/output.csv")
+        self.assertEqual(info.file_type, "csv")
+
+
+class TestExportPaths(unittest.TestCase):
+    """Tests for ExportPaths dataclass."""
+
+    def test_get_patch_path_when_present(self):
+        """get_patch_path returns path when patch export is configured."""
+        paths = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw='"file:///tmp/output.csv"',
+                    protocol="file",
+                    host="",
+                    path="/tmp/output.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={
+                "organism": None,
+                "patch": None,
+                "agent": None,
+                "disturbance": None,
+            },
+        )
+        self.assertEqual(paths.get_patch_path(), "/tmp/output.csv")
+
+    def test_get_patch_path_when_missing(self):
+        """get_patch_path returns None when patch export is not configured."""
+        paths = ExportPaths(
+            simulation="Main",
+            export_files={"patch": None, "meta": None, "entity": None},
+            debug_files={
+                "organism": None,
+                "patch": None,
+                "agent": None,
+                "disturbance": None,
+            },
+        )
+        self.assertIsNone(paths.get_patch_path())
+
+    def test_resolve_path_with_template_variables(self):
+        """resolve_path correctly substitutes template variables."""
+        paths = ExportPaths(
+            simulation="Main",
+            export_files={"patch": None, "meta": None, "entity": None},
+            debug_files={
+                "organism": None,
+                "patch": None,
+                "agent": None,
+                "disturbance": None,
+            },
+        )
+        resolved = paths.resolve_path(
+            "/tmp/output_{maxGrowth}_{replicate}.csv",
+            maxGrowth=50,
+            replicate=0,
+        )
+        self.assertEqual(resolved, Path("/tmp/output_50_0.csv"))
+
+    def test_resolve_path_missing_variable_raises(self):
+        """resolve_path raises KeyError for missing template variables."""
+        paths = ExportPaths(
+            simulation="Main",
+            export_files={"patch": None, "meta": None, "entity": None},
+            debug_files={
+                "organism": None,
+                "patch": None,
+                "agent": None,
+                "disturbance": None,
+            },
+        )
+        with self.assertRaises(KeyError):
+            paths.resolve_path("/tmp/output_{maxGrowth}_{replicate}.csv", maxGrowth=50)
+
+
+class TestInspectExports(unittest.TestCase):
+    """Tests for JoshCLI.inspect_exports method."""
+
+    # Use the local jar that exists in the repo
+    JAR_PATH = Path(__file__).parent.parent / "jar" / "joshsim-fat.jar"
+    EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
+
+    @patch("subprocess.run")
+    def test_inspect_exports_parses_json(self, mock_run):
+        """inspect_exports correctly parses JSON output."""
+        json_output = """{
+  "simulation": "Main",
+  "exportFiles": {
+    "patch": {
+      "raw": "\\"file:///tmp/hello_josh_{maxGrowth}_{replicate}.csv\\"",
+      "protocol": "file",
+      "host": "",
+      "path": "/tmp/hello_josh_{maxGrowth}_{replicate}.csv",
+      "fileType": "csv"
+    },
+    "meta": null,
+    "entity": null
+  },
+  "debugFiles": {
+    "organism": null,
+    "patch": null,
+    "agent": null,
+    "disturbance": null
+  }
+}"""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json_output,
+            stderr="",
+        )
+
+        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        config = InspectExportsConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+        )
+
+        result = cli.inspect_exports(config)
+
+        self.assertEqual(result.simulation, "Main")
+        self.assertIsNotNone(result.export_files["patch"])
+        self.assertEqual(
+            result.export_files["patch"].path, "/tmp/hello_josh_{maxGrowth}_{replicate}.csv"
+        )
+        self.assertEqual(result.export_files["patch"].protocol, "file")
+        self.assertEqual(result.export_files["patch"].file_type, "csv")
+        self.assertIsNone(result.export_files["meta"])
+        self.assertIsNone(result.export_files["entity"])
+        self.assertIsNone(result.debug_files["organism"])
+
+    @patch("subprocess.run")
+    def test_inspect_exports_omits_json_flag_when_true(self, mock_run):
+        """inspect_exports omits --json flag when json_output is True (default).
+
+        Note: --json is a toggle flag. Default is true, so we don't pass it.
+        Passing --json would toggle it OFF.
+        """
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"simulation": "Main", "exportFiles": {}, "debugFiles": {}}',
+            stderr="",
+        )
+
+        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        config = InspectExportsConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            json_output=True,
+        )
+
+        cli.inspect_exports(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--json", cmd)  # Not included - default is true
+        self.assertIn("inspect-exports", cmd)
+        self.assertIn("Main", cmd)
+
+    @patch("subprocess.run")
+    def test_inspect_exports_includes_json_flag_when_false(self, mock_run):
+        """inspect_exports includes --json flag when json_output is False.
+
+        Note: --json is a toggle flag. Default is true, so passing --json toggles it OFF.
+        """
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="Simulation: Main\n...",  # Human-readable output
+            stderr="",
+        )
+
+        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        config = InspectExportsConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            json_output=False,
+        )
+
+        # This will fail to parse JSON, but we're just testing the flag is present
+        try:
+            cli.inspect_exports(config)
+        except Exception:
+            pass  # Expected - can't parse human-readable as JSON
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--json", cmd)  # Included to toggle OFF JSON
+
+    @patch("subprocess.run")
+    def test_inspect_exports_raises_on_failure(self, mock_run):
+        """inspect_exports raises RuntimeError on non-zero exit code."""
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Error: Simulation not found",
+        )
+
+        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        config = InspectExportsConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="NonExistent",
+        )
+
+        with self.assertRaises(RuntimeError) as context:
+            cli.inspect_exports(config)
+
+        self.assertIn("inspect-exports failed", str(context.exception))
+        self.assertIn("exit code 1", str(context.exception))
+
+    @patch("subprocess.run")
+    def test_inspect_exports_handles_all_exports_none(self, mock_run):
+        """inspect_exports handles case where all exports are null."""
+        json_output = """{
+  "simulation": "Main",
+  "exportFiles": {
+    "patch": null,
+    "meta": null,
+    "entity": null
+  },
+  "debugFiles": {
+    "organism": null,
+    "patch": null,
+    "agent": null,
+    "disturbance": null
+  }
+}"""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json_output,
+            stderr="",
+        )
+
+        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        config = InspectExportsConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+        )
+
+        result = cli.inspect_exports(config)
+
+        self.assertEqual(result.simulation, "Main")
+        self.assertIsNone(result.export_files["patch"])
+        self.assertIsNone(result.export_files["meta"])
+        self.assertIsNone(result.export_files["entity"])
+        self.assertIsNone(result.get_patch_path())
+
+
+class TestInspectExportsIntegration(unittest.TestCase):
+    """Integration tests for inspect_exports using local jar."""
+
+    # Use the local jar that exists in the repo
+    JAR_PATH = Path(__file__).parent.parent / "jar" / "joshsim-fat.jar"
+    EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
+    JAVA_PATH = Path(__file__).parent.parent / ".pixi" / "envs" / "default" / "bin" / "java"
+
+    def test_inspect_exports_real_file(self):
+        """Integration test: inspect_exports parses real Josh file."""
+        script_path = self.EXAMPLES_DIR / "hello_cli_configurable.josh"
+        if not script_path.exists():
+            self.skipTest(f"Example file not found: {script_path}")
+        if not self.JAVA_PATH.exists():
+            self.skipTest(f"Java not found at: {self.JAVA_PATH}")
+
+        cli = JoshCLI(josh_jar=self.JAR_PATH, java_path=str(self.JAVA_PATH))
+        config = InspectExportsConfig(
+            script=script_path,
+            simulation="Main",
+        )
+
+        result = cli.inspect_exports(config)
+
+        self.assertEqual(result.simulation, "Main")
+        self.assertIsNotNone(result.export_files["patch"])
+        self.assertEqual(result.export_files["patch"].protocol, "file")
+        self.assertEqual(result.export_files["patch"].file_type, "csv")
+        self.assertIn("{maxGrowth}", result.export_files["patch"].path)
+        self.assertIn("{replicate}", result.export_files["patch"].path)
+
+    def test_inspect_exports_nonexistent_simulation_raises(self):
+        """Integration test: inspect_exports raises for nonexistent simulation."""
+        script_path = self.EXAMPLES_DIR / "hello_cli_configurable.josh"
+        if not script_path.exists():
+            self.skipTest(f"Example file not found: {script_path}")
+        if not self.JAVA_PATH.exists():
+            self.skipTest(f"Java not found at: {self.JAVA_PATH}")
+
+        cli = JoshCLI(josh_jar=self.JAR_PATH, java_path=str(self.JAVA_PATH))
+        config = InspectExportsConfig(
+            script=script_path,
+            simulation="NonExistentSimulation",
+        )
+
+        with self.assertRaises(RuntimeError):
+            cli.inspect_exports(config)
 
 
 if __name__ == "__main__":
