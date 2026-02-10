@@ -29,6 +29,7 @@ Example usage:
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -216,6 +217,89 @@ class InspectJshdConfig:
     timestep: int
     x: int
     y: int
+
+
+@dataclass(frozen=True)
+class InspectExportsConfig:
+    """Arguments for 'java -jar joshsim.jar inspect-exports' command.
+
+    Parses a Josh script and extracts export/debug file paths without running.
+
+    Attributes:
+        script: Path to Josh script file.
+        simulation: Name of simulation to inspect.
+        json_output: Output in JSON format (default: True).
+    """
+
+    script: Path
+    simulation: str
+    json_output: bool = True
+
+
+@dataclass
+class ExportFileInfo:
+    """Parsed export file information.
+
+    Attributes:
+        raw: Original path string as specified in script.
+        protocol: URL protocol (e.g., "file").
+        host: URL host (empty for local files).
+        path: File path component.
+        file_type: File extension/type (e.g., "csv").
+    """
+
+    raw: str
+    protocol: str
+    host: str
+    path: str
+    file_type: str
+
+
+@dataclass
+class ExportPaths:
+    """Parsed export paths from inspect-exports output.
+
+    Attributes:
+        simulation: Simulation name.
+        export_files: Dict of export type -> ExportFileInfo or None.
+                      Keys: "patch", "meta", "entity"
+        debug_files: Dict of debug type -> ExportFileInfo or None.
+                     Keys: "organism", "patch", "agent", "disturbance"
+    """
+
+    simulation: str
+    export_files: dict[str, ExportFileInfo | None]
+    debug_files: dict[str, ExportFileInfo | None]
+
+    def get_patch_path(self) -> str | None:
+        """Get the patch export file path, if configured."""
+        if self.export_files.get("patch"):
+            return self.export_files["patch"].path
+        return None
+
+    def resolve_path(self, path_template: str, **kwargs: Any) -> Path:
+        """Resolve template variables in a path.
+
+        Template variables: {replicate}, {step}, {variable}, {timestamp},
+        and any custom job parameters.
+
+        Args:
+            path_template: Path with template variables.
+            **kwargs: Values to substitute (e.g., replicate=0, maxGrowth=50).
+
+        Returns:
+            Resolved Path object.
+
+        Example:
+            path = export_paths.resolve_path(
+                "/tmp/output_{maxGrowth}_{replicate}.csv",
+                maxGrowth=50,
+                replicate=0,
+            )
+            # Returns: Path("/tmp/output_50_0.csv")
+        """
+        resolved = path_template.format(**kwargs)
+        return Path(resolved)
 
 
 # -----------------------------------------------------------------------------
@@ -509,3 +593,65 @@ class JoshCLI:
             str(config.y),
         ]
         return self._execute(args, timeout=timeout)
+
+    def inspect_exports(
+        self, config: InspectExportsConfig, timeout: float | None = None
+    ) -> ExportPaths:
+        """Inspect export paths in a Josh script.
+
+        Args:
+            config: Inspect exports configuration.
+            timeout: Timeout in seconds.
+
+        Returns:
+            ExportPaths with parsed export file information.
+
+        Raises:
+            RuntimeError: If command fails (includes exit code context).
+
+        Note:
+            Currently only available in local jar (joshsim-fat.jar),
+            not yet in prod/dev jars.
+        """
+        args = ["inspect-exports", str(config.script.resolve()), config.simulation]
+
+        # Note: --json is a toggle flag with default=true. Passing --json toggles it OFF.
+        # So we only add --json when json_output is False (to get human-readable output).
+        if not config.json_output:
+            args.append("--json")
+
+        result = self._execute(args, timeout=timeout)
+
+        if not result.success:
+            raise RuntimeError(
+                f"inspect-exports failed (exit code {result.exit_code}): {result.stderr}"
+            )
+
+        # Parse JSON output
+        data = json.loads(result.stdout)
+
+        def parse_file_info(info: dict[str, Any] | None) -> ExportFileInfo | None:
+            if info is None:
+                return None
+            return ExportFileInfo(
+                raw=info["raw"],
+                protocol=info["protocol"],
+                host=info["host"],
+                path=info["path"],
+                file_type=info["fileType"],
+            )
+
+        return ExportPaths(
+            simulation=data["simulation"],
+            export_files={
+                "patch": parse_file_info(data["exportFiles"].get("patch")),
+                "meta": parse_file_info(data["exportFiles"].get("meta")),
+                "entity": parse_file_info(data["exportFiles"].get("entity")),
+            },
+            debug_files={
+                "organism": parse_file_info(data["debugFiles"].get("organism")),
+                "patch": parse_file_info(data["debugFiles"].get("patch")),
+                "agent": parse_file_info(data["debugFiles"].get("agent")),
+                "disturbance": parse_file_info(data["debugFiles"].get("disturbance")),
+            },
+        )
