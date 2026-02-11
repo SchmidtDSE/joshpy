@@ -1072,7 +1072,7 @@ class RunRegistry:
                 COUNT(CASE WHEN exit_code = 0 THEN 1 END) as succeeded,
                 COUNT(CASE WHEN exit_code IS NOT NULL AND exit_code != 0 THEN 1 END) as failed
             FROM job_runs r
-            JOIN job_configs c ON r.config_hash = c.config_hash
+            JOIN job_configs c ON r.run_hash = c.run_hash
             WHERE c.session_id = ?
             """,
             [session_id],
