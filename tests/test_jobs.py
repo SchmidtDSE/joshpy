@@ -777,6 +777,118 @@ class TestRunSweep(unittest.TestCase):
         # CLI.run should not be called
         cli.run.assert_not_called()
 
+    def test_remote_requires_api_key(self):
+        """remote=True without api_key should raise ValueError."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content="test",
+                config_path=Path("/tmp/test.jshc"),
+                config_name="test",
+                run_hash="abc123",
+                parameters={},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+        ])
+
+        with self.assertRaises(ValueError) as cm:
+            run_sweep(cli, job_set, remote=True, quiet=True)
+
+        self.assertIn("api_key", str(cm.exception))
+
+    def test_remote_with_api_key_uses_run_remote(self):
+        """remote=True with api_key should use cli.run_remote()."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        cli.run_remote.return_value = MagicMock(success=True, exit_code=0)
+
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content="test",
+                config_path=Path("/tmp/test.jshc"),
+                config_name="test",
+                run_hash="abc123",
+                parameters={"x": 1},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+        ])
+
+        result = run_sweep(cli, job_set, remote=True, api_key="test-key", quiet=True)
+
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, 0)
+        # run_remote should be called, not run
+        cli.run_remote.assert_called_once()
+        cli.run.assert_not_called()
+
+    def test_remote_with_endpoint(self):
+        """remote=True with custom endpoint should pass it to run_remote()."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        cli.run_remote.return_value = MagicMock(success=True, exit_code=0)
+
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content="test",
+                config_path=Path("/tmp/test.jshc"),
+                config_name="test",
+                run_hash="abc123",
+                parameters={},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+        ])
+
+        run_sweep(
+            cli, job_set,
+            remote=True,
+            api_key="test-key",
+            endpoint="https://custom.josh.cloud",
+            quiet=True,
+        )
+
+        # Verify run_remote was called with a config containing the endpoint
+        cli.run_remote.assert_called_once()
+        run_config = cli.run_remote.call_args[0][0]
+        self.assertEqual(run_config.endpoint, "https://custom.josh.cloud")
+        self.assertEqual(run_config.api_key, "test-key")
+
+    def test_local_run_does_not_use_run_remote(self):
+        """remote=False (default) should use cli.run(), not run_remote()."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        cli.run.return_value = MagicMock(success=True, exit_code=0)
+
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content="test",
+                config_path=Path("/tmp/test.jshc"),
+                config_name="test",
+                run_hash="abc123",
+                parameters={},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+        ])
+
+        result = run_sweep(cli, job_set, quiet=True)
+
+        self.assertEqual(result.succeeded, 1)
+        # run should be called, not run_remote
+        cli.run.assert_called_once()
+        cli.run_remote.assert_not_called()
+
     def test_run_with_callback(self):
         """Callback should be called for each job."""
         from unittest.mock import MagicMock

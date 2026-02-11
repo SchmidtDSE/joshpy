@@ -26,10 +26,10 @@ Example usage:
     print(f"Loaded {rows} rows")
 
     # Or use SweepManager for end-to-end workflow
-    manager = SweepManager.from_yaml(Path("sweep_config.yaml"), registry=":memory:")
-    results = manager.run()
-    manager.load_results()
-    df = manager.query("averageHeight", group_by="maxGrowth")
+    with SweepManager.from_config(config, registry=":memory:") as manager:
+        results = manager.run()
+        manager.load_results()
+        df = manager.query("averageHeight", group_by="maxGrowth")
 """
 
 from __future__ import annotations
@@ -235,10 +235,10 @@ class SweepManager:
 
     Example:
         # Simple usage with defaults
-        manager = SweepManager.from_yaml(Path("sweep.yaml"), registry=":memory:")
-        results = manager.run()
-        manager.load_results()
-        df = manager.query("averageHeight", group_by="maxGrowth")
+        with SweepManager.from_config(config, registry=":memory:") as manager:
+            results = manager.run()
+            manager.load_results()
+            df = manager.query("averageHeight", group_by="maxGrowth")
 
         # Builder pattern for more control
         manager = (
@@ -279,20 +279,26 @@ class SweepManager:
         return SweepManagerBuilder(config)
 
     @classmethod
-    def from_dict(cls, config_dict: dict[str, Any], **kwargs: Any) -> SweepManager:
-        """Create from a config dictionary.
+    def from_config(cls, config: JobConfig, **kwargs: Any) -> SweepManager:
+        """Create from a JobConfig.
 
         Args:
-            config_dict: Dictionary representation of JobConfig.
+            config: The job configuration.
             **kwargs: Passed to with_defaults() (registry, experiment_name, jar_path).
 
         Returns:
             Configured SweepManager ready for use.
 
         Example:
-            manager = SweepManager.from_dict(config_dict, registry=":memory:")
+            config = JobConfig(
+                template_path=Path("template.jshc.j2"),
+                source_path=Path("simulation.josh"),
+                simulation="Main",
+                replicates=3,
+                sweep=SweepConfig(parameters=[...]),
+            )
+            manager = SweepManager.from_config(config, registry=":memory:")
         """
-        config = JobConfig.from_dict(config_dict)
         return cls.builder(config).with_defaults(**kwargs).build()
 
     @classmethod

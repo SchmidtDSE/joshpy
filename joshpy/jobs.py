@@ -814,6 +814,9 @@ def run_sweep(
     cli: JoshCLI,
     job_set: JobSet,
     *,
+    remote: bool = False,
+    api_key: str | None = None,
+    endpoint: str | None = None,
     callback: Callable[[ExpandedJob, Any], None] | None = None,
     stop_on_failure: bool = False,
     dry_run: bool = False,
@@ -827,6 +830,9 @@ def run_sweep(
     Args:
         cli: JoshCLI instance to use for execution.
         job_set: Expanded jobs to run.
+        remote: If True, use run_remote() for cloud execution.
+        api_key: Josh Cloud API key (required if remote=True).
+        endpoint: Custom Josh Cloud endpoint URL.
         callback: Optional callback invoked after each job completes.
                   Signature: callback(job, result) -> None.
                   Use with RegistryCallback.record for automatic tracking.
@@ -836,6 +842,9 @@ def run_sweep(
 
     Returns:
         SweepResult with all job outcomes.
+
+    Raises:
+        ValueError: If remote=True but api_key is not provided.
 
     Example:
         from joshpy.jobs import run_sweep, JobExpander
@@ -847,22 +856,34 @@ def run_sweep(
         session_id = registry.create_session(experiment_name="my_sweep")
         callback = RegistryCallback(registry, session_id)
 
-        # Register configs
+        # Register runs
         for job in job_set:
-            registry.register_config(
+            registry.register_run(
                 session_id=session_id,
-                config_hash=job.config_hash,
+                run_hash=job.run_hash,
+                josh_path=str(job.source_path),
                 config_content=job.config_content,
+                file_mappings=job.file_mappings,
                 parameters=job.parameters,
             )
 
-        # Run with tracking
+        # Run locally with tracking
         results = run_sweep(cli, job_set, callback=callback.record)
         print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+
+        # Or run remotely on Josh Cloud:
+        results = run_sweep(
+            cli, job_set,
+            remote=True,
+            api_key="your-api-key",
+            callback=callback.record,
+        )
 
         # Or dry run first:
         results = run_sweep(cli, job_set, dry_run=True)
     """
+    if remote and not api_key:
+        raise ValueError("api_key is required for remote execution (remote=True)")
     total_jobs = job_set.total_jobs
     total_replicates = job_set.total_replicates
 
@@ -882,10 +903,15 @@ def run_sweep(
 
     for i, job in enumerate(job_set):
         if not quiet:
-            print(f"[{i + 1}/{total_jobs}] Running: {job.parameters}")
+            mode = "remote" if remote else "local"
+            print(f"[{i + 1}/{total_jobs}] Running ({mode}): {job.parameters}")
 
-        run_config = to_run_config(job)
-        result = cli.run(run_config)
+        if remote:
+            run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
+            result = cli.run_remote(run_config)
+        else:
+            run_config = to_run_config(job)
+            result = cli.run(run_config)
 
         job_results.append((job, result))
 

@@ -539,10 +539,9 @@ class TestSweepManager(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_from_dict_creates_manager(self):
-        """from_dict should create a SweepManager from config dict."""
-        config_dict = self.config.to_dict()
-        manager = SweepManager.from_dict(config_dict, registry=":memory:")
+    def test_from_config_creates_manager(self):
+        """from_config should create a SweepManager from JobConfig."""
+        manager = SweepManager.from_config(self.config, registry=":memory:")
         
         try:
             self.assertIsInstance(manager, SweepManager)
@@ -572,7 +571,7 @@ class TestSweepManager(unittest.TestCase):
 
     def test_run_raises_without_api_key_for_remote(self):
         """run() should raise ValueError if remote=True without api_key."""
-        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        manager = SweepManager.from_config(self.config, registry=":memory:")
         
         try:
             with self.assertRaises(ValueError) as ctx:
@@ -585,7 +584,7 @@ class TestSweepManager(unittest.TestCase):
 
     def test_run_dry_run_does_not_execute(self):
         """run() with dry_run=True should not execute jobs."""
-        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        manager = SweepManager.from_config(self.config, registry=":memory:")
         
         try:
             result = manager.run(dry_run=True, quiet=True)
@@ -600,7 +599,7 @@ class TestSweepManager(unittest.TestCase):
 
     def test_cleanup_removes_temp_files(self):
         """cleanup() should remove temporary config files."""
-        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        manager = SweepManager.from_config(self.config, registry=":memory:")
         temp_dir = manager.job_set.temp_dir
         
         # Temp dir should exist before cleanup
@@ -615,9 +614,7 @@ class TestSweepManager(unittest.TestCase):
 
     def test_context_manager_cleans_up(self):
         """Using as context manager should cleanup on exit."""
-        config_dict = self.config.to_dict()
-        
-        with SweepManager.from_dict(config_dict, registry=":memory:") as manager:
+        with SweepManager.from_config(self.config, registry=":memory:") as manager:
             temp_dir = manager.job_set.temp_dir
             self.assertTrue(temp_dir.exists())
         
@@ -647,7 +644,7 @@ class TestSweepManager(unittest.TestCase):
         from joshpy.jobs import SweepResult
         mock_run_sweep.return_value = SweepResult(succeeded=2, failed=0)
         
-        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        manager = SweepManager.from_config(self.config, registry=":memory:")
         
         try:
             result = manager.run(quiet=True)
@@ -663,7 +660,7 @@ class TestSweepManager(unittest.TestCase):
         """load_results() should call recover_sweep_results."""
         mock_recover.return_value = 100
         
-        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        manager = SweepManager.from_config(self.config, registry=":memory:")
         
         try:
             rows = manager.load_results(quiet=True)
