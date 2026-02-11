@@ -49,7 +49,7 @@ metadata = client.get_metadata(code, "Main")
 print(f"Grid size: {metadata.patch_size}")
 
 # Run simulation
-results = client.run_simulation(code, "Main", virtual_files=[], replicates=3)
+results = client.run_simulation(code, "Main", replicates=3)
 ```
 
 ### Parameter Sweeps with Jinja Templating

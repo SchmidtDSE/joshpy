@@ -10,7 +10,6 @@ import joshpy.geocode
 import joshpy.metadata
 import joshpy.remote
 import joshpy.strategy
-import joshpy.virtual_file
 
 # Jar management (always available)
 from joshpy.jar import (
@@ -155,7 +154,7 @@ class Josh:
     """
     return self._backend.get_metadata(code, name)
 
-  def run_simulation(self, code: str, name: str, virtual_files: joshpy.definitions.FlatFiles,
+  def run_simulation(self, code: str, name: str,
         replicates: int = 1, geocode: bool = False) -> joshpy.definitions.SimulationResults:
     """Run a simulation using the current Josh backend.
 
@@ -168,7 +167,6 @@ class Josh:
     Args:
       code: The code to execute.
       name: The name of the simulation from the provided code to execute.
-      virtual_files: List of virtual files to provide to the simulation within its sandbox.
       replicates: The number of replicates for which the simulation should run.
       geocode: Flag indicating if geocoding should be provided where true will add
         position.longitude and position.latitude. These will not be added if false.
@@ -182,7 +180,7 @@ class Josh:
         string description of the first error.
       ValueError: Raised if the simulation of the given name cannot be found.
     """
-    results = self._backend.run_simulation(code, name, virtual_files, replicates)
+    results = self._backend.run_simulation(code, name, replicates)
 
     if geocode:
       metadata = self._backend.get_metadata(code, name)

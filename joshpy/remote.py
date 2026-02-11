@@ -127,7 +127,6 @@ class RemoteJoshDecorator(joshpy.strategy.JoshBackend):
     return metadata
 
   def run_simulation(self, code: str, name: str,
-      virtual_files: joshpy.definitions.FlatFiles,
       replicates: int) -> joshpy.definitions.SimulationResults:
     """Run a simulation using the current Josh backend.
 
@@ -138,7 +137,6 @@ class RemoteJoshDecorator(joshpy.strategy.JoshBackend):
     Args:
       code: The code to execute.
       name: The name of the simulation from the provided code to execute.
-      virtual_files: List of virtual files to provide to the simulation within its sandbox.
       replicates: The number of replicates for which the simulation should run.
 
     Returns:
@@ -155,8 +153,7 @@ class RemoteJoshDecorator(joshpy.strategy.JoshBackend):
       'code': code,
       'name': name,
       'replicates': str(replicates),
-      'api_key': self._api_key,
-      'externalData': virtual_files
+      'api_key': self._api_key
     }
 
     try:

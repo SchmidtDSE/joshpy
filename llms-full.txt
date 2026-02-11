@@ -39,7 +39,6 @@ joshpy/
 ├── diagnostics.py   # Diagnostic plotting (SimulationDiagnostics)
 ├── jar.py           # JAR file management
 ├── metadata.py      # Simulation metadata
-├── virtual_file.py  # Virtual file system support
 ├── parse.py         # Response parsing utilities
 ├── remote.py        # Remote HTTP backend
 ├── strategy.py      # Backend interface
@@ -92,7 +91,6 @@ print(f"Bounds: ({metadata.get_start_x()}, {metadata.get_start_y()}) to ({metada
 results = client.run_simulation(
     code=code,
     name="Main",
-    virtual_files=[],  # Optional external data files
     replicates=3,
     geocode=True,  # Add longitude/latitude to results
 )
@@ -109,7 +107,7 @@ for replicate_idx, replicate_data in enumerate(results):
 | `get_error(code)` | Returns first syntax error or None if valid |
 | `get_simulations(code)` | Returns list of simulation names in code |
 | `get_metadata(code, name)` | Returns SimulationMetadata for named simulation |
-| `run_simulation(code, name, virtual_files, replicates, geocode)` | Executes simulation and returns results |
+| `run_simulation(code, name, replicates, geocode)` | Executes simulation and returns results |
 
 ### SimulationMetadata
 
@@ -126,40 +124,6 @@ metadata.get_max_longitude()  # Maximum longitude (if in degrees)
 metadata.get_min_latitude()   # Minimum latitude (if in degrees)
 metadata.get_max_latitude()   # Maximum latitude (if in degrees)
 metadata.has_degrees()        # True if lat/lon specified
-```
-
-### Virtual Files
-
-Provide external data to sandboxed simulations:
-
-```python
-from joshpy.virtual_file import VirtualFile, serialize_files
-
-# Text file
-config_file = VirtualFile(
-    name="config.txt",
-    content="maxGrowth = 10",
-    is_binary=False
-)
-
-# Binary file (base64 encoded)
-import base64
-with open("data.bin", "rb") as f:
-    encoded = base64.b64encode(f.read()).decode()
-
-data_file = VirtualFile(
-    name="data.bin",
-    content=encoded,
-    is_binary=True
-)
-
-# Pass to simulation
-results = client.run_simulation(
-    code=code,
-    name="Main",
-    virtual_files=[config_file, data_file],
-    replicates=1
-)
 ```
 
 ---
@@ -1340,12 +1304,6 @@ SimulationResults = List[List[Dict]]
     # Replicate 1
     [...],
 ]
-```
-
-### FlatFiles
-
-```python
-FlatFiles = List[VirtualFile]
 ```
 
 ---
