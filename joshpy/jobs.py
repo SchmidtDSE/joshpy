@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from joshpy.cli import CLIResult, JoshCLI, RunConfig, RunRemoteConfig
+    from joshpy.cli import JoshCLI, RunConfig, RunRemoteConfig
 
 try:
     import numpy as np
@@ -84,19 +84,84 @@ def _check_yaml() -> None:
         )
 
 
-def compute_config_hash(config_content: str) -> str:
-    """Compute MD5 hash of config content for unique identification.
+def _hash_file(path: Path) -> str:
+    """Compute MD5 hash of file contents.
 
-    Returns first 12 characters of hex digest for reasonable uniqueness
-    while keeping paths manageable.
+    Reads file in chunks to handle large files efficiently.
 
     Args:
-        config_content: The rendered configuration file content.
+        path: Path to the file to hash.
+
+    Returns:
+        Full hex digest of file contents.
+    """
+    hasher = hashlib.md5()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _compute_run_hash(
+    josh_path: Path | None,
+    config_content: str,
+    file_mappings: dict[str, Path] | None = None,
+) -> str:
+    """Compute hash uniquely identifying a simulation specification.
+
+    Includes:
+    - Josh script content (.josh) - read at hash time
+    - Rendered config content (.jshc) - not the template
+    - Content hashes of all input data files (.jshd, etc.)
+
+    This provides a complete fingerprint of all inputs to a simulation,
+    ensuring that runs with different input data get different hashes.
+
+    Args:
+        josh_path: Path to the .josh script file. If None, only config and
+            file_mappings are included in the hash.
+        config_content: Rendered .jshc configuration content.
+        file_mappings: Optional dict mapping names to file paths.
+            All files must exist at hash time.
 
     Returns:
         12-character hex string hash.
+
+    Raises:
+        FileNotFoundError: If josh_path or any file in file_mappings doesn't exist.
+
+    Example:
+        run_hash = _compute_run_hash(
+            josh_path=Path("simulation.josh"),
+            config_content=rendered_jshc,
+            file_mappings={"climate": Path("data/rcp85.jshd")},
+        )
     """
-    return hashlib.md5(config_content.encode("utf-8")).hexdigest()[:12]
+    hasher = hashlib.md5()
+
+    # 1. Josh script content (if provided)
+    if josh_path is not None:
+        if not josh_path.exists():
+            raise FileNotFoundError(f"Josh script not found: {josh_path}")
+        josh_content = josh_path.read_text(encoding="utf-8")
+        hasher.update(josh_content.encode("utf-8"))
+
+    # 2. Rendered config content
+    hasher.update(config_content.encode("utf-8"))
+
+    # 3. Input data files (sorted for determinism)
+    if file_mappings:
+        for name in sorted(file_mappings.keys()):
+            path = file_mappings[name]
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"Input data file not found: {path} (referenced as '{name}'). "
+                    "All files in file_mappings must exist at hash time."
+                )
+            hasher.update(name.encode("utf-8"))
+            hasher.update(_hash_file(path).encode("utf-8"))
+
+    return hasher.hexdigest()[:12]
 
 
 def _normalize_values(values: Any) -> list[Any]:
@@ -415,7 +480,7 @@ class ExpandedJob:
         config_content: Rendered .jshc configuration content.
         config_path: Path to written config file.
         config_name: Logical name for the config (used in --data flag, e.g., "sweep").
-        config_hash: MD5 hash of config content.
+        run_hash: MD5 hash of josh + config + file_mappings (12-char hex).
         parameters: Parameter values used for this job.
         simulation: Simulation name.
         replicates: Number of replicates.
@@ -434,7 +499,7 @@ class ExpandedJob:
     config_content: str
     config_path: Path
     config_name: str
-    config_hash: str
+    run_hash: str
     parameters: dict[str, Any]
     simulation: str
     replicates: int
@@ -562,19 +627,23 @@ class JobExpander:
             # Render template
             rendered = template.render(**params)
 
-            # Compute hash
-            config_hash = compute_config_hash(rendered)
+            # Compute run_hash (includes josh + config + file_mappings)
+            run_hash = _compute_run_hash(
+                josh_path=config.source_path,
+                config_content=rendered,
+                file_mappings=config.file_mappings if config.file_mappings else None,
+            )
 
             # Write config file
-            config_subdir = output_dir / f"job_{i:04d}_{config_hash}"
+            config_subdir = output_dir / f"job_{i:04d}_{run_hash}"
             config_subdir.mkdir(parents=True, exist_ok=True)
             config_path = config_subdir / config_name
             config_path.write_text(rendered)
 
             # Build custom tags from parameters
             custom_tags = {str(k): str(v) for k, v in params.items()}
-            # Add config_hash as a custom tag
-            custom_tags["config_hash"] = config_hash
+            # Add run_hash as a custom tag
+            custom_tags["run_hash"] = run_hash
 
             # Extract logical config name (without .jshc extension) for --data flag
             logical_name = config_name.removesuffix(".jshc")
@@ -584,7 +653,7 @@ class JobExpander:
                 config_content=rendered,
                 config_path=config_path,
                 config_name=logical_name,
-                config_hash=config_hash,
+                run_hash=run_hash,
                 parameters=params,
                 simulation=config.simulation,
                 replicates=config.replicates,
@@ -742,7 +811,7 @@ class SweepResult:
 
 
 def run_sweep(
-    cli: "JoshCLI",
+    cli: JoshCLI,
     job_set: JobSet,
     *,
     callback: Callable[[ExpandedJob, Any], None] | None = None,
@@ -804,7 +873,7 @@ def run_sweep(
         if not quiet:
             print("Dry run - no jobs will be executed")
             for i, job in enumerate(job_set):
-                print(f"  [{i+1}/{total_jobs}] {job.parameters}")
+                print(f"  [{i + 1}/{total_jobs}] {job.parameters}")
         return SweepResult()
 
     job_results: list[tuple[ExpandedJob, Any]] = []
@@ -813,7 +882,7 @@ def run_sweep(
 
     for i, job in enumerate(job_set):
         if not quiet:
-            print(f"[{i+1}/{total_jobs}] Running: {job.parameters}")
+            print(f"[{i + 1}/{total_jobs}] Running: {job.parameters}")
 
         run_config = to_run_config(job)
         result = cli.run(run_config)
@@ -823,7 +892,7 @@ def run_sweep(
         if result.success:
             succeeded += 1
             if not quiet:
-                print(f"  [OK] Completed successfully")
+                print("  [OK] Completed successfully")
         else:
             failed += 1
             if not quiet:
@@ -834,7 +903,7 @@ def run_sweep(
 
         if stop_on_failure and not result.success:
             if not quiet:
-                print(f"Stopping due to failure (stop_on_failure=True)")
+                print("Stopping due to failure (stop_on_failure=True)")
             break
 
     if not quiet:
