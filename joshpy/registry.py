@@ -165,6 +165,28 @@ class SessionInfo:
     status: str
     metadata: dict[str, Any] | None
 
+    @property
+    def job_config(self) -> Any:
+        """Extract JobConfig from metadata if stored.
+
+        Returns the JobConfig used to create this session, enabling
+        session reconstruction patterns (re-expand jobs from stored config).
+
+        Returns:
+            JobConfig if metadata contains 'job_config' key, None otherwise.
+
+        Example:
+            session = registry.get_session(session_id)
+            if session.job_config:
+                # Re-expand jobs for execution
+                job_set = JobExpander().expand(session.job_config)
+        """
+        if self.metadata and "job_config" in self.metadata:
+            from joshpy.jobs import JobConfig
+
+            return JobConfig.from_dict(self.metadata["job_config"])
+        return None
+
 
 @dataclass
 class ConfigInfo:
@@ -592,6 +614,7 @@ class RunRegistry:
         template_path: str | None = None,
         template_hash: str | None = None,
         metadata: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Create a new sweep session.
 
@@ -601,15 +624,19 @@ class RunRegistry:
             template_path: Path to the Jinja template file.
             template_hash: Hash of the template content.
             metadata: Additional metadata dictionary.
+            session_id: Optional externally-provided session ID.
+                        If None, generates a UUID. This allows the frontend/API
+                        layer to manage session IDs (e.g., using project IDs).
 
         Returns:
-            The generated session ID.
+            The session ID (generated or provided).
 
         Note:
             total_jobs and total_replicates are computed from the JobSet
             after job expansion. Use job_set.total_jobs and job_set.total_replicates.
         """
-        session_id = _generate_id()
+        if session_id is None:
+            session_id = _generate_id()
         metadata_json = json.dumps(metadata) if metadata else None
 
         self.conn.execute(

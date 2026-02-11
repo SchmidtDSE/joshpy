@@ -791,5 +791,212 @@ class TestDataClasses(unittest.TestCase):
         self.assertEqual(summary.runs_failed, 2)
 
 
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestExternalSessionId(unittest.TestCase):
+    """Tests for external session ID support in create_session()."""
+
+    def setUp(self):
+        """Create a fresh in-memory registry for each test."""
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+
+    def tearDown(self):
+        """Close registry after each test."""
+        self.registry.close()
+
+    def test_create_session_with_external_id(self):
+        """create_session should use provided session_id."""
+        external_id = "my-custom-project-id-123"
+        session_id = self.registry.create_session(
+            experiment_name="test_experiment",
+            simulation="TestSim",
+            session_id=external_id,
+        )
+
+        self.assertEqual(session_id, external_id)
+
+        # Verify we can retrieve it
+        session = self.registry.get_session(external_id)
+        self.assertIsNotNone(session)
+        self.assertEqual(session.session_id, external_id)
+        self.assertEqual(session.experiment_name, "test_experiment")
+
+    def test_create_session_generates_id_when_none(self):
+        """create_session should generate UUID when session_id is None."""
+        session_id = self.registry.create_session(
+            experiment_name="test_experiment",
+            session_id=None,
+        )
+
+        # Should be a valid UUID format (36 chars with dashes)
+        self.assertEqual(len(session_id), 36)
+        self.assertEqual(session_id.count("-"), 4)
+
+    def test_create_session_external_id_with_metadata(self):
+        """create_session with external ID should store all fields correctly."""
+        external_id = "frontend-project-456"
+        job_config_dict = {
+            "simulation": "JoshuaTreeSim",
+            "replicates": 3,
+            "source_path": "/path/to/sim.josh",
+        }
+
+        session_id = self.registry.create_session(
+            experiment_name="sensitivity_analysis",
+            simulation="JoshuaTreeSim",
+            metadata={"job_config": job_config_dict, "author": "test"},
+            session_id=external_id,
+        )
+
+        self.assertEqual(session_id, external_id)
+
+        session = self.registry.get_session(external_id)
+        self.assertEqual(session.experiment_name, "sensitivity_analysis")
+        self.assertEqual(session.simulation, "JoshuaTreeSim")
+        self.assertEqual(session.metadata["job_config"], job_config_dict)
+        self.assertEqual(session.metadata["author"], "test")
+
+    def test_create_session_duplicate_external_id_raises(self):
+        """create_session with duplicate external ID should raise error."""
+        external_id = "duplicate-id"
+
+        # First creation should succeed
+        self.registry.create_session(
+            experiment_name="first",
+            session_id=external_id,
+        )
+
+        # Second creation with same ID should raise
+        with self.assertRaises(Exception):  # DuckDB raises constraint violation
+            self.registry.create_session(
+                experiment_name="second",
+                session_id=external_id,
+            )
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestSessionInfoJobConfig(unittest.TestCase):
+    """Tests for SessionInfo.job_config property."""
+
+    def setUp(self):
+        """Create a fresh in-memory registry for each test."""
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+
+    def tearDown(self):
+        """Close registry after each test."""
+        self.registry.close()
+
+    def test_job_config_property_returns_jobconfig(self):
+        """job_config property should return JobConfig when metadata contains it."""
+        from joshpy.jobs import JobConfig
+
+        job_config_dict = {
+            "simulation": "JoshuaTreeSim",
+            "replicates": 3,
+            "source_path": "/path/to/sim.josh",
+        }
+
+        session_id = self.registry.create_session(
+            experiment_name="test",
+            metadata={"job_config": job_config_dict},
+        )
+
+        session = self.registry.get_session(session_id)
+        config = session.job_config
+
+        self.assertIsInstance(config, JobConfig)
+        self.assertEqual(config.simulation, "JoshuaTreeSim")
+        self.assertEqual(config.replicates, 3)
+        self.assertEqual(str(config.source_path), "/path/to/sim.josh")
+
+    def test_job_config_property_returns_none_when_missing(self):
+        """job_config property should return None when metadata has no job_config."""
+        session_id = self.registry.create_session(
+            experiment_name="test",
+            metadata={"other_key": "value"},
+        )
+
+        session = self.registry.get_session(session_id)
+        self.assertIsNone(session.job_config)
+
+    def test_job_config_property_returns_none_when_no_metadata(self):
+        """job_config property should return None when session has no metadata."""
+        session_id = self.registry.create_session(
+            experiment_name="test",
+            metadata=None,
+        )
+
+        session = self.registry.get_session(session_id)
+        self.assertIsNone(session.job_config)
+
+    def test_job_config_property_with_full_config(self):
+        """job_config property should handle full JobConfig with sweep."""
+        from joshpy.jobs import JobConfig
+
+        job_config_dict = {
+            "template_path": "/path/to/template.j2",
+            "simulation": "Main",
+            "replicates": 5,
+            "source_path": "/path/to/sim.josh",
+            "sweep": {
+                "parameters": [
+                    {"name": "maxGrowth", "values": [10, 20, 30]},
+                    {"name": "survivalProb", "values": [0.8, 0.9]},
+                ],
+            },
+            "file_mappings": {
+                "climate": "/data/climate.jshd",
+            },
+        }
+
+        session_id = self.registry.create_session(
+            experiment_name="sweep_test",
+            metadata={"job_config": job_config_dict},
+        )
+
+        session = self.registry.get_session(session_id)
+        config = session.job_config
+
+        self.assertIsInstance(config, JobConfig)
+        self.assertEqual(config.replicates, 5)
+        self.assertIsNotNone(config.sweep)
+        self.assertEqual(len(config.sweep.parameters), 2)
+        self.assertEqual(config.sweep.parameters[0].name, "maxGrowth")
+        self.assertEqual(config.sweep.parameters[0].values, [10, 20, 30])
+        self.assertIn("climate", config.file_mappings)
+
+    def test_job_config_enables_session_reconstruction(self):
+        """job_config property should enable session reconstruction pattern."""
+        from joshpy.jobs import JobConfig
+
+        # Original config
+        original_config = JobConfig(
+            simulation="TestSim",
+            replicates=2,
+            template_string="testParam = {{ testParam }}",
+        )
+
+        # Store in session
+        session_id = self.registry.create_session(
+            experiment_name="reconstruction_test",
+            metadata={"job_config": original_config.to_dict()},
+        )
+
+        # Later: reconstruct from session
+        session = self.registry.get_session(session_id)
+        reconstructed_config = session.job_config
+
+        # Should be equivalent
+        self.assertEqual(reconstructed_config.simulation, original_config.simulation)
+        self.assertEqual(reconstructed_config.replicates, original_config.replicates)
+        self.assertEqual(reconstructed_config.template_string, original_config.template_string)
+
+        # Config is ready for re-expansion (would need template to actually expand)
+        self.assertIsNotNone(reconstructed_config.template_string)
+
+
 if __name__ == "__main__":
     unittest.main()
