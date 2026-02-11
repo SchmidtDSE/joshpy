@@ -22,7 +22,7 @@ Example usage:
 
     # Register configs
     for job in job_set.jobs:
-        registry.register_config(session_id, job.config_hash, job.config_content, job.parameters)
+        registry.register_run(session_id, job.run_hash, str(job.source_path), job.config_content, None, job.parameters)
 
     # Run with tracking
     callback = RegistryCallback(registry, session_id)
@@ -81,16 +81,18 @@ CREATE TABLE IF NOT EXISTS sweep_sessions (
 );
 
 CREATE TABLE IF NOT EXISTS job_configs (
-    config_hash     VARCHAR(12) PRIMARY KEY,
+    run_hash        VARCHAR(12) PRIMARY KEY,
     session_id      VARCHAR REFERENCES sweep_sessions(session_id),
+    josh_path       TEXT,
     config_content  TEXT,
+    file_mappings   JSON,
     parameters      JSON,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS job_runs (
     run_id          VARCHAR PRIMARY KEY,
-    config_hash     VARCHAR(12) REFERENCES job_configs(config_hash),
+    run_hash        VARCHAR(12) REFERENCES job_configs(run_hash),
     replicate       INTEGER,
     started_at      TIMESTAMP,
     completed_at    TIMESTAMP,
@@ -115,7 +117,7 @@ CREATE SEQUENCE IF NOT EXISTS cell_id_seq START 1;
 CREATE TABLE IF NOT EXISTS cell_data (
     cell_id         BIGINT PRIMARY KEY DEFAULT nextval('cell_id_seq'),
     run_id          VARCHAR REFERENCES job_runs(run_id),
-    config_hash     VARCHAR(12),
+    run_hash        VARCHAR(12),
     step            INTEGER NOT NULL,
     replicate       INTEGER NOT NULL,
     position_x      DOUBLE,
@@ -127,7 +129,7 @@ CREATE TABLE IF NOT EXISTS cell_data (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cell_run ON cell_data(run_id);
-CREATE INDEX IF NOT EXISTS idx_cell_config ON cell_data(config_hash);
+CREATE INDEX IF NOT EXISTS idx_cell_run_hash ON cell_data(run_hash);
 CREATE INDEX IF NOT EXISTS idx_cell_step ON cell_data(step);
 CREATE INDEX IF NOT EXISTS idx_cell_replicate ON cell_data(replicate);
 CREATE INDEX IF NOT EXISTS idx_cell_spatial ON cell_data(longitude, latitude);
@@ -169,16 +171,20 @@ class ConfigInfo:
     """Information about a job configuration.
 
     Attributes:
-        config_hash: MD5 hash of the config content (12 chars).
+        run_hash: MD5 hash of josh + config + file_mappings (12 chars).
         session_id: Session this config belongs to.
+        josh_path: Path to the .josh script file.
         config_content: Full text content of the configuration.
+        file_mappings: Dict mapping names to {"path": "...", "hash": "..."}.
         parameters: Parameter values used to generate this config.
         created_at: When the config was registered.
     """
 
-    config_hash: str
+    run_hash: str
     session_id: str
+    josh_path: str | None
     config_content: str
+    file_mappings: dict[str, dict[str, str]] | None
     parameters: dict[str, Any]
     created_at: datetime
 
@@ -189,7 +195,7 @@ class RunInfo:
 
     Attributes:
         run_id: Unique run identifier.
-        config_hash: Config hash for this run.
+        run_hash: Run hash for this run.
         replicate: Replicate number (0-indexed).
         started_at: When the run started.
         completed_at: When the run completed.
@@ -200,7 +206,7 @@ class RunInfo:
     """
 
     run_id: str
-    config_hash: str
+    run_hash: str
     replicate: int
     started_at: datetime | None
     completed_at: datetime | None
@@ -422,7 +428,7 @@ class RunRegistry:
 
             # Get raw results
             rows = registry.query(
-                "SELECT COUNT(*) FROM cell_data WHERE config_hash = ?",
+                "SELECT COUNT(*) FROM cell_data WHERE run_hash = ?",
                 ["abc123"]
             ).fetchone()
         """
@@ -489,12 +495,12 @@ class RunRegistry:
 
         Example:
             with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
-                df = queries.get_timeseries("height", config_hash="abc123")
+                df = queries.get_timeseries("height", run_hash="abc123")
 
             # Nested with time filter
             with registry.spatial_filter(geojson=park_boundary):
                 with registry.time_filter(step_range=(0, 50)):
-                    df = queries.get_timeseries("height", config_hash="abc123")
+                    df = queries.get_timeseries("height", run_hash="abc123")
         """
         if bbox and geojson:
             raise ValueError("Specify either bbox or geojson, not both")
@@ -526,7 +532,7 @@ class RunRegistry:
 
         Example:
             with registry.time_filter(step_range=(0, 50)):
-                df = queries.get_timeseries("height", config_hash="abc123")
+                df = queries.get_timeseries("height", run_hash="abc123")
 
             # Nested with spatial filter
             with registry.time_filter(step_range=(10, 20)):
@@ -723,62 +729,69 @@ class RunRegistry:
             for row in result
         ]
 
-    # ========== Config Management ==========
+    # ========== Run Registration ==========
 
-    def register_config(
+    def register_run(
         self,
         session_id: str,
-        config_hash: str,
+        run_hash: str,
+        josh_path: str,
         config_content: str,
+        file_mappings: dict[str, dict[str, str]] | None,
         parameters: dict[str, Any],
     ) -> None:
-        """Register a job configuration.
+        """Register a job configuration (run specification).
 
         Args:
             session_id: Session this config belongs to.
-            config_hash: MD5 hash of the config content (12 chars).
-            config_content: Full text of the configuration.
+            run_hash: MD5 hash of josh + config + file_mappings (12 chars).
+            josh_path: Path to the .josh script file.
+            config_content: Full text of the rendered configuration.
+            file_mappings: Dict mapping names to {"path": "...", "hash": "..."}.
             parameters: Parameter values used to generate this config.
         """
         parameters_json = json.dumps(parameters)
+        file_mappings_json = json.dumps(file_mappings) if file_mappings else None
 
-        # Use INSERT OR IGNORE to handle duplicate config hashes
+        # Use INSERT OR IGNORE to handle duplicate run hashes
         self.conn.execute(
             """
             INSERT OR IGNORE INTO job_configs
-            (config_hash, session_id, config_content, parameters)
-            VALUES (?, ?, ?, ?)
+            (run_hash, session_id, josh_path, config_content, file_mappings, parameters)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            [config_hash, session_id, config_content, parameters_json],
+            [run_hash, session_id, josh_path, config_content, file_mappings_json, parameters_json],
         )
 
-    def get_config_by_hash(self, config_hash: str) -> ConfigInfo | None:
-        """Get config information by hash.
+    def get_config_by_hash(self, run_hash: str) -> ConfigInfo | None:
+        """Get config information by run hash.
 
         Args:
-            config_hash: The config hash to look up.
+            run_hash: The run hash to look up.
 
         Returns:
             ConfigInfo if found, None otherwise.
         """
         result = self.conn.execute(
             """
-            SELECT config_hash, session_id, config_content, parameters, created_at
+            SELECT run_hash, session_id, josh_path, config_content, file_mappings, parameters, created_at
             FROM job_configs
-            WHERE config_hash = ?
+            WHERE run_hash = ?
             """,
-            [config_hash],
+            [run_hash],
         ).fetchone()
 
         if result is None:
             return None
 
         return ConfigInfo(
-            config_hash=result[0],
+            run_hash=result[0],
             session_id=result[1],
-            config_content=result[2],
-            parameters=json.loads(result[3]) if result[3] else {},
-            created_at=result[4],
+            josh_path=result[2],
+            config_content=result[3],
+            file_mappings=json.loads(result[4]) if result[4] else None,
+            parameters=json.loads(result[5]) if result[5] else {},
+            created_at=result[6],
         )
 
     def get_configs_for_session(self, session_id: str) -> list[ConfigInfo]:
@@ -792,7 +805,7 @@ class RunRegistry:
         """
         result = self.conn.execute(
             """
-            SELECT config_hash, session_id, config_content, parameters, created_at
+            SELECT run_hash, session_id, josh_path, config_content, file_mappings, parameters, created_at
             FROM job_configs
             WHERE session_id = ?
             ORDER BY created_at
@@ -802,11 +815,13 @@ class RunRegistry:
 
         return [
             ConfigInfo(
-                config_hash=row[0],
+                run_hash=row[0],
                 session_id=row[1],
-                config_content=row[2],
-                parameters=json.loads(row[3]) if row[3] else {},
-                created_at=row[4],
+                josh_path=row[2],
+                config_content=row[3],
+                file_mappings=json.loads(row[4]) if row[4] else None,
+                parameters=json.loads(row[5]) if row[5] else {},
+                created_at=row[6],
             )
             for row in result
         ]
@@ -815,7 +830,7 @@ class RunRegistry:
 
     def start_run(
         self,
-        config_hash: str,
+        run_hash: str,
         replicate: int = 0,
         output_path: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -823,7 +838,7 @@ class RunRegistry:
         """Record the start of a job run.
 
         Args:
-            config_hash: Config hash for this run.
+            run_hash: Run hash for this run.
             replicate: Replicate number (0-indexed).
             output_path: Path where output will be written.
             metadata: Additional metadata.
@@ -837,10 +852,10 @@ class RunRegistry:
         self.conn.execute(
             """
             INSERT INTO job_runs
-            (run_id, config_hash, replicate, started_at, output_path, metadata)
+            (run_id, run_hash, replicate, started_at, output_path, metadata)
             VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
             """,
-            [run_id, config_hash, replicate, output_path, metadata_json],
+            [run_id, run_hash, replicate, output_path, metadata_json],
         )
         return run_id
 
@@ -877,7 +892,7 @@ class RunRegistry:
         """
         result = self.conn.execute(
             """
-            SELECT run_id, config_hash, replicate, started_at, completed_at,
+            SELECT run_id, run_hash, replicate, started_at, completed_at,
                    exit_code, output_path, error_message, metadata
             FROM job_runs
             WHERE run_id = ?
@@ -890,7 +905,7 @@ class RunRegistry:
 
         return RunInfo(
             run_id=result[0],
-            config_hash=result[1],
+            run_hash=result[1],
             replicate=result[2],
             started_at=result[3],
             completed_at=result[4],
@@ -900,30 +915,30 @@ class RunRegistry:
             metadata=json.loads(result[8]) if result[8] else None,
         )
 
-    def get_runs_for_config(self, config_hash: str) -> list[RunInfo]:
-        """Get all runs for a config.
+    def get_runs_for_hash(self, run_hash: str) -> list[RunInfo]:
+        """Get all runs for a run hash.
 
         Args:
-            config_hash: The config hash to get runs for.
+            run_hash: The run hash to get runs for.
 
         Returns:
             List of RunInfo objects.
         """
         result = self.conn.execute(
             """
-            SELECT run_id, config_hash, replicate, started_at, completed_at,
+            SELECT run_id, run_hash, replicate, started_at, completed_at,
                    exit_code, output_path, error_message, metadata
             FROM job_runs
-            WHERE config_hash = ?
+            WHERE run_hash = ?
             ORDER BY started_at
             """,
-            [config_hash],
+            [run_hash],
         ).fetchall()
 
         return [
             RunInfo(
                 run_id=row[0],
-                config_hash=row[1],
+                run_hash=row[1],
                 replicate=row[2],
                 started_at=row[3],
                 completed_at=row[4],
@@ -984,10 +999,10 @@ class RunRegistry:
             # No filters - return all runs with their configs
             result = self.conn.execute(
                 """
-                SELECT r.run_id, r.config_hash, r.replicate, r.started_at, r.completed_at,
+                SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
                        r.exit_code, r.output_path, r.error_message, c.parameters
                 FROM job_runs r
-                JOIN job_configs c ON r.config_hash = c.config_hash
+                JOIN job_configs c ON r.run_hash = c.run_hash
                 ORDER BY r.started_at DESC
                 """
             ).fetchall()
@@ -1003,10 +1018,10 @@ class RunRegistry:
             where_clause = " AND ".join(conditions)
             result = self.conn.execute(
                 f"""
-                SELECT r.run_id, r.config_hash, r.replicate, r.started_at, r.completed_at,
+                SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
                        r.exit_code, r.output_path, r.error_message, c.parameters
                 FROM job_runs r
-                JOIN job_configs c ON r.config_hash = c.config_hash
+                JOIN job_configs c ON r.run_hash = c.run_hash
                 WHERE {where_clause}
                 ORDER BY r.started_at DESC
                 """,
@@ -1016,7 +1031,7 @@ class RunRegistry:
         return [
             {
                 "run_id": row[0],
-                "config_hash": row[1],
+                "run_hash": row[1],
                 "replicate": row[2],
                 "started_at": row[3],
                 "completed_at": row[4],
@@ -1104,10 +1119,10 @@ class RunRegistry:
         # Query all runs for this session with their parameters
         result = self.conn.execute(
             """
-            SELECT r.run_id, r.config_hash, r.replicate, r.started_at, r.completed_at,
+            SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
                    r.exit_code, r.output_path, r.error_message, c.parameters
             FROM job_runs r
-            JOIN job_configs c ON r.config_hash = c.config_hash
+            JOIN job_configs c ON r.run_hash = c.run_hash
             WHERE c.session_id = ?
             ORDER BY r.started_at
             """,
@@ -1119,7 +1134,7 @@ class RunRegistry:
             params = json.loads(row[8]) if row[8] else {}
             row_dict = {
                 "run_id": row[0],
-                "config_hash": row[1],
+                "run_hash": row[1],
                 "replicate": row[2],
                 "started_at": row[3],
                 "completed_at": row[4],
@@ -1155,7 +1170,7 @@ class RunRegistry:
                 """
                 SELECT DISTINCT unnest(json_keys(variables)) as var_name
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                JOIN job_configs jc ON cd.run_hash = jc.run_hash
                 WHERE jc.session_id = ?
                 ORDER BY var_name
                 """,
@@ -1233,7 +1248,7 @@ class RunRegistry:
                 """
                 SELECT DISTINCT entity_type
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                JOIN job_configs jc ON cd.run_hash = jc.run_hash
                 WHERE jc.session_id = ? AND entity_type IS NOT NULL
                 ORDER BY entity_type
                 """,
@@ -1273,15 +1288,15 @@ class RunRegistry:
             runs_count = self.conn.execute(
                 """
                 SELECT COUNT(*) FROM job_runs r
-                JOIN job_configs c ON r.config_hash = c.config_hash
-                WHERE c.session_id = ?
+            JOIN job_configs c ON r.run_hash = c.run_hash
+            WHERE c.session_id = ?
                 """,
                 [session_id],
             ).fetchone()[0]
             rows_count = self.conn.execute(
                 """
                 SELECT COUNT(*) FROM cell_data cd
-                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                JOIN job_configs jc ON cd.run_hash = jc.run_hash
                 WHERE jc.session_id = ?
                 """,
                 [session_id],
@@ -1311,7 +1326,7 @@ class RunRegistry:
                 """
                 SELECT MIN(step), MAX(step), MIN(replicate), MAX(replicate)
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                JOIN job_configs jc ON cd.run_hash = jc.run_hash
                 WHERE jc.session_id = ?
                 """,
                 [session_id],
@@ -1333,7 +1348,7 @@ class RunRegistry:
                 """
                 SELECT MIN(longitude), MAX(longitude), MIN(latitude), MAX(latitude)
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.config_hash = jc.config_hash
+                JOIN job_configs jc ON cd.run_hash = jc.run_hash
                 WHERE jc.session_id = ? AND longitude IS NOT NULL
                 """,
                 [session_id],
@@ -1419,7 +1434,7 @@ class RegistryCallback:
 
         # Create run record (records both start and completion)
         run_id = self.registry.start_run(
-            config_hash=job.config_hash,
+            run_hash=job.run_hash,
             replicate=0,  # CLI runs all replicates at once
             output_path=str(job.config_path.parent) if job.config_path else None,
             metadata={"parameters": job.parameters},
