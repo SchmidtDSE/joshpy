@@ -66,14 +66,14 @@ class TestCellDataLoader:
             rows_loaded = loader.load_csv(
                 csv_path=csv_path,
                 run_id=registry.start_run("abc123"),
-                config_hash="abc123",
+                run_hash="abc123",
             )
 
             assert rows_loaded == 3
 
             # Verify data was inserted
             result = registry.conn.execute(
-                "SELECT COUNT(*) FROM cell_data WHERE config_hash = 'abc123'"
+                "SELECT COUNT(*) FROM cell_data WHERE run_hash = 'abc123'"
             ).fetchone()
             assert result[0] == 3
 
@@ -82,7 +82,7 @@ class TestCellDataLoader:
                 """
                 SELECT step, replicate, longitude, latitude, variables
                 FROM cell_data
-                WHERE config_hash = 'abc123' AND step = 1
+                WHERE run_hash = 'abc123' AND step = 1
                 """
             ).fetchone()
 
@@ -108,7 +108,7 @@ class TestCellDataLoader:
             loader.load_csv(
                 csv_path=Path("/nonexistent/file.csv"),
                 run_id="test",
-                config_hash="test",
+                run_hash="test",
             )
 
     def test_load_csv_missing_required_columns(self):
@@ -128,7 +128,7 @@ class TestCellDataLoader:
                 loader.load_csv(
                     csv_path=csv_path,
                     run_id="test",
-                    config_hash="test",
+                    run_hash="test",
                 )
         finally:
             csv_path.unlink()
@@ -175,14 +175,14 @@ class TestCellDataLoader:
         session_id = registry.create_session(experiment_name="test", simulation="TestSim")
         files = []
         for i in range(2):
-            config_hash = f"hash_{i}"
-            registry.register_run(session_id, config_hash, "test.josh", "test", None, {})
-            run_id = registry.start_run(config_hash)
+            run_hash = f"hash_{i}"
+            registry.register_run(session_id, run_hash, "test.josh", "test", None, {})
+            run_id = registry.start_run(run_hash)
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
                 f.write("step,replicate,treeCount\n")
                 f.write(f"{i},0,{i*10}\n")
-                files.append((Path(f.name), run_id, config_hash))
+                files.append((Path(f.name), run_id, run_hash))
 
         try:
             total = loader.load_csv_batch(files)
@@ -262,12 +262,12 @@ class TestDiagnosticQueries:
             longitude=-116.0,
             latitude=34.0,
             variable="treeCount",
-            config_hash="abc123",
+            run_hash="abc123",
         )
 
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 6  # 3 steps × 2 replicates
-        assert list(df.columns) == ["step", "replicate", "value", "config_hash"]
+        assert list(df.columns) == ["step", "replicate", "value", "run_hash"]
         assert df["value"].min() == 10
         assert df["value"].max() == 13
 
@@ -290,7 +290,7 @@ class TestDiagnosticQueries:
         df = self.queries.get_spatial_snapshot(
             step=1,
             variable="treeCount",
-            config_hash="abc123",
+            run_hash="abc123",
             replicate=0,
         )
 
@@ -338,7 +338,7 @@ class TestDiagnosticQueries:
         skip_if_no_pandas()
         df = self.queries.get_replicate_uncertainty(
             variable="treeCount",
-            config_hash="abc123",
+            run_hash="abc123",
         )
 
         assert isinstance(df, pd.DataFrame)
@@ -357,7 +357,7 @@ class TestDiagnosticQueries:
             min_lat=33.9,
             max_lat=34.2,
             variable="treeCount",
-            config_hash="abc123",
+            run_hash="abc123",
         )
 
         assert isinstance(df, pd.DataFrame)
@@ -370,7 +370,7 @@ class TestDiagnosticQueries:
         skip_if_no_pandas()
         df = self.queries.get_all_variables_at_step(
             step=1,
-            config_hash="abc123",
+            run_hash="abc123",
             replicate=0,
         )
 

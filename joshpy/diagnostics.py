@@ -16,10 +16,10 @@ Example:
     print(registry.get_data_summary())
 
     # Plot time series (spatially aggregated)
-    diag.plot_timeseries("averageAge", config_hash="abc123")
+    diag.plot_timeseries("averageAge", run_hash="abc123")
 
     # Plot per-patch time series (no aggregation)
-    diag.plot_timeseries("averageAge", config_hash="abc123", aggregate="none")
+    diag.plot_timeseries("averageAge", run_hash="abc123", aggregate="none")
 
     # Compare across parameter values
     diag.plot_comparison("averageAge", group_by="maxGrowth")
@@ -68,10 +68,10 @@ class SimulationDiagnostics:
         diag = SimulationDiagnostics(registry)
 
         # Quick time series check
-        diag.plot_timeseries("averageAge", config_hash="abc123")
+        diag.plot_timeseries("averageAge", run_hash="abc123")
 
         # Save to file
-        fig = diag.plot_timeseries("averageAge", config_hash="abc123", show=False)
+        fig = diag.plot_timeseries("averageAge", run_hash="abc123", show=False)
         fig.savefig("diagnostic.png")
     """
 
@@ -140,14 +140,14 @@ class SimulationDiagnostics:
 
     def _build_config_filter(
         self,
-        config_hash: str | None,
+        run_hash: str | None,
         session_id: str | None,
         params: dict[str, Any],
     ) -> tuple[str, list[Any]]:
         """Build SQL WHERE clause for filtering by config/session/params.
 
         Args:
-            config_hash: Optional config hash filter.
+            run_hash: Optional run hash filter.
             session_id: Optional session ID filter.
             params: Dict of parameter name -> value filters.
 
@@ -157,9 +157,9 @@ class SimulationDiagnostics:
         conditions = []
         values: list[Any] = []
 
-        if config_hash:
-            conditions.append("cd.config_hash = ?")
-            values.append(config_hash)
+        if run_hash:
+            conditions.append("cd.run_hash = ?")
+            values.append(run_hash)
 
         if session_id:
             conditions.append("jc.session_id = ?")
@@ -177,26 +177,26 @@ class SimulationDiagnostics:
 
     def _get_matching_configs(
         self,
-        config_hash: str | None,
+        run_hash: str | None,
         session_id: str | None,
         params: dict[str, Any],
     ) -> list[str]:
-        """Get list of config hashes matching the filters.
+        """Get list of run hashes matching the filters.
 
         Args:
-            config_hash: Optional config hash filter.
+            run_hash: Optional run hash filter.
             session_id: Optional session ID filter.
             params: Dict of parameter name -> value filters.
 
         Returns:
-            List of matching config hashes.
+            List of matching run hashes.
         """
-        where_clause, values = self._build_config_filter(config_hash, session_id, params)
+        where_clause, values = self._build_config_filter(run_hash, session_id, params)
 
         query = """
-            SELECT DISTINCT cd.config_hash
+            SELECT DISTINCT cd.run_hash
             FROM cell_data cd
-            JOIN job_configs jc ON cd.config_hash = jc.config_hash
+            JOIN job_configs jc ON cd.run_hash = jc.run_hash
             WHERE 1=1
         """
         query += where_clause
@@ -207,7 +207,7 @@ class SimulationDiagnostics:
     def plot_timeseries(
         self,
         variable: str,
-        config_hash: str | None = None,
+        run_hash: str | None = None,
         session_id: str | None = None,
         aggregate: str = "mean",
         show_replicates: bool = True,
@@ -220,7 +220,7 @@ class SimulationDiagnostics:
 
         Args:
             variable: Variable name to plot (e.g., "averageAge").
-            config_hash: Filter to specific config.
+            run_hash: Filter to specific run.
             session_id: Filter to specific session.
             aggregate: Spatial aggregation mode: "mean" (default), "sum",
                 "min", "max", or "none" (per-patch).
@@ -250,18 +250,18 @@ class SimulationDiagnostics:
             )
 
         # Get matching configs
-        matching_configs = self._get_matching_configs(config_hash, session_id, params)
+        matching_configs = self._get_matching_configs(run_hash, session_id, params)
 
         if not matching_configs:
             raise ValueError(
                 "No data found matching filters. "
-                "Check session_id/config_hash/parameters."
+                "Check session_id/run_hash/parameters."
             )
 
         if len(matching_configs) > 1:
             warnings.warn(
                 f"Matched {len(matching_configs)} configs. "
-                "Consider filtering by config_hash for clarity.",
+                "Consider filtering by run_hash for clarity.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -326,7 +326,7 @@ class SimulationDiagnostics:
         self,
         ax: Any,
         variable: str,
-        config_hash: str,
+        run_hash: str,
         step_filter: str,
         step_values: list[Any],
         color: Any,
@@ -337,10 +337,10 @@ class SimulationDiagnostics:
             SELECT step, replicate, position_x, position_y,
                    CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE) as value
             FROM cell_data cd
-            WHERE cd.config_hash = ? {step_filter}
+            WHERE cd.run_hash = ? {step_filter}
             ORDER BY position_x, position_y, replicate, step
         """
-        values = [config_hash] + step_values
+        values = [run_hash] + step_values
         result = self.registry.conn.execute(query, values).fetchall()
 
         if not result:
@@ -368,7 +368,7 @@ class SimulationDiagnostics:
         self,
         ax: Any,
         variable: str,
-        config_hash: str,
+        run_hash: str,
         aggregate: str,
         show_replicates: bool,
         step_filter: str,
@@ -384,11 +384,11 @@ class SimulationDiagnostics:
             SELECT step, replicate,
                    {agg_func}(CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE)) as value
             FROM cell_data cd
-            WHERE cd.config_hash = ? {step_filter}
+            WHERE cd.run_hash = ? {step_filter}
             GROUP BY step, replicate
             ORDER BY step, replicate
         """
-        values = [config_hash] + step_values
+        values = [run_hash] + step_values
         result = self.registry.conn.execute(query, values).fetchall()
 
         if not result:
@@ -516,7 +516,7 @@ class SimulationDiagnostics:
             where_clause = " AND " + " AND ".join(param_conditions)
 
         # Build join clause - always needed if we have param filters or grouping by config
-        join_clause = "JOIN job_configs jc ON cd.config_hash = jc.config_hash" if (needs_join or param_conditions) else ""
+        join_clause = "JOIN job_configs jc ON cd.run_hash = jc.run_hash" if (needs_join or param_conditions) else ""
 
         if step is not None:
             # Bar chart at specific step
@@ -626,7 +626,7 @@ class SimulationDiagnostics:
         self,
         variable: str,
         step: int,
-        config_hash: str,
+        run_hash: str,
         replicate: int = 0,
         title: str | None = None,
         show: bool = True,
@@ -639,7 +639,7 @@ class SimulationDiagnostics:
         Args:
             variable: Variable name to plot.
             step: Timestep to visualize.
-            config_hash: Config hash to filter by.
+            run_hash: Run hash to filter by.
             replicate: Replicate number (default: 0).
             title: Plot title.
             show: If True, display plot inline.
@@ -658,18 +658,18 @@ class SimulationDiagnostics:
                 latitude,
                 CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE) as value
             FROM cell_data
-            WHERE config_hash = ?
+            WHERE run_hash = ?
               AND step = ?
               AND replicate = ?
               AND longitude IS NOT NULL
         """
         result = self.registry.conn.execute(
-            query, [config_hash, step, replicate]
+            query, [run_hash, step, replicate]
         ).fetchall()
 
         if not result:
             raise ValueError(
-                f"No spatial data found for config_hash={config_hash[:8]}..., "
+                f"No spatial data found for run_hash={run_hash[:8]}..., "
                 f"step={step}, replicate={replicate}."
             )
 

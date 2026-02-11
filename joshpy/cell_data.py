@@ -15,7 +15,7 @@ Example usage:
     loader.load_csv(
         csv_path=Path("/tmp/output.csv"),
         run_id="abc123",
-        config_hash="a1b2c3d4e5f6",
+        run_hash="a1b2c3d4e5f6",
     )
 
     # Query time series
@@ -71,7 +71,7 @@ if HAS_PYDANTIC:
 
         Attributes:
             run_id: The run this observation belongs to.
-            config_hash: Config hash for this run.
+            run_hash: Run hash for this run.
             step: Simulation timestep.
             replicate: Replicate number (0-indexed).
             position_x: Grid x coordinate.
@@ -83,7 +83,7 @@ if HAS_PYDANTIC:
         """
 
         run_id: str
-        config_hash: str
+        run_hash: str
         step: int
         replicate: int
         position_x: float | None = None
@@ -114,7 +114,7 @@ class CellDataLoader:
         rows_loaded = loader.load_csv(
             csv_path=Path("/tmp/output.csv"),
             run_id="abc123",
-            config_hash="a1b2c3d4e5f6",
+            run_hash="a1b2c3d4e5f6",
         )
         print(f"Loaded {rows_loaded} rows")
     """
@@ -136,7 +136,7 @@ class CellDataLoader:
         self,
         csv_path: Path,
         run_id: str,
-        config_hash: str,
+        run_hash: str,
         entity_type: str = "patch",
     ) -> int:
         """Load a CSV export into the cell_data table.
@@ -152,7 +152,7 @@ class CellDataLoader:
         Args:
             csv_path: Path to the CSV file.
             run_id: The run ID this data belongs to.
-            config_hash: Config hash for this run.
+            run_hash: Run hash for this run.
             entity_type: Type of entity being exported (default: "patch").
 
         Returns:
@@ -209,17 +209,17 @@ class CellDataLoader:
 
         # Escape single quotes in string literals
         safe_run_id = run_id.replace("'", "''")
-        safe_config_hash = config_hash.replace("'", "''")
+        safe_run_hash = run_hash.replace("'", "''")
         safe_entity_type = entity_type.replace("'", "''")
 
         # Insert directly from CSV using DuckDB's native CSV reader
         insert_sql = f"""
             INSERT INTO cell_data
-            (run_id, config_hash, step, replicate, position_x, position_y,
+            (run_id, run_hash, step, replicate, position_x, position_y,
              longitude, latitude, entity_type, variables)
             SELECT
                 '{safe_run_id}' as run_id,
-                '{safe_config_hash}' as config_hash,
+                '{safe_run_hash}' as run_hash,
                 CAST(step AS INTEGER) as step,
                 CAST(replicate AS INTEGER) as replicate,
                 {pos_x_expr} as position_x,
@@ -260,15 +260,15 @@ class CellDataLoader:
         """Load multiple CSV files in batch.
 
         Args:
-            csv_paths: List of (csv_path, run_id, config_hash) tuples.
+            csv_paths: List of (csv_path, run_id, run_hash) tuples.
             entity_type: Type of entity being exported.
 
         Returns:
             Total number of rows loaded across all files.
         """
         total_rows = 0
-        for csv_path, run_id, config_hash in csv_paths:
-            rows = self.load_csv(csv_path, run_id, config_hash, entity_type)
+        for csv_path, run_id, run_hash in csv_paths:
+            rows = self.load_csv(csv_path, run_id, run_hash, entity_type)
             total_rows += rows
         return total_rows
 
@@ -296,7 +296,7 @@ class DiagnosticQueries:
         df = queries.get_spatial_snapshot(
             step=50,
             variable="treeCount",
-            config_hash="a1b2c3d4e5f6",
+            run_hash="a1b2c3d4e5f6",
         )
     """
 
@@ -334,7 +334,7 @@ class DiagnosticQueries:
         longitude: float,
         latitude: float,
         variable: str,
-        config_hash: str | None = None,
+        run_hash: str | None = None,
         tolerance: float = 0.01,
         show_sql: bool = False,
     ) -> Any:
@@ -344,12 +344,12 @@ class DiagnosticQueries:
             longitude: Longitude of the cell.
             latitude: Latitude of the cell.
             variable: Variable name to extract (e.g., "treeCount").
-            config_hash: Optional filter by config hash.
+            run_hash: Optional filter by run hash.
             tolerance: Spatial tolerance in degrees (default: ~1km at equator).
             show_sql: If True, print the SQL query for copy/paste modification.
 
         Returns:
-            DataFrame with columns: step, replicate, value, config_hash.
+            DataFrame with columns: step, replicate, value, run_hash.
         """
         _check_pandas()
 
@@ -358,7 +358,7 @@ class DiagnosticQueries:
                 step,
                 replicate,
                 CAST(json_extract_string(variables, ?) AS DOUBLE) as value,
-                config_hash
+                run_hash
             FROM cell_data
             WHERE longitude BETWEEN ? AND ?
               AND latitude BETWEEN ? AND ?
@@ -371,11 +371,11 @@ class DiagnosticQueries:
             latitude + tolerance,
         ]
 
-        if config_hash:
-            query += " AND config_hash = ?"
-            params.append(config_hash)
+        if run_hash:
+            query += " AND run_hash = ?"
+            params.append(run_hash)
 
-        query += " ORDER BY config_hash, replicate, step"
+        query += " ORDER BY run_hash, replicate, step"
 
         if show_sql:
             self._print_sql(query, params)
@@ -386,7 +386,7 @@ class DiagnosticQueries:
         self,
         step: int,
         variable: str,
-        config_hash: str,
+        run_hash: str,
         replicate: int = 0,
     ) -> Any:
         """Get spatial data for a single timestep.
@@ -396,7 +396,7 @@ class DiagnosticQueries:
         Args:
             step: The timestep to query.
             variable: Variable name to extract.
-            config_hash: Config hash to filter by.
+            run_hash: Run hash to filter by.
             replicate: Replicate number (default: 0).
 
         Returns:
@@ -412,11 +412,11 @@ class DiagnosticQueries:
                 CAST(json_extract_string(variables, ?) AS DOUBLE) as value
             FROM cell_data
             WHERE step = ?
-              AND config_hash = ?
+              AND run_hash = ?
               AND replicate = ?
               AND longitude IS NOT NULL
             """,
-            [f"$.{variable}", step, config_hash, replicate],
+            [f"$.{variable}", step, run_hash, replicate],
         ).df()
 
     def get_parameter_comparison(
@@ -452,7 +452,7 @@ class DiagnosticQueries:
                 STDDEV(CAST(json_extract_string(cd.variables, '$.{variable}') AS DOUBLE)) as std_value,
                 COUNT(*) as n_cells
             FROM cell_data cd
-            JOIN job_configs jc ON cd.config_hash = jc.config_hash
+            JOIN job_configs jc ON cd.run_hash = jc.run_hash
             WHERE 1=1 {step_filter}
             GROUP BY json_extract_string(jc.parameters, '$.{param_name}'){step_group}
             ORDER BY param_value, cd.step
@@ -468,14 +468,14 @@ class DiagnosticQueries:
     def get_replicate_uncertainty(
         self,
         variable: str,
-        config_hash: str,
+        run_hash: str,
         step: int | None = None,
     ) -> Any:
         """Get mean and confidence intervals across replicates.
 
         Args:
             variable: Variable name to analyze.
-            config_hash: Config hash to filter by.
+            run_hash: Run hash to filter by.
             step: Optional timestep filter (if None, aggregates across all steps).
 
         Returns:
@@ -492,7 +492,7 @@ class DiagnosticQueries:
                     replicate,
                     AVG(CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE)) as rep_mean
                 FROM cell_data
-                WHERE config_hash = ? {step_filter}
+                WHERE run_hash = ? {step_filter}
                 GROUP BY step, replicate
             )
             SELECT
@@ -507,7 +507,7 @@ class DiagnosticQueries:
             ORDER BY step
         """
 
-        params = [config_hash, step] if step else [config_hash]
+        params = [run_hash, step] if step else [run_hash]
         return self.registry.conn.execute(query, params).df()
 
     def get_bbox_timeseries(
@@ -517,7 +517,7 @@ class DiagnosticQueries:
         min_lat: float,
         max_lat: float,
         variable: str,
-        config_hash: str | None = None,
+        run_hash: str | None = None,
         aggregation: str = "AVG",
     ) -> Any:
         """Get aggregated time series for a bounding box region.
@@ -528,11 +528,11 @@ class DiagnosticQueries:
             min_lat: Minimum latitude.
             max_lat: Maximum latitude.
             variable: Variable name to analyze.
-            config_hash: Optional config hash filter.
+            run_hash: Optional run hash filter.
             aggregation: Aggregation function (AVG, MIN, MAX, SUM).
 
         Returns:
-            DataFrame with: step, replicate, config_hash, value, n_cells.
+            DataFrame with: step, replicate, run_hash, value, n_cells.
         """
         _check_pandas()
 
@@ -540,7 +540,7 @@ class DiagnosticQueries:
             SELECT
                 step,
                 replicate,
-                config_hash,
+                run_hash,
                 {aggregation}(CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE)) as value,
                 COUNT(*) as n_cells
             FROM cell_data
@@ -549,18 +549,18 @@ class DiagnosticQueries:
         """
         params = [min_lon, max_lon, min_lat, max_lat]
 
-        if config_hash:
-            query += " AND config_hash = ?"
-            params.append(config_hash)
+        if run_hash:
+            query += " AND run_hash = ?"
+            params.append(run_hash)
 
-        query += " GROUP BY step, replicate, config_hash ORDER BY config_hash, replicate, step"
+        query += " GROUP BY step, replicate, run_hash ORDER BY run_hash, replicate, step"
 
         return self.registry.conn.execute(query, params).df()
 
     def get_all_variables_at_step(
         self,
         step: int,
-        config_hash: str,
+        run_hash: str,
         replicate: int = 0,
     ) -> Any:
         """Get all variables for all cells at a specific timestep.
@@ -569,7 +569,7 @@ class DiagnosticQueries:
 
         Args:
             step: The timestep to query.
-            config_hash: Config hash to filter by.
+            run_hash: Run hash to filter by.
             replicate: Replicate number (default: 0).
 
         Returns:
@@ -588,10 +588,10 @@ class DiagnosticQueries:
                 variables
             FROM cell_data
             WHERE step = ?
-              AND config_hash = ?
+              AND run_hash = ?
               AND replicate = ?
             """,
-            [step, config_hash, replicate],
+            [step, run_hash, replicate],
         ).df()
 
         if df.empty:

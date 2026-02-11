@@ -311,7 +311,7 @@ class TestSimulationDiagnostics:
     def test_plot_timeseries_returns_figure(self):
         """Test that plot_timeseries returns a Figure."""
         fig = self.diag.plot_timeseries(
-            "treeCount", config_hash="abc123", show=False
+            "treeCount", run_hash="abc123", show=False
         )
 
         assert isinstance(fig, plt.Figure)
@@ -319,7 +319,7 @@ class TestSimulationDiagnostics:
     def test_plot_timeseries_with_mean_aggregation(self):
         """Test time series with mean aggregation."""
         fig = self.diag.plot_timeseries(
-            "treeCount", config_hash="abc123", aggregate="mean", show=False
+            "treeCount", run_hash="abc123", aggregate="mean", show=False
         )
 
         assert isinstance(fig, plt.Figure)
@@ -329,7 +329,7 @@ class TestSimulationDiagnostics:
     def test_plot_timeseries_with_sum_aggregation(self):
         """Test time series with sum aggregation."""
         fig = self.diag.plot_timeseries(
-            "treeCount", config_hash="abc123", aggregate="sum", show=False
+            "treeCount", run_hash="abc123", aggregate="sum", show=False
         )
 
         assert isinstance(fig, plt.Figure)
@@ -339,7 +339,7 @@ class TestSimulationDiagnostics:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             fig = self.diag.plot_timeseries(
-                "treeCount", config_hash="abc123", aggregate="none", show=False
+                "treeCount", run_hash="abc123", aggregate="none", show=False
             )
 
             assert len(w) == 1
@@ -350,7 +350,7 @@ class TestSimulationDiagnostics:
         """Test time series with step range filter."""
         fig = self.diag.plot_timeseries(
             "treeCount",
-            config_hash="abc123",
+            run_hash="abc123",
             step_range=(1, 3),
             show=False,
         )
@@ -382,13 +382,13 @@ class TestSimulationDiagnostics:
         """Test that no matching data raises ValueError."""
         with pytest.raises(ValueError, match="No data found"):
             self.diag.plot_timeseries(
-                "treeCount", config_hash="nonexistent", show=False
+                "treeCount", run_hash="nonexistent", show=False
             )
 
     def test_plot_timeseries_missing_variable_raises(self):
         """Test that missing variable raises ValueError."""
         with pytest.raises(ValueError, match="Export variable 'missing' not found"):
-            self.diag.plot_timeseries("missing", config_hash="abc123", show=False)
+            self.diag.plot_timeseries("missing", run_hash="abc123", show=False)
 
     def test_plot_comparison_timeseries(self):
         """Test comparison plot as time series."""
@@ -426,7 +426,7 @@ class TestSimulationDiagnostics:
     def test_plot_spatial_returns_figure(self):
         """Test that plot_spatial returns a Figure."""
         fig = self.diag.plot_spatial(
-            "treeCount", step=2, config_hash="abc123", show=False
+            "treeCount", step=2, run_hash="abc123", show=False
         )
 
         assert isinstance(fig, plt.Figure)
@@ -435,21 +435,21 @@ class TestSimulationDiagnostics:
         """Test that no spatial data raises ValueError."""
         with pytest.raises(ValueError, match="No spatial data found"):
             self.diag.plot_spatial(
-                "treeCount", step=2, config_hash="nonexistent", show=False
+                "treeCount", step=2, run_hash="nonexistent", show=False
             )
 
     def test_plot_spatial_missing_variable_raises(self):
         """Test that missing variable raises ValueError."""
         with pytest.raises(ValueError, match="Export variable 'missing' not found"):
             self.diag.plot_spatial(
-                "missing", step=2, config_hash="abc123", show=False
+                "missing", step=2, run_hash="abc123", show=False
             )
 
     def test_plot_with_custom_title(self):
         """Test that custom title is applied."""
         fig = self.diag.plot_timeseries(
             "treeCount",
-            config_hash="abc123",
+            run_hash="abc123",
             title="Custom Title",
             show=False,
         )

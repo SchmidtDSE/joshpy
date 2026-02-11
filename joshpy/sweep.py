@@ -167,7 +167,7 @@ def recover_sweep_results(
                     rows = loader.load_csv(
                         csv_path=csv_path,
                         run_id=run_id,
-                        config_hash=job.run_hash,
+                        run_hash=job.run_hash,
                     )
                     job_rows += rows
                     if not quiet:
@@ -502,7 +502,7 @@ class SweepManager:
         # Return all data as a basic timeseries
         return queries.get_replicate_uncertainty(
             variable=variable,
-            config_hash=self.job_set.jobs[0].run_hash if self.job_set.jobs else "",
+            run_hash=self.job_set.jobs[0].run_hash if self.job_set.jobs else "",
             step=step,
         )
 
