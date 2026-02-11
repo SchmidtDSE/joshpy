@@ -5,7 +5,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, Mock
 
-from joshpy.sweep import recover_sweep_results, _get_export_path
+from joshpy.sweep import (
+    recover_sweep_results,
+    _get_export_path,
+    SweepManager,
+    SweepManagerBuilder,
+)
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander
+from joshpy.registry import RunRegistry
+from joshpy.cli import JoshCLI
 
 
 class TestGetExportPath(unittest.TestCase):
@@ -303,6 +311,368 @@ class TestRecoverSweepResults(unittest.TestCase):
             self.assertEqual(mock_loader.load_csv.call_count, 3)
             
             registry.close()
+
+
+class TestSweepManagerBuilder(unittest.TestCase):
+    """Tests for SweepManagerBuilder class."""
+
+    def setUp(self):
+        """Create a temporary directory and sample config for testing."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.template_path = Path(self.temp_dir) / "test_template.jshc.j2"
+        self.template_path.write_text("simulation = {{ maxGrowth }}")
+        
+        self.source_path = Path(self.temp_dir) / "test.josh"
+        self.source_path.write_text("// test josh file")
+        
+        self.config = JobConfig(
+            template_path=self.template_path,
+            source_path=self.source_path,
+            simulation="TestSim",
+            replicates=2,
+            sweep=SweepConfig(
+                parameters=[SweepParameter(name="maxGrowth", values=[10, 20])]
+            ),
+        )
+
+    def tearDown(self):
+        """Clean up temporary files."""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_builder_creates_memory_registry_by_default(self):
+        """Builder should create in-memory registry when not specified."""
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_cli().build()
+        
+        try:
+            self.assertIsNotNone(manager.registry)
+            self.assertTrue(manager._owns_registry)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_creates_cli_by_default(self):
+        """Builder should create CLI when not specified."""
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_registry(":memory:").build()
+        
+        try:
+            self.assertIsNotNone(manager.cli)
+            self.assertTrue(manager._owns_cli)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_with_existing_registry(self):
+        """Builder should use existing registry without ownership."""
+        registry = RunRegistry(":memory:")
+        
+        try:
+            builder = SweepManagerBuilder(self.config)
+            manager = builder.with_registry(registry).with_cli().build()
+            
+            try:
+                self.assertIs(manager.registry, registry)
+                self.assertFalse(manager._owns_registry)
+            finally:
+                manager.cleanup()
+                manager.close()
+        finally:
+            registry.close()
+
+    def test_builder_with_existing_cli(self):
+        """Builder should use existing CLI without ownership."""
+        cli = JoshCLI()
+        
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_registry(":memory:").with_cli(cli).build()
+        
+        try:
+            self.assertIs(manager.cli, cli)
+            self.assertFalse(manager._owns_cli)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_with_registry_path(self):
+        """Builder should create registry from path with ownership."""
+        db_path = Path(self.temp_dir) / "test.duckdb"
+        
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_registry(db_path).with_cli().build()
+        
+        try:
+            self.assertTrue(manager._owns_registry)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_with_defaults(self):
+        """with_defaults should set up registry and CLI."""
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_defaults(registry=":memory:").build()
+        
+        try:
+            self.assertIsNotNone(manager.registry)
+            self.assertIsNotNone(manager.cli)
+            self.assertTrue(manager._owns_registry)
+            self.assertTrue(manager._owns_cli)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_expands_jobs(self):
+        """Builder should expand jobs during build."""
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_defaults().build()
+        
+        try:
+            # 2 parameter values = 2 jobs
+            self.assertEqual(len(manager.job_set), 2)
+            self.assertEqual(manager.job_set.total_jobs, 2)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_creates_session(self):
+        """Builder should create session in registry."""
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_defaults(experiment_name="test_exp").build()
+        
+        try:
+            self.assertIsNotNone(manager.session_id)
+            session = manager.registry.get_session(manager.session_id)
+            self.assertIsNotNone(session)
+            self.assertEqual(session.experiment_name, "test_exp")
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_registers_runs(self):
+        """Builder should register runs in registry."""
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_defaults().build()
+        
+        try:
+            configs = manager.registry.get_configs_for_session(manager.session_id)
+            # 2 parameter values = 2 configs
+            self.assertEqual(len(configs), 2)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_verifies_hashes_on_existing_session(self):
+        """Builder should verify hashes when using existing session."""
+        # Create first manager
+        registry = RunRegistry(":memory:")
+        builder1 = SweepManagerBuilder(self.config)
+        manager1 = builder1.with_registry(registry).with_cli().build()
+        session_id = manager1.session_id
+        manager1.cleanup()  # Only cleanup temp files, not registry
+        
+        # Create second manager with same config and existing session
+        builder2 = SweepManagerBuilder(self.config)
+        manager2 = builder2.with_registry(registry, session_id=session_id).with_cli().build()
+        
+        try:
+            # Should succeed without error
+            self.assertEqual(manager2.session_id, session_id)
+        finally:
+            manager2.cleanup()
+            manager2.close()
+
+    def test_builder_raises_on_hash_mismatch(self):
+        """Builder should raise ValueError if hashes don't match existing session."""
+        # Create first manager with one config
+        registry = RunRegistry(":memory:")
+        builder1 = SweepManagerBuilder(self.config)
+        manager1 = builder1.with_registry(registry).with_cli().build()
+        session_id = manager1.session_id
+        manager1.cleanup()
+        
+        # Create different config
+        different_config = JobConfig(
+            template_path=self.template_path,
+            source_path=self.source_path,
+            simulation="TestSim",
+            replicates=2,
+            sweep=SweepConfig(
+                parameters=[SweepParameter(name="maxGrowth", values=[30, 40])]  # Different values
+            ),
+        )
+        
+        # Try to use existing session with different config
+        builder2 = SweepManagerBuilder(different_config)
+        
+        with self.assertRaises(ValueError) as ctx:
+            builder2.with_registry(registry, session_id=session_id).with_cli().build()
+        
+        self.assertIn("hash mismatch", str(ctx.exception).lower())
+        registry.close()
+
+
+class TestSweepManager(unittest.TestCase):
+    """Tests for SweepManager class."""
+
+    def setUp(self):
+        """Create a temporary directory and sample config for testing."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.template_path = Path(self.temp_dir) / "test_template.jshc.j2"
+        self.template_path.write_text("simulation = {{ maxGrowth }}")
+        
+        self.source_path = Path(self.temp_dir) / "test.josh"
+        self.source_path.write_text("// test josh file")
+        
+        self.config = JobConfig(
+            template_path=self.template_path,
+            source_path=self.source_path,
+            simulation="TestSim",
+            replicates=1,
+            sweep=SweepConfig(
+                parameters=[SweepParameter(name="maxGrowth", values=[10, 20])]
+            ),
+        )
+
+    def tearDown(self):
+        """Clean up temporary files."""
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_from_dict_creates_manager(self):
+        """from_dict should create a SweepManager from config dict."""
+        config_dict = self.config.to_dict()
+        manager = SweepManager.from_dict(config_dict, registry=":memory:")
+        
+        try:
+            self.assertIsInstance(manager, SweepManager)
+            self.assertEqual(len(manager.job_set), 2)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_from_yaml_creates_manager(self):
+        """from_yaml should create a SweepManager from YAML file."""
+        yaml_path = Path(self.temp_dir) / "config.yaml"
+        self.config.save_yaml(yaml_path)
+        
+        manager = SweepManager.from_yaml(yaml_path, registry=":memory:")
+        
+        try:
+            self.assertIsInstance(manager, SweepManager)
+            self.assertEqual(len(manager.job_set), 2)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_builder_classmethod(self):
+        """builder() should return a SweepManagerBuilder."""
+        builder = SweepManager.builder(self.config)
+        self.assertIsInstance(builder, SweepManagerBuilder)
+
+    def test_run_raises_without_api_key_for_remote(self):
+        """run() should raise ValueError if remote=True without api_key."""
+        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                manager.run(remote=True)
+            
+            self.assertIn("api_key", str(ctx.exception))
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_run_dry_run_does_not_execute(self):
+        """run() with dry_run=True should not execute jobs."""
+        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        
+        try:
+            result = manager.run(dry_run=True, quiet=True)
+            
+            # Dry run returns empty SweepResult
+            self.assertEqual(len(result), 0)
+            self.assertEqual(result.succeeded, 0)
+            self.assertEqual(result.failed, 0)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_cleanup_removes_temp_files(self):
+        """cleanup() should remove temporary config files."""
+        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        temp_dir = manager.job_set.temp_dir
+        
+        # Temp dir should exist before cleanup
+        self.assertIsNotNone(temp_dir)
+        self.assertTrue(temp_dir.exists())
+        
+        manager.cleanup()
+        
+        # Temp dir should not exist after cleanup
+        self.assertFalse(temp_dir.exists())
+        manager.close()
+
+    def test_context_manager_cleans_up(self):
+        """Using as context manager should cleanup on exit."""
+        config_dict = self.config.to_dict()
+        
+        with SweepManager.from_dict(config_dict, registry=":memory:") as manager:
+            temp_dir = manager.job_set.temp_dir
+            self.assertTrue(temp_dir.exists())
+        
+        # Should be cleaned up after context exit
+        self.assertFalse(temp_dir.exists())
+
+    def test_close_only_closes_owned_registry(self):
+        """close() should only close registry if owned."""
+        registry = RunRegistry(":memory:")
+        
+        builder = SweepManagerBuilder(self.config)
+        manager = builder.with_registry(registry).with_cli().build()
+        
+        manager.cleanup()
+        manager.close()
+        
+        # Registry should still be usable since manager didn't own it
+        # If close() closed it incorrectly, this would raise
+        sessions = registry.list_sessions()
+        self.assertIsInstance(sessions, list)
+        
+        registry.close()
+
+    @patch("joshpy.sweep.run_sweep")
+    def test_run_calls_run_sweep(self, mock_run_sweep):
+        """run() should call run_sweep for local execution."""
+        from joshpy.jobs import SweepResult
+        mock_run_sweep.return_value = SweepResult(succeeded=2, failed=0)
+        
+        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        
+        try:
+            result = manager.run(quiet=True)
+            
+            mock_run_sweep.assert_called_once()
+            self.assertEqual(result.succeeded, 2)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    @patch("joshpy.sweep.recover_sweep_results")
+    def test_load_results_calls_recover(self, mock_recover):
+        """load_results() should call recover_sweep_results."""
+        mock_recover.return_value = 100
+        
+        manager = SweepManager.from_dict(self.config.to_dict(), registry=":memory:")
+        
+        try:
+            rows = manager.load_results(quiet=True)
+            
+            mock_recover.assert_called_once()
+            self.assertEqual(rows, 100)
+        finally:
+            manager.cleanup()
+            manager.close()
 
 
 if __name__ == "__main__":
