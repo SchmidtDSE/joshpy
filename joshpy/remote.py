@@ -138,7 +138,7 @@ class RemoteJoshDecorator(joshpy.strategy.JoshBackend):
     Args:
       code: The code to execute.
       name: The name of the simulation from the provided code to execute.
-      virtual_files: List of virutal files to provide to the simulation within its sandbox.
+      virtual_files: List of virtual files to provide to the simulation within its sandbox.
       replicates: The number of replicates for which the simulation should run.
 
     Returns:

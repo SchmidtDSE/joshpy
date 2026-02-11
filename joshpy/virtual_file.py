@@ -1,4 +1,4 @@
-"""Structures to support virutal file systems for the Josh sandbox.
+"""Structures to support virtual file systems for the Josh sandbox.
 
 License: BSD-3-Clause
 """
@@ -7,9 +7,9 @@ import typing
 
 
 class VirtualFile:
-  """Definition of a file occupying a virutal file system.
+  """Definition of a file occupying a virtual file system.
   
-  Definition of a file occupying a virutal file system which can be used in the sandbox Josh
+  Definition of a file occupying a virtual file system which can be used in the sandbox Josh
   environment where access to the underlying file system is restricted.
   """
 
@@ -17,7 +17,7 @@ class VirtualFile:
     """Create a new record of a virtual file.
     
     Args:
-      name: The name or path of the file which is in the virutal file system.
+      name: The name or path of the file which is in the virtual file system.
       content: The content of the file which is base64 encoded if the file is binary or plain text
         otherwise.
       is_binary: Flag indicating if the file is binary or plain text. If true, then the file is
@@ -32,7 +32,7 @@ class VirtualFile:
     """Get the name or location of this file in the virtual file system.
     
     Returns:
-      str: The name or path of the file which is in the virutal file system.
+      str: The name or path of the file which is in the virtual file system.
     """
     return self._name
 
@@ -57,7 +57,7 @@ class VirtualFile:
 
 
 def serialize_files(files: typing.List[VirtualFile]) -> str:
-  """Serialize a virutal file system to a string representation.
+  """Serialize a virtual file system to a string representation.
   
   Args:
     files: The list of files in the virtual file system to be serialized.

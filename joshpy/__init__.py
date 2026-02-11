@@ -45,7 +45,6 @@ try:
         JobExpander,
         to_run_config,
         to_run_remote_config,
-        compute_config_hash,
     )
     HAS_JOBS = True
 except ImportError:
@@ -169,7 +168,7 @@ class Josh:
     Args:
       code: The code to execute.
       name: The name of the simulation from the provided code to execute.
-      virtual_files: List of virutal files to provide to the simulation within its sandbox.
+      virtual_files: List of virtual files to provide to the simulation within its sandbox.
       replicates: The number of replicates for which the simulation should run.
       geocode: Flag indicating if geocoding should be provided where true will add
         position.longitude and position.latitude. These will not be added if false.
