@@ -50,7 +50,7 @@ class TestCellDataLoader:
 
         # Create session and config
         session_id = registry.create_session(experiment_name="test", simulation="TestSim")
-        registry.register_config(session_id, "abc123", "test", {})
+        registry.register_run(session_id, "abc123", "test.josh", "test", None, {})
         # Create run record (required for foreign key)
         registry.start_run("abc123")
 
@@ -141,7 +141,7 @@ class TestCellDataLoader:
 
         # Create session, config, and run
         session_id = registry.create_session(experiment_name="test", simulation="TestSim")
-        registry.register_config(session_id, "abc", "test", {})
+        registry.register_run(session_id, "abc", "test.josh", "test", None, {})
         run_id = registry.start_run("abc")
 
         # Create CSV with some NaN values
@@ -176,7 +176,7 @@ class TestCellDataLoader:
         files = []
         for i in range(2):
             config_hash = f"hash_{i}"
-            registry.register_config(session_id, config_hash, "test", {})
+            registry.register_run(session_id, config_hash, "test.josh", "test", None, {})
             run_id = registry.start_run(config_hash)
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
@@ -212,10 +212,12 @@ class TestDiagnosticQueries:
             experiment_name="test",
             simulation="TestSim",
         )
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=session_id,
-            config_hash="abc123",
+            run_hash="abc123",
+            josh_path="test.josh",
             config_content="test config",
+            file_mappings=None,
             parameters={"maxGrowth": 10},
         )
 
@@ -303,10 +305,12 @@ class TestDiagnosticQueries:
         skip_if_no_pandas()
         # Add another config with different parameter
         session2 = self.registry.create_session(experiment_name="test2", simulation="TestSim")
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=session2,
-            config_hash="def456",
+            run_hash="def456",
+            josh_path="test.josh",
             config_content="test config 2",
+            file_mappings=None,
             parameters={"maxGrowth": 20},
         )
         run2 = self.registry.start_run("def456")

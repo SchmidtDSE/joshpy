@@ -94,16 +94,20 @@ class TestDiscoveryMethods:
         self.session_id = session_id
 
         # Register configs with parameters
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=session_id,
-            config_hash="abc123",
+            run_hash="abc123",
+            josh_path="test.josh",
             config_content="test config 1",
+            file_mappings=None,
             parameters={"maxGrowth": 10, "scenario": "baseline"},
         )
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=session_id,
-            config_hash="def456",
+            run_hash="def456",
+            josh_path="test.josh",
             config_content="test config 2",
+            file_mappings=None,
             parameters={"maxGrowth": 20, "scenario": "optimistic"},
         )
 
@@ -231,16 +235,20 @@ class TestSimulationDiagnostics:
         )
         self.session_id = session_id
 
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=session_id,
-            config_hash="abc123",
+            run_hash="abc123",
+            josh_path="test.josh",
             config_content="test config 1",
+            file_mappings=None,
             parameters={"maxGrowth": 10},
         )
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=session_id,
-            config_hash="def456",
+            run_hash="def456",
+            josh_path="test.josh",
             config_content="test config 2",
+            file_mappings=None,
             parameters={"maxGrowth": 20},
         )
 
