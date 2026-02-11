@@ -175,36 +175,44 @@ class TestConfigRegistration(unittest.TestCase):
         """Close registry after each test."""
         self.registry.close()
 
-    def test_register_config(self):
-        """register_config should store config."""
-        self.registry.register_config(
+    def test_register_run(self):
+        """register_run should store config."""
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="abc123def456",
+            run_hash="abc123def456",
+            josh_path="/path/to/sim.josh",
             config_content="survivalProbAdult = 85 %",
+            file_mappings={"data": {"path": "/path/to/data.jshd", "hash": "abc123"}},
             parameters={"survivalProbAdult": 85},
         )
 
         config = self.registry.get_config_by_hash("abc123def456")
         self.assertIsNotNone(config)
-        self.assertEqual(config.config_hash, "abc123def456")
+        self.assertEqual(config.run_hash, "abc123def456")
         self.assertEqual(config.session_id, self.session_id)
+        self.assertEqual(config.josh_path, "/path/to/sim.josh")
         self.assertEqual(config.config_content, "survivalProbAdult = 85 %")
+        self.assertEqual(config.file_mappings, {"data": {"path": "/path/to/data.jshd", "hash": "abc123"}})
         self.assertEqual(config.parameters, {"survivalProbAdult": 85})
 
-    def test_register_config_duplicate_hash(self):
-        """register_config should ignore duplicate hashes."""
-        self.registry.register_config(
+    def test_register_run_duplicate_hash(self):
+        """register_run should ignore duplicate hashes."""
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="abc123",
+            run_hash="abc123",
+            josh_path="/path/to/sim.josh",
             config_content="original content",
+            file_mappings=None,
             parameters={"x": 1},
         )
 
         # Register same hash again - should not error
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="abc123",
+            run_hash="abc123",
+            josh_path="/path/to/sim.josh",
             config_content="different content",
+            file_mappings=None,
             parameters={"x": 2},
         )
 
@@ -220,22 +228,26 @@ class TestConfigRegistration(unittest.TestCase):
 
     def test_get_configs_for_session(self):
         """get_configs_for_session should return all configs for session."""
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="hash1",
+            run_hash="hash1",
+            josh_path="/path/to/sim.josh",
             config_content="content1",
+            file_mappings=None,
             parameters={"x": 1},
         )
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="hash2",
+            run_hash="hash2",
+            josh_path="/path/to/sim.josh",
             config_content="content2",
+            file_mappings=None,
             parameters={"x": 2},
         )
 
         configs = self.registry.get_configs_for_session(self.session_id)
         self.assertEqual(len(configs), 2)
-        hashes = {c.config_hash for c in configs}
+        hashes = {c.run_hash for c in configs}
         self.assertEqual(hashes, {"hash1", "hash2"})
 
     def test_get_configs_for_session_empty(self):
@@ -254,10 +266,12 @@ class TestRunTracking(unittest.TestCase):
 
         self.registry = RunRegistry(":memory:")
         self.session_id = self.registry.create_session(experiment_name="test")
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="config123",
+            run_hash="config123",
+            josh_path="/path/to/sim.josh",
             config_content="test content",
+            file_mappings=None,
             parameters={"x": 1},
         )
 
@@ -268,7 +282,7 @@ class TestRunTracking(unittest.TestCase):
     def test_start_run(self):
         """start_run should create a run record."""
         run_id = self.registry.start_run(
-            config_hash="config123",
+            run_hash="config123",
             replicate=0,
             output_path="/output/path",
         )
@@ -276,7 +290,7 @@ class TestRunTracking(unittest.TestCase):
         self.assertIsInstance(run_id, str)
         run = self.registry.get_run(run_id)
         self.assertIsNotNone(run)
-        self.assertEqual(run.config_hash, "config123")
+        self.assertEqual(run.run_hash, "config123")
         self.assertEqual(run.replicate, 0)
         self.assertEqual(run.output_path, "/output/path")
         self.assertIsNotNone(run.started_at)
@@ -285,7 +299,7 @@ class TestRunTracking(unittest.TestCase):
 
     def test_complete_run_success(self):
         """complete_run should update run with exit code."""
-        run_id = self.registry.start_run(config_hash="config123")
+        run_id = self.registry.start_run(run_hash="config123")
 
         self.registry.complete_run(run_id=run_id, exit_code=0)
 
@@ -296,7 +310,7 @@ class TestRunTracking(unittest.TestCase):
 
     def test_complete_run_failure(self):
         """complete_run should store error message on failure."""
-        run_id = self.registry.start_run(config_hash="config123")
+        run_id = self.registry.start_run(run_hash="config123")
 
         self.registry.complete_run(
             run_id=run_id,
@@ -313,13 +327,13 @@ class TestRunTracking(unittest.TestCase):
         result = self.registry.get_run("nonexistent-id")
         self.assertIsNone(result)
 
-    def test_get_runs_for_config(self):
-        """get_runs_for_config should return all runs for a config."""
-        run1 = self.registry.start_run(config_hash="config123", replicate=0)
-        run2 = self.registry.start_run(config_hash="config123", replicate=1)
-        run3 = self.registry.start_run(config_hash="config123", replicate=2)
+    def test_get_runs_for_hash(self):
+        """get_runs_for_hash should return all runs for a run hash."""
+        run1 = self.registry.start_run(run_hash="config123", replicate=0)
+        run2 = self.registry.start_run(run_hash="config123", replicate=1)
+        run3 = self.registry.start_run(run_hash="config123", replicate=2)
 
-        runs = self.registry.get_runs_for_config("config123")
+        runs = self.registry.get_runs_for_hash("config123")
         self.assertEqual(len(runs), 3)
         run_ids = {r.run_id for r in runs}
         self.assertEqual(run_ids, {run1, run2, run3})
@@ -327,7 +341,7 @@ class TestRunTracking(unittest.TestCase):
     def test_run_with_metadata(self):
         """start_run should store metadata."""
         run_id = self.registry.start_run(
-            config_hash="config123",
+            run_hash="config123",
             metadata={"host": "node01", "pid": 12345},
         )
 
@@ -345,13 +359,15 @@ class TestOutputTracking(unittest.TestCase):
 
         self.registry = RunRegistry(":memory:")
         self.session_id = self.registry.create_session(experiment_name="test")
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="config123",
+            run_hash="config123",
+            josh_path="/path/to/sim.josh",
             config_content="test content",
+            file_mappings=None,
             parameters={},
         )
-        self.run_id = self.registry.start_run(config_hash="config123")
+        self.run_id = self.registry.start_run(run_hash="config123")
 
     def tearDown(self):
         """Close registry after each test."""
@@ -391,33 +407,39 @@ class TestQueryMethods(unittest.TestCase):
         )
 
         # Create configs with different parameters
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="hash1",
+            run_hash="hash1",
+            josh_path="/path/to/sim.josh",
             config_content="x=1, y=a",
+            file_mappings=None,
             parameters={"x": 1, "y": "a"},
         )
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="hash2",
+            run_hash="hash2",
+            josh_path="/path/to/sim.josh",
             config_content="x=2, y=a",
+            file_mappings=None,
             parameters={"x": 2, "y": "a"},
         )
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="hash3",
+            run_hash="hash3",
+            josh_path="/path/to/sim.josh",
             config_content="x=1, y=b",
+            file_mappings=None,
             parameters={"x": 1, "y": "b"},
         )
 
         # Create runs
-        run1 = self.registry.start_run(config_hash="hash1")
+        run1 = self.registry.start_run(run_hash="hash1")
         self.registry.complete_run(run1, exit_code=0)
 
-        run2 = self.registry.start_run(config_hash="hash2")
+        run2 = self.registry.start_run(run_hash="hash2")
         self.registry.complete_run(run2, exit_code=1, error_message="failed")
 
-        run3 = self.registry.start_run(config_hash="hash3")
+        run3 = self.registry.start_run(run_hash="hash3")
         self.registry.complete_run(run3, exit_code=0)
 
     def tearDown(self):
@@ -440,7 +462,7 @@ class TestQueryMethods(unittest.TestCase):
         """get_runs_by_parameters with multiple filters."""
         runs = self.registry.get_runs_by_parameters(x=1, y="a")
         self.assertEqual(len(runs), 1)
-        self.assertEqual(runs[0]["config_hash"], "hash1")
+        self.assertEqual(runs[0]["run_hash"], "hash1")
 
     def test_get_runs_by_parameters_no_match(self):
         """get_runs_by_parameters returns empty list when no match."""
@@ -471,7 +493,7 @@ class TestQueryMethods(unittest.TestCase):
     def test_get_session_summary_with_pending(self):
         """get_session_summary correctly counts pending runs."""
         # Add a run that's started but not completed
-        self.registry.start_run(config_hash="hash1")
+        self.registry.start_run(run_hash="hash1")
 
         summary = self.registry.get_session_summary(self.session_id)
         self.assertEqual(summary.runs_completed, 3)  # Only the original 3
@@ -489,13 +511,15 @@ class TestExportResultsDf(unittest.TestCase):
         self.registry = RunRegistry(":memory:")
         self.session_id = self.registry.create_session(experiment_name="test")
 
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="hash1",
+            run_hash="hash1",
+            josh_path="/path/to/sim.josh",
             config_content="content",
+            file_mappings=None,
             parameters={"survival": 85, "growth": 1.5},
         )
-        run_id = self.registry.start_run(config_hash="hash1")
+        run_id = self.registry.start_run(run_hash="hash1")
         self.registry.complete_run(run_id, exit_code=0)
 
     def tearDown(self):
@@ -514,7 +538,7 @@ class TestExportResultsDf(unittest.TestCase):
         self.assertIsInstance(df, pd.DataFrame)
         self.assertEqual(len(df), 1)
         self.assertIn("run_id", df.columns)
-        self.assertIn("config_hash", df.columns)
+        self.assertIn("run_hash", df.columns)
         self.assertIn("survival", df.columns)
         self.assertIn("growth", df.columns)
         self.assertEqual(df.iloc[0]["survival"], 85)
@@ -544,10 +568,12 @@ class TestRegistryCallback(unittest.TestCase):
 
         self.registry = RunRegistry(":memory:")
         self.session_id = self.registry.create_session(experiment_name="test")
-        self.registry.register_config(
+        self.registry.register_run(
             session_id=self.session_id,
-            config_hash="test_hash",
+            run_hash="test_hash",
+            josh_path="/path/to/sim.josh",
             config_content="test",
+            file_mappings=None,
             parameters={"x": 1},
         )
 
@@ -568,7 +594,7 @@ class TestRegistryCallback(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/test.jshc"),
             config_name="test",
-            config_hash="test_hash",
+            run_hash="test_hash",
             parameters={"x": 1},
             simulation="Main",
             replicates=1,
@@ -584,7 +610,7 @@ class TestRegistryCallback(unittest.TestCase):
         callback.record(job, result)
 
         # Verify run was recorded
-        runs = self.registry.get_runs_for_config("test_hash")
+        runs = self.registry.get_runs_for_hash("test_hash")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].exit_code, 0)
         self.assertIsNone(runs[0].error_message)
@@ -601,7 +627,7 @@ class TestRegistryCallback(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/test.jshc"),
             config_name="test",
-            config_hash="test_hash",
+            run_hash="test_hash",
             parameters={"x": 1},
             simulation="Main",
             replicates=1,
@@ -615,7 +641,7 @@ class TestRegistryCallback(unittest.TestCase):
 
         callback.record(job, result)
 
-        runs = self.registry.get_runs_for_config("test_hash")
+        runs = self.registry.get_runs_for_hash("test_hash")
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].exit_code, 1)
         self.assertEqual(runs[0].error_message, "Error: simulation failed")
@@ -631,7 +657,7 @@ class TestRegistryCallback(unittest.TestCase):
             callback.record("not a job", "not a result")
 
         # No runs should be recorded
-        runs = self.registry.get_runs_for_config("test_hash")
+        runs = self.registry.get_runs_for_hash("test_hash")
         self.assertEqual(len(runs), 0)
 
 
@@ -657,10 +683,12 @@ class TestPersistence(unittest.TestCase):
                     experiment_name="persistence_test",
                     simulation="TestSim",
                 )
-                registry.register_config(
+                registry.register_run(
                     session_id=session_id,
-                    config_hash="persist_hash",
+                    run_hash="persist_hash",
+                    josh_path="/path/to/sim.josh",
                     config_content="persistent content",
+                    file_mappings=None,
                     parameters={"key": "value"},
                 )
 
@@ -714,13 +742,15 @@ class TestDataClasses(unittest.TestCase):
         from joshpy.registry import ConfigInfo
 
         config = ConfigInfo(
-            config_hash="abc123",
+            run_hash="abc123",
             session_id="session1",
+            josh_path="/path/to/sim.josh",
             config_content="content",
+            file_mappings={"data": {"path": "/path/to/data.jshd", "hash": "abc"}},
             parameters={"x": 1},
             created_at=datetime.now(),
         )
-        self.assertEqual(config.config_hash, "abc123")
+        self.assertEqual(config.run_hash, "abc123")
         self.assertEqual(config.parameters, {"x": 1})
 
     def test_run_info_attributes(self):
@@ -729,7 +759,7 @@ class TestDataClasses(unittest.TestCase):
 
         run = RunInfo(
             run_id="run1",
-            config_hash="config1",
+            run_hash="config1",
             replicate=0,
             started_at=None,
             completed_at=None,

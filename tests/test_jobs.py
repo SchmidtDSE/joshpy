@@ -12,7 +12,8 @@ from joshpy.jobs import (
     JobSet,
     JobExpander,
     SweepResult,
-    compute_config_hash,
+    _compute_run_hash,
+    _hash_file,
     _normalize_values,
     to_run_config,
     to_run_remote_config,
@@ -20,27 +21,72 @@ from joshpy.jobs import (
 )
 
 
-class TestComputeConfigHash(unittest.TestCase):
-    """Tests for compute_config_hash function."""
+class TestRunHash(unittest.TestCase):
+    """Tests for _compute_run_hash and _hash_file functions."""
 
     def test_returns_12_char_string(self):
         """Hash should be 12 characters."""
-        result = compute_config_hash("test content")
+        result = _compute_run_hash(None, "test content")
         self.assertEqual(len(result), 12)
         self.assertTrue(all(c in '0123456789abcdef' for c in result))
 
     def test_same_content_same_hash(self):
         """Same content should produce same hash."""
         content = "survivalProbAdult = 85 %"
-        hash1 = compute_config_hash(content)
-        hash2 = compute_config_hash(content)
+        hash1 = _compute_run_hash(None, content)
+        hash2 = _compute_run_hash(None, content)
         self.assertEqual(hash1, hash2)
 
     def test_different_content_different_hash(self):
         """Different content should produce different hash."""
-        hash1 = compute_config_hash("survivalProbAdult = 85 %")
-        hash2 = compute_config_hash("survivalProbAdult = 90 %")
+        hash1 = _compute_run_hash(None, "survivalProbAdult = 85 %")
+        hash2 = _compute_run_hash(None, "survivalProbAdult = 90 %")
         self.assertNotEqual(hash1, hash2)
+
+    def test_includes_josh_content(self):
+        """Hash should change when josh content changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            josh1 = Path(tmpdir) / "sim1.josh"
+            josh2 = Path(tmpdir) / "sim2.josh"
+            josh1.write_text("simulation Main { }")
+            josh2.write_text("simulation Main { // different }")
+
+            hash1 = _compute_run_hash(josh1, "config content")
+            hash2 = _compute_run_hash(josh2, "config content")
+            self.assertNotEqual(hash1, hash2)
+
+    def test_includes_file_mappings(self):
+        """Hash should change when file_mappings content changes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data1 = Path(tmpdir) / "data1.jshd"
+            data2 = Path(tmpdir) / "data2.jshd"
+            data1.write_bytes(b"data version 1")
+            data2.write_bytes(b"data version 2")
+
+            hash1 = _compute_run_hash(None, "config", {"data": data1})
+            hash2 = _compute_run_hash(None, "config", {"data": data2})
+            self.assertNotEqual(hash1, hash2)
+
+    def test_raises_if_josh_missing(self):
+        """Should raise FileNotFoundError if josh file doesn't exist."""
+        with self.assertRaises(FileNotFoundError):
+            _compute_run_hash(Path("/nonexistent/file.josh"), "config")
+
+    def test_raises_if_file_mapping_missing(self):
+        """Should raise FileNotFoundError if file in file_mappings doesn't exist."""
+        with self.assertRaises(FileNotFoundError):
+            _compute_run_hash(None, "config", {"data": Path("/nonexistent/data.jshd")})
+
+    def test_hash_file(self):
+        """_hash_file should return consistent hashes."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "test.bin"
+            path.write_bytes(b"test content")
+            
+            hash1 = _hash_file(path)
+            hash2 = _hash_file(path)
+            self.assertEqual(hash1, hash2)
+            self.assertEqual(len(hash1), 32)  # Full MD5 hex digest
 
 
 class TestNormalizeValues(unittest.TestCase):
@@ -326,7 +372,7 @@ class TestJobExpander(unittest.TestCase):
         job = job_set.jobs[0]
         self.assertEqual(job.custom_tags["a"], "1")
         self.assertEqual(job.custom_tags["b"], "test")
-        self.assertIn("config_hash", job.custom_tags)
+        self.assertIn("run_hash", job.custom_tags)
 
         job_set.cleanup()
 
@@ -363,7 +409,7 @@ class TestJobSet(unittest.TestCase):
                 config_content="",
                 config_path=Path("/tmp/test"),
                 config_name="test",
-                config_hash="abc",
+                run_hash="abc",
                 parameters={},
                 simulation="Main",
                 replicates=1,
@@ -378,7 +424,7 @@ class TestJobSet(unittest.TestCase):
                 config_content=f"val={i}",
                 config_path=Path(f"/tmp/test{i}"),
                 config_name="test",
-                config_hash=f"hash{i}",
+                run_hash=f"hash{i}",
                 parameters={"i": i},
                 simulation="Main",
                 replicates=3,
@@ -395,7 +441,7 @@ class TestJobSet(unittest.TestCase):
                 config_content="val=1",
                 config_path=Path("/tmp/test1"),
                 config_name="test",
-                config_hash="hash1",
+                run_hash="hash1",
                 parameters={},
                 simulation="Main",
                 replicates=3,
@@ -404,7 +450,7 @@ class TestJobSet(unittest.TestCase):
                 config_content="val=2",
                 config_path=Path("/tmp/test2"),
                 config_name="test",
-                config_hash="hash2",
+                run_hash="hash2",
                 parameters={},
                 simulation="Main",
                 replicates=5,
@@ -426,7 +472,7 @@ class TestJobSet(unittest.TestCase):
                 config_content=f"val={i}",
                 config_path=Path(f"/tmp/test{i}"),
                 config_name="test",
-                config_hash=f"hash{i}",
+                run_hash=f"hash{i}",
                 parameters={"i": i},
                 simulation="Main",
                 replicates=1,
@@ -462,7 +508,7 @@ class TestToRunConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -483,7 +529,7 @@ class TestToRunConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=5,
@@ -500,7 +546,7 @@ class TestToRunConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={"x": 1},
             simulation="Main",
             replicates=1,
@@ -519,7 +565,7 @@ class TestToRunConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -543,7 +589,7 @@ class TestToRunConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -563,7 +609,7 @@ class TestToRunConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -583,7 +629,7 @@ class TestToRunRemoteConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -603,7 +649,7 @@ class TestToRunRemoteConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -622,7 +668,7 @@ class TestToRunRemoteConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={"x": 1},
             simulation="Main",
             replicates=1,
@@ -641,7 +687,7 @@ class TestToRunRemoteConfig(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/editor.jshc"),
             config_name="editor",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -668,7 +714,7 @@ class TestSweepResult(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/test.jshc"),
             config_name="test",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={"x": 1},
             simulation="Main",
             replicates=1,
@@ -689,7 +735,7 @@ class TestSweepResult(unittest.TestCase):
             config_content="test",
             config_path=Path("/tmp/test.jshc"),
             config_name="test",
-            config_hash="abc123",
+            run_hash="abc123",
             parameters={},
             simulation="Main",
             replicates=1,
@@ -715,7 +761,7 @@ class TestRunSweep(unittest.TestCase):
                 config_content="test",
                 config_path=Path("/tmp/test.jshc"),
                 config_name="test",
-                config_hash="abc123",
+                run_hash="abc123",
                 parameters={"x": 1},
                 simulation="Main",
                 replicates=1,
@@ -745,7 +791,7 @@ class TestRunSweep(unittest.TestCase):
                 config_content="test",
                 config_path=Path("/tmp/test.jshc"),
                 config_name="test",
-                config_hash="abc123",
+                run_hash="abc123",
                 parameters={"x": 1},
                 simulation="Main",
                 replicates=1,
@@ -776,7 +822,7 @@ class TestRunSweep(unittest.TestCase):
                 config_content=f"test{i}",
                 config_path=Path(f"/tmp/test{i}.jshc"),
                 config_name="test",
-                config_hash=f"hash{i}",
+                run_hash=f"hash{i}",
                 parameters={"i": i},
                 simulation="Main",
                 replicates=1,
