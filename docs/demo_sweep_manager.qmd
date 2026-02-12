@@ -1,0 +1,431 @@
+---
+title: "joshpy Parameter Sweep Demo (SweepManager)"
+format: html
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+[Josh](https://joshsim.org) is an ecological simulation runtime for agent-based
+modeling developed by the [Eric and Wendy Schmidt Center for Data Science and Environment](https://github.com/SchmidtDSE/josh).
+This demo assumes familiarity with Josh's simulation language and runtime.
+
+**joshpy** is a Python client that enables:
+
+- **Orchestration**: Define parameter sweeps, expand job configurations, and
+  execute simulations programmatically
+- **Tracking**: Register runs in a DuckDB-backed registry with session and
+  config tracking
+- **Data Loading**: Import cell-level CSV exports into queryable tables
+- **Analysis**: Query results across parameter values and replicates
+- **Diagnostics**: Quick matplotlib visualizations for simulation sanity checks
+- **Visualization**: Create publication-quality plots with R/ggplot2 integration
+
+This demo walks through a complete parameter sweep workflow **using `SweepManager`**,
+which encapsulates the common workflow of expanding, running, and collecting
+sweep results. For a more detailed walkthrough using each component directly,
+see `demo_manual.qmd`.
+
+We vary the `maxGrowth` parameter from 10 to 100 meters/step across 10 experiments,
+each with 3 replicates, then load, query, and visualize the results.
+
+## Prerequisites
+
+Ensure the Josh JAR is available at `jar/joshsim-fat.jar` and joshpy is installed:
+
+```bash
+pip install -e '.[all]'
+```
+
+For visualization, ensure R is installed with the following packages:
+
+```r
+install.packages(c("reticulate", "ggplot2", "dplyr"))
+```
+
+## Step 1: Define Parameter Sweep
+
+The first step is to define our experiment configuration. joshpy uses three key
+abstractions:
+
+- **`JobConfig`**: The top-level configuration specifying source files, templates,
+  and sweep parameters
+- **`SweepConfig`**: Defines which parameters to sweep and their values
+- **`SweepParameter`**: A single parameter with a name and list of values
+
+```{python}
+from pathlib import Path
+
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+
+# Paths to source files
+SOURCE_PATH = Path("../examples/hello_cli_configurable.josh")
+TEMPLATE_PATH = Path("../examples/templates/sweep_config.jshc.j2")
+
+# Parameter sweep: maxGrowth from 10 to 100 in steps of 10
+MAX_GROWTH_VALUES = list(range(10, 101, 10))
+
+config = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        parameters=[SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES)]
+    ),
+)
+
+print(f"Parameter values: {MAX_GROWTH_VALUES}")
+print(f"Replicates per job: {config.replicates}")
+print(f"Total runs: {len(MAX_GROWTH_VALUES)} x {config.replicates} = {len(MAX_GROWTH_VALUES) * config.replicates}")
+```
+
+Let's examine the source files. The `.josh` file defines the simulation, and
+the `.jshc.j2` template provides parameterized configuration:
+
+#### Josh Source
+
+```{python}
+print(SOURCE_PATH.read_text())
+```
+
+#### Template Configuration
+
+```{python}
+print(TEMPLATE_PATH.read_text())
+```
+
+Notice that the `.josh` file references `config sweep_config.maxGrowth` - this
+pulls the value from our generated config file at runtime.
+
+## Step 2: Create SweepManager
+
+The `SweepManager` encapsulates the entire sweep workflow. It uses a builder
+pattern for flexible configuration:
+
+- **`with_registry()`**: Configure DuckDB registry (path or existing instance)
+- **`with_cli()`**: Configure JoshCLI (JAR path or existing instance)
+- **`build()`**: Expand jobs, create session, and register configurations
+
+```{python}
+from joshpy.sweep import SweepManager
+
+# Create manager with builder pattern
+manager = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="growth_rate_sweep")
+    .with_cli(jar_path=Path("../jar/joshsim-fat.jar"))
+    .build()
+)
+
+print(f"Session ID: {manager.session_id}")
+print(f"Jobs: {manager.job_set.total_jobs}")
+print(f"Total replicates: {manager.job_set.total_replicates}")
+
+# Show registered job hashes
+for job in manager.job_set.jobs:
+    print(f"  maxGrowth={job.parameters['maxGrowth']:>3} -> hash={job.run_hash}")
+```
+
+## Step 3: Run Simulations
+
+The `run()` method executes all jobs with automatic registry tracking:
+
+```{python}
+print("Running 10 experiments (3 replicates each)...\n")
+
+# Run all jobs
+results = manager.run()
+
+print(f"\nCompleted: {results.succeeded}/{len(results)} succeeded")
+
+if results.failed > 0:
+    print(f"Failed: {results.failed}")
+    for job, result in results:
+        if not result.success:
+            print(f"  maxGrowth={job.parameters['maxGrowth']}: {result.stderr[:100]}...")
+```
+
+## Step 4: Load Results
+
+The `load_results()` method automatically discovers export paths from the Josh
+file, resolves template variables for each job, and loads CSV results:
+
+```{python}
+print("Loading CSV exports into registry...")
+
+rows_loaded = manager.load_results()
+
+print(f"\nLoaded {rows_loaded:,} rows")
+```
+
+## Step 5: Diagnostic Plotting (Python)
+
+The `SimulationDiagnostics` class provides quick matplotlib-based visualizations
+for simulation sanity checks.
+
+### Discover Available Data
+
+First, let's see what data is available:
+
+```{python}
+# Get summary of loaded data
+summary = manager.registry.get_data_summary()
+print(summary)
+```
+
+```{python}
+print(f"Export variables: {manager.registry.list_export_variables()}")
+print(f"Config parameters: {manager.registry.list_config_parameters()}")
+```
+
+### Time Series Visualization
+
+```{python}
+#| label: fig-diag-timeseries
+#| fig-cap: "Tree height over time for maxGrowth=50, with uncertainty bands across replicates."
+
+from joshpy.diagnostics import SimulationDiagnostics
+
+diag = SimulationDiagnostics(manager.registry)
+
+# Plot time series for a specific parameter value
+diag.plot_timeseries(
+    "averageHeight",
+    maxGrowth=50,
+    title="Average Tree Height Over Time (maxGrowth=50)",
+    show=True,
+)
+```
+
+### Parameter Comparison
+
+```{python}
+#| label: fig-diag-comparison
+#| fig-cap: "Tree height trajectories across all maxGrowth parameter values."
+
+# Compare averageHeight across all maxGrowth values
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    title="Tree Height by Growth Rate Parameter",
+    show=True,
+)
+```
+
+Bar chart at a specific timestep:
+
+```{python}
+#| label: fig-diag-barchart
+#| fig-cap: "Final tree height at step 10 for each maxGrowth value."
+
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    step=10,
+    title="Final Tree Height vs Growth Rate",
+    show=True,
+)
+```
+
+### Saving Figures
+
+```{python}
+fig = diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    show=False,
+)
+fig.savefig("/tmp/diagnostic_comparison.png", dpi=150, bbox_inches="tight")
+print("Saved to /tmp/diagnostic_comparison.png")
+```
+
+## Step 6: Query Results
+
+`SweepManager` provides a `query()` method for common queries, but you can also
+access the registry directly for custom SQL.
+
+### Using manager.query()
+
+```{python}
+# Query with parameter grouping
+df = manager.query("averageHeight", group_by="maxGrowth")
+print(f"Retrieved {len(df)} rows\n")
+print(df.head(15).to_string(index=False))
+```
+
+### Using DiagnosticQueries
+
+For more control, use `DiagnosticQueries`:
+
+```{python}
+from joshpy.cell_data import DiagnosticQueries
+
+queries = DiagnosticQueries(manager.registry)
+
+df = queries.get_parameter_comparison(
+    variable="averageHeight",
+    param_name="maxGrowth",
+)
+
+# Save to CSV for R visualization
+df.to_csv("/tmp/sweep_results.csv", index=False)
+print(f"Saved {len(df)} rows to /tmp/sweep_results.csv")
+```
+
+### Direct DuckDB Access
+
+For custom queries, access the connection directly. Note that export variables are
+stored in a JSON `variables` column:
+
+```{python}
+# Direct SQL query - use variables->>'varname' to extract from JSON
+result = manager.registry.query("""
+    SELECT 
+        step,
+        AVG(CAST(variables->>'averageHeight' AS DOUBLE)) as mean_height,
+        COUNT(*) as n_cells
+    FROM cell_data
+    GROUP BY step
+    ORDER BY step
+""")
+
+print(result.df().to_string(index=False))
+```
+
+## Step 7: Visualize Results (R)
+
+For publication-quality figures, use ggplot2 in R:
+
+```{r}
+#| label: fig-timeseries
+#| fig-cap: "Tree height trajectories for different maxGrowth parameter values."
+#| fig-width: 10
+#| fig-height: 6
+
+df <- read.csv("/tmp/sweep_results.csv")
+
+if (nrow(df) > 0) {
+  p <- ggplot(df, aes(x = step, y = mean_value, color = factor(param_value), fill = factor(param_value))) +
+    geom_ribbon(aes(ymin = mean_value - std_value, ymax = mean_value + std_value), alpha = 0.2, color = NA) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 2) +
+    labs(
+      x = "Simulation Step",
+      y = "Average Tree Height (meters)",
+      title = "Tree Growth Over Time by maxGrowth Parameter",
+      color = "maxGrowth",
+      fill = "maxGrowth"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "right",
+      panel.grid.minor = element_blank()
+    )
+  print(p)
+} else {
+  cat("No data to plot.")
+}
+```
+
+```{r}
+#| label: fig-final-height
+#| fig-cap: "Final tree height vs growth rate parameter with error bars."
+#| fig-width: 10
+#| fig-height: 6
+
+df <- read.csv("/tmp/sweep_results.csv")
+
+if (nrow(df) > 0) {
+  final_df <- df |>
+    dplyr::filter(step == max(step))
+
+  p <- ggplot(final_df, aes(x = param_value, y = mean_value)) +
+    geom_col(fill = "steelblue", alpha = 0.7) +
+    geom_errorbar(
+      aes(ymin = mean_value - std_value, ymax = mean_value + std_value),
+      width = 3,
+      linewidth = 0.6
+    ) +
+    labs(
+      x = "maxGrowth (meters/step)",
+      y = "Final Average Height (meters)",
+      title = "Final Tree Height vs Growth Rate"
+    ) +
+    theme_minimal() +
+    theme(panel.grid.minor = element_blank())
+  print(p)
+
+  r <- cor(final_df$param_value, final_df$mean_value)
+  cat(sprintf("\nCorrelation between maxGrowth and final height: r = %.4f\n", r))
+} else {
+  cat("No data to plot.")
+}
+```
+
+## Summary
+
+This demo illustrated the `SweepManager` workflow:
+
+1. **Define** a parameter sweep using `JobConfig` and `SweepConfig`
+2. **Build** a `SweepManager` with builder pattern (handles expansion and registration)
+3. **Execute** with `manager.run()` - single method replaces manual loops
+4. **Load** outputs with `manager.load_results()` - automatic path discovery
+5. **Query** with `manager.query()` or direct DuckDB access
+6. **Visualize** with `SimulationDiagnostics` (Python) or ggplot2 (R)
+
+**SweepManager Benefits:**
+
+- **Encapsulation**: One object manages registry, CLI, and job set
+- **Context manager**: Automatic cleanup with `with` statement
+- **Builder pattern**: Flexible configuration with sensible defaults
+- **Convenience methods**: `run()`, `load_results()`, `query()` for common operations
+
+**Alternative Creation Methods:**
+
+```python
+# From dictionary
+manager = SweepManager.from_dict(config.to_dict(), registry=":memory:")
+
+# From YAML file
+manager = SweepManager.from_yaml(Path("experiment.yaml"))
+
+# With existing components
+manager = (
+    SweepManager.builder(config)
+    .with_registry(existing_registry, session_id="existing-session")
+    .with_cli(existing_cli)
+    .build()
+)
+```
+
+For more control over individual steps, see `demo_manual.qmd`.
+
+## Cleanup
+
+```{python}
+# SweepManager cleanup (also works as context manager)
+manager.cleanup()  # Remove temporary config files
+manager.close()    # Close registry connection
+print("Cleanup complete.")
+```
+
+**Alternative: Context Manager**
+
+```python
+# Automatic cleanup with context manager
+with SweepManager.from_dict(config.to_dict()) as manager:
+    manager.run()
+    manager.load_results()
+    df = manager.query("averageHeight", group_by="maxGrowth")
+# Resources automatically cleaned up here
+```

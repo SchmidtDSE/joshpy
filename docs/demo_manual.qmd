@@ -1,5 +1,5 @@
 ---
-title: "joshpy Parameter Sweep Demo"
+title: "joshpy Parameter Sweep Demo (Manual Workflow)"
 format: html
 execute:
   warning: false
@@ -30,9 +30,12 @@ This demo assumes familiarity with Josh's simulation language and runtime.
 - **Diagnostics**: Quick matplotlib visualizations for simulation sanity checks
 - **Visualization**: Create publication-quality plots with R/ggplot2 integration
 
-This demo walks through a complete parameter sweep workflow. We vary the
-`maxGrowth` parameter from 10 to 100 meters/step across 10 experiments, each
-with 3 replicates, then load, query, and visualize the results.
+This demo walks through a complete parameter sweep workflow **using each component
+directly**. This approach provides maximum control and visibility into each step.
+For a simplified workflow using `SweepManager`, see `demo_sweep_manager.qmd`.
+
+We vary the `maxGrowth` parameter from 10 to 100 meters/step across 10 experiments,
+each with 3 replicates, then load, query, and visualize the results.
 
 ## Prerequisites
 
@@ -111,11 +114,13 @@ pulls the value from our generated config file at runtime.
 The `RunRegistry` provides experiment tracking backed by DuckDB. It stores:
 
 - **Sessions**: High-level experiment metadata
-- **Configs**: Rendered configuration files with parameter values
+- **Configs**: Rendered configuration files with parameter values and input file hashes
 - **Runs**: Individual execution records with timing and exit codes
 
 The `JobExpander` takes our `JobConfig` and generates concrete jobs - one per
-parameter combination, each with a unique config hash for tracking.
+parameter combination, each with a unique **run hash** for tracking. The run hash
+includes the `.josh` file content, rendered `.jshc` content, and hashes of any
+input data files.
 
 ```{python}
 from joshpy.jobs import JobExpander
@@ -124,119 +129,76 @@ from joshpy.registry import RunRegistry
 # Create in-memory registry for this demo
 registry = RunRegistry(":memory:")
 
-# Expand config into individual jobs first so we can show totals
+# Expand config into individual jobs
 expander = JobExpander()
 job_set = expander.expand(config)
 
 # Create a session to track this experiment
-# (total_jobs/total_replicates are now computed from JobSet)
 session_id = registry.create_session(
     experiment_name="growth_rate_sweep",
     simulation="Main",
     template_path=str(TEMPLATE_PATH),
+    metadata={"job_config": config.to_dict()},  # Store for reconstruction
 )
 print(f"Session ID: {session_id}")
 print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicates)")
 
-# Jobs already expanded above, show count
-print(f"Expanded to {len(job_set)} jobs")
-
-# Register each job's config in the registry
+# Register each job's configuration in the registry
 for job in job_set.jobs:
-    registry.register_config(
+    registry.register_run(
         session_id=session_id,
-        config_hash=job.config_hash,
+        run_hash=job.run_hash,
+        josh_path=str(job.source_path),
         config_content=job.config_content,
+        file_mappings=job.file_mappings,
         parameters=job.parameters,
     )
-    print(f"  maxGrowth={job.parameters['maxGrowth']:>3} -> hash={job.config_hash}")
+    print(f"  maxGrowth={job.parameters['maxGrowth']:>3} -> hash={job.run_hash}")
 ```
 
 ## Step 3: Run the Simulations
 
-The `JoshCLI` executes jobs via the Josh command-line interface. The `to_run_config()`
-helper converts an `ExpandedJob` to a `RunConfig` dataclass that maps directly to
-CLI arguments:
-
-- Source file and simulation name
-- Config file path (via `--data` flag)
-- Custom tags for template variable resolution (via `--custom-tag`)
-- Replicate count
-
-The `RegistryCallback` automatically records run metadata as each job completes.
+The `JoshCLI` executes jobs via the Josh command-line interface. The `run_sweep()`
+function handles execution and automatically records runs in the registry when
+`registry` and `session_id` are provided.
 
 ```{python}
 from joshpy.cli import JoshCLI
-from joshpy.jobs import to_run_config
-from joshpy.registry import RegistryCallback
+from joshpy.jobs import run_sweep
 
 # Update session status
 registry.update_session_status(session_id, "running")
 
 # Create CLI targeting the local fat JAR
 cli = JoshCLI(josh_jar=Path("../jar/joshsim-fat.jar"))
-callback = RegistryCallback(registry, session_id)
 
-print("Running 10 experiments (3 replicates each)...\n\n")
+print("Running 10 experiments (3 replicates each)...\n")
 
-results = []
-for job in job_set.jobs:
-    run_config = to_run_config(job)
-    result = cli.run(run_config)
-    callback.record(job, result)
-    results.append((job, result))
-    status = "OK" if result.success else "FAIL"
-    print(f"[{status}] maxGrowth={job.parameters['maxGrowth']}")
-    if not result.success:
-        print(f"       Error: {result.stderr[:200]}...")
+# Run all jobs with automatic tracking
+results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
 
-succeeded = sum(1 for _, r in results if r.success)
-print(f"\n\nCompleted: {succeeded}/{len(results)} succeeded")
+print(f"\nCompleted: {results.succeeded}/{len(results)} succeeded")
 
 # Update final session status
-final_status = "completed" if succeeded == len(results) else "failed"
+final_status = "completed" if results.failed == 0 else "failed"
 registry.update_session_status(session_id, final_status)
 ```
 
 ## Step 4: Load Cell Data from CSVs
 
-Josh exports simulation data to CSV files. The `CellDataLoader` imports these
-into a DuckDB `cell_data` table, linking each row to its originating run via
-`run_id` and `config_hash`. This enables queries that join parameters with
-results.
+Josh exports simulation data to CSV files. The `recover_sweep_results()` function
+automatically discovers export paths from the Josh file (using `inspect_exports`),
+resolves template variables for each job, and loads results into the registry.
 
 ```{python}
-from joshpy.cell_data import CellDataLoader
-
-loader = CellDataLoader(registry)
+from joshpy.sweep import recover_sweep_results
 
 print("Loading CSV exports into registry...")
-total_loaded = 0
-files_found = 0
 
-for job, result in results:
-    if not result.success:
-        continue
+# Automatically discover and load CSV results
+total_loaded = recover_sweep_results(cli, job_set, registry)
 
-    mg = job.parameters["maxGrowth"]
-
-    # Get run_id from registry (created by RegistryCallback)
-    runs = registry.get_runs_for_config(job.config_hash)
-    if not runs:
-        print(f"  Skipping maxGrowth={mg} (no run_id)")
-        continue
-
-    run_id = runs[0].run_id
-
-    # Load each replicate's CSV
-    for rep in range(job.replicates):
-        csv_path = Path(f"/tmp/hello_josh_{mg}_{rep}.csv")
-        if csv_path.exists():
-            rows = loader.load_csv(csv_path, run_id=run_id, config_hash=job.config_hash)
-            total_loaded += rows
-            files_found += 1
-
-print(f"\nLoaded {total_loaded:,} rows from {files_found} files")
+print(f"\nLoaded {total_loaded:,} rows")
 ```
 
 ## Step 5: Diagnostic Plotting (Python)
@@ -440,38 +402,30 @@ if (nrow(df) > 0) {
 
 ## Summary
 
-This demo illustrated the core joshpy workflow:
+This demo illustrated the manual joshpy workflow using each component directly:
 
 1. **Define** a parameter sweep using `JobConfig` and `SweepConfig`
-2. **Track** experiments with `RunRegistry` sessions and configs
-3. **Execute** simulations via `JobRunner` with automatic tracking
-4. **Load** CSV outputs into queryable DuckDB tables
-5. **Query** results across parameters using `DiagnosticQueries`
-6. **Diagnose** simulation behavior with `SimulationDiagnostics` (Python/matplotlib)
-7. **Visualize** publication-quality figures with ggplot2 (R)
+2. **Expand** jobs with `JobExpander` to get concrete job specifications
+3. **Register** jobs with `registry.register_run()` for tracking
+4. **Execute** with `run_sweep()` and `RegistryCallback` for automatic recording
+5. **Load** outputs with `recover_sweep_results()` for automatic path discovery
+6. **Query** with `DiagnosticQueries` or direct DuckDB access
+7. **Visualize** with `SimulationDiagnostics` (Python) or ggplot2 (R)
 
-The registry-backed approach ensures reproducibility and enables complex
-queries joining parameters with results across multiple experiments.
+**Key Design Principles:**
 
-**Diagnostic Plotting**: The `SimulationDiagnostics` class provides quick
-matplotlib-based visualizations for sanity checks during development:
+- **Thin CLI wrapper**: `JoshCLI` maps 1:1 to CLI commands
+- **Thin DuckDB wrapper**: Direct `registry.conn` access for custom SQL
+- **Convenience helpers**: `run_sweep()` and `recover_sweep_results()` for common patterns
+- **Full control**: Each step is explicit and visible
 
-- `plot_timeseries()`: Variable evolution over time with uncertainty bands
-- `plot_comparison()`: Compare across parameter values (time series or bar chart)
-- `plot_spatial()`: Spatial snapshots at specific timesteps
-
-**Discovery Methods**: Before plotting, use `registry.get_data_summary()`,
-`registry.list_export_variables()`, and `registry.list_config_parameters()` to see what
-data is available.
-
-This document also demonstrates Quarto's ability to seamlessly combine R and
-Python in the same workflow using `reticulate`. Python handles the simulation
-orchestration, data querying, and quick diagnostics, while R handles
-publication-quality visualization with ggplot2.
+For a simplified workflow, see `demo_sweep_manager.qmd` which uses `SweepManager`
+to encapsulate these steps.
 
 ## Cleanup
 
 ```{python}
+job_set.cleanup()  # Remove temporary config files
 registry.close()
-print("Registry closed.")
+print("Cleanup complete.")
 ```
