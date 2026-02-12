@@ -569,15 +569,20 @@ class TestSweepManager(unittest.TestCase):
         builder = SweepManager.builder(self.config)
         self.assertIsInstance(builder, SweepManagerBuilder)
 
-    def test_run_raises_without_api_key_for_remote(self):
-        """run() should raise ValueError if remote=True without api_key."""
+    def test_run_remote_without_api_key(self):
+        """run() with remote=True without api_key should work (for local servers)."""
+        from unittest.mock import MagicMock, patch
+        
         manager = SweepManager.from_config(self.config, registry=":memory:")
         
         try:
-            with self.assertRaises(ValueError) as ctx:
-                manager.run(remote=True)
+            # Mock the CLI to avoid actual execution
+            manager.cli = MagicMock()
+            manager.cli.run_remote.return_value = MagicMock(success=True, exit_code=0)
             
-            self.assertIn("api_key", str(ctx.exception))
+            # This should NOT raise - api_key is optional for local servers
+            result = manager.run(remote=True, quiet=True)
+            self.assertEqual(result.succeeded, len(manager.job_set))
         finally:
             manager.cleanup()
             manager.close()

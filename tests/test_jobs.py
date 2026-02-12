@@ -777,11 +777,13 @@ class TestRunSweep(unittest.TestCase):
         # CLI.run should not be called
         cli.run.assert_not_called()
 
-    def test_remote_requires_api_key(self):
-        """remote=True without api_key should raise ValueError."""
+    def test_remote_without_api_key(self):
+        """remote=True without api_key should work (for local servers)."""
         from unittest.mock import MagicMock
 
         cli = MagicMock()
+        cli.run_remote.return_value = MagicMock(success=True, exit_code=0)
+
         job_set = JobSet(jobs=[
             ExpandedJob(
                 config_content="test",
@@ -795,10 +797,10 @@ class TestRunSweep(unittest.TestCase):
             )
         ])
 
-        with self.assertRaises(ValueError) as cm:
-            run_sweep(cli, job_set, remote=True, quiet=True)
-
-        self.assertIn("api_key", str(cm.exception))
+        # api_key is now optional (for local servers), so this should NOT raise
+        result = run_sweep(cli, job_set, remote=True, quiet=True)
+        self.assertEqual(result.succeeded, 1)
+        cli.run_remote.assert_called_once()
 
     def test_remote_with_api_key_uses_run_remote(self):
         """remote=True with api_key should use cli.run_remote()."""
@@ -911,7 +913,7 @@ class TestRunSweep(unittest.TestCase):
             )
         ])
 
-        result = run_sweep(cli, job_set, callback=callback, quiet=True)
+        result = run_sweep(cli, job_set, on_complete=callback, quiet=True)
 
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
