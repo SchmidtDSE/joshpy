@@ -50,8 +50,6 @@ from joshpy.jobs import (
     JobSet,
     SweepResult,
     run_sweep,
-    to_run_config,
-    to_run_remote_config,
 )
 from joshpy.registry import RunRegistry
 
@@ -332,116 +330,47 @@ class SweepManager:
     ) -> SweepResult:
         """Execute all jobs in the sweep.
 
+        Runs are automatically recorded in the registry.
+
         Args:
-            remote: If True, use run_remote() for cloud execution.
-            api_key: Josh Cloud API key (required if remote=True).
-            endpoint: Custom Josh Cloud endpoint URL (optional).
+            remote: If True, use run_remote() for remote execution.
+            api_key: API key for authentication (optional for local servers).
+            endpoint: Custom endpoint URL (optional).
             stop_on_failure: If True, stop on first failure.
             dry_run: If True, print plan without executing.
             quiet: If True, suppress progress output.
-            on_complete: Optional callback invoked after each job completes.
-                Signature: callback(job, result) -> None.
+            on_complete: Optional additional callback invoked after each job.
+                Signature: callback(job, result) -> None. Called after
+                registry recording. Use for progress reporting, logging, etc.
 
         Returns:
             SweepResult with all job outcomes.
-
-        Raises:
-            ValueError: If remote=True but api_key not provided.
 
         Example:
             # Local execution
             results = manager.run()
 
-            # Cloud execution
+            # Remote execution (Josh Cloud)
             results = manager.run(remote=True, api_key="your-api-key")
+
+            # Remote execution (local server, no API key)
+            results = manager.run(remote=True, endpoint="http://localhost:8080")
 
             # Dry run to see what would be executed
             results = manager.run(dry_run=True)
         """
-        if remote:
-            if not api_key:
-                raise ValueError("api_key required for remote execution")
-            return self._run_remote(
-                api_key=api_key,
-                endpoint=endpoint,
-                stop_on_failure=stop_on_failure,
-                dry_run=dry_run,
-                quiet=quiet,
-                on_complete=on_complete,
-            )
-        else:
-            return run_sweep(
-                cli=self.cli,
-                job_set=self.job_set,
-                callback=on_complete,
-                stop_on_failure=stop_on_failure,
-                dry_run=dry_run,
-                quiet=quiet,
-            )
-
-    def _run_remote(
-        self,
-        api_key: str,
-        endpoint: str | None,
-        stop_on_failure: bool,
-        dry_run: bool,
-        quiet: bool,
-        on_complete: Callable[[ExpandedJob, Any], None] | None,
-    ) -> SweepResult:
-        """Execute all jobs remotely on Josh Cloud.
-
-        Internal method used by run() when remote=True.
-        """
-        total_jobs = self.job_set.total_jobs
-        total_replicates = self.job_set.total_replicates
-
-        if not quiet:
-            print(f"Running {total_jobs} jobs ({total_replicates} total replicates) remotely")
-
-        if dry_run:
-            if not quiet:
-                print("Dry run - no jobs will be executed")
-                for i, job in enumerate(self.job_set):
-                    print(f"  [{i + 1}/{total_jobs}] {job.parameters}")
-            return SweepResult()
-
-        job_results: list[tuple[ExpandedJob, Any]] = []
-        succeeded = 0
-        failed = 0
-
-        for i, job in enumerate(self.job_set):
-            if not quiet:
-                print(f"[{i + 1}/{total_jobs}] Running remotely: {job.parameters}")
-
-            run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-            result = self.cli.run_remote(run_config)
-
-            job_results.append((job, result))
-
-            if result.success:
-                succeeded += 1
-                if not quiet:
-                    print("  [OK] Completed successfully")
-            else:
-                failed += 1
-                if not quiet:
-                    print(f"  [FAIL] Exit code: {result.exit_code}")
-
-            if on_complete is not None:
-                on_complete(job, result)
-
-            if stop_on_failure and not result.success:
-                if not quiet:
-                    print("Stopping due to failure (stop_on_failure=True)")
-                break
-
-        if not quiet:
-            print(f"Completed: {succeeded} succeeded, {failed} failed")
-
-        return SweepResult(
-            job_results=job_results,
-            succeeded=succeeded,
-            failed=failed,
+        return run_sweep(
+            cli=self.cli,
+            job_set=self.job_set,
+            registry=self.registry,
+            session_id=self.session_id,
+            remote=remote,
+            api_key=api_key,
+            endpoint=endpoint,
+            on_complete=on_complete,
+            stop_on_failure=stop_on_failure,
+            dry_run=dry_run,
+            quiet=quiet,
         )
 
     def load_results(
