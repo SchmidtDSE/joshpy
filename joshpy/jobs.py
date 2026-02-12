@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from joshpy.cli import JoshCLI, RunConfig, RunRemoteConfig
+    from joshpy.registry import RunRegistry
 
 try:
     import numpy as np
@@ -728,18 +729,18 @@ def to_run_config(job: ExpandedJob) -> RunConfig:
 
 def to_run_remote_config(
     job: ExpandedJob,
-    api_key: str,
+    api_key: str | None = None,
     endpoint: str | None = None,
 ) -> RunRemoteConfig:
-    """Convert an ExpandedJob to a RunRemoteConfig for cloud execution.
+    """Convert an ExpandedJob to a RunRemoteConfig for remote execution.
 
     This helper function bridges the job expansion system with the CLI layer,
-    allowing expanded jobs to be executed on Josh Cloud via JoshCLI.
+    allowing expanded jobs to be executed on remote Josh servers.
 
     Args:
         job: The expanded job to convert.
-        api_key: Josh Cloud API key.
-        endpoint: Custom Josh Cloud endpoint URL (optional).
+        api_key: API key for authentication (optional for local servers).
+        endpoint: Custom endpoint URL (optional).
 
     Returns:
         RunRemoteConfig ready for use with JoshCLI.run_remote().
@@ -756,7 +757,10 @@ def to_run_remote_config(
 
         cli = JoshCLI()
         for job in job_set:
+            # With Josh Cloud (requires API key)
             run_config = to_run_remote_config(job, api_key="your-api-key")
+            # Or with local server (no API key needed)
+            run_config = to_run_remote_config(job, endpoint="http://localhost:8080")
             result = cli.run_remote(run_config)
     """
     from joshpy.cli import RunRemoteConfig
@@ -814,10 +818,12 @@ def run_sweep(
     cli: JoshCLI,
     job_set: JobSet,
     *,
+    registry: RunRegistry | None = None,
+    session_id: str | None = None,
     remote: bool = False,
     api_key: str | None = None,
     endpoint: str | None = None,
-    callback: Callable[[ExpandedJob, Any], None] | None = None,
+    on_complete: Callable[[ExpandedJob, Any], None] | None = None,
     stop_on_failure: bool = False,
     dry_run: bool = False,
     quiet: bool = False,
@@ -825,17 +831,20 @@ def run_sweep(
     """Execute all jobs in a JobSet.
 
     This is a convenience function that handles the common case of running
-    all jobs in a sweep with optional progress output and callbacks.
+    all jobs in a sweep with optional progress output and registry tracking.
 
     Args:
         cli: JoshCLI instance to use for execution.
         job_set: Expanded jobs to run.
+        registry: Optional RunRegistry for automatic run tracking. If provided
+            along with session_id, runs are automatically recorded.
+        session_id: Session ID for registry tracking (required if registry provided).
         remote: If True, use run_remote() for cloud execution.
         api_key: Josh Cloud API key (required if remote=True).
         endpoint: Custom Josh Cloud endpoint URL.
-        callback: Optional callback invoked after each job completes.
-                  Signature: callback(job, result) -> None.
-                  Use with RegistryCallback.record for automatic tracking.
+        on_complete: Optional callback invoked after each job completes.
+            Signature: callback(job, result) -> None. Called after registry
+            recording (if enabled). Use for progress reporting, logging, etc.
         stop_on_failure: If True, stop on first failure.
         dry_run: If True, print plan without executing.
         quiet: If True, suppress progress output.
@@ -845,18 +854,18 @@ def run_sweep(
 
     Raises:
         ValueError: If remote=True but api_key is not provided.
+        ValueError: If registry provided but session_id is not.
 
     Example:
         from joshpy.jobs import run_sweep, JobExpander
         from joshpy.cli import JoshCLI
-        from joshpy.registry import RunRegistry, RegistryCallback
+        from joshpy.registry import RunRegistry
 
         cli = JoshCLI()
         registry = RunRegistry("experiment.duckdb")
         session_id = registry.create_session(experiment_name="my_sweep")
-        callback = RegistryCallback(registry, session_id)
 
-        # Register runs
+        # Register job configs
         for job in job_set:
             registry.register_run(
                 session_id=session_id,
@@ -867,23 +876,33 @@ def run_sweep(
                 parameters=job.parameters,
             )
 
-        # Run locally with tracking
-        results = run_sweep(cli, job_set, callback=callback.record)
+        # Run with automatic tracking
+        results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
         print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
 
         # Or run remotely on Josh Cloud:
         results = run_sweep(
             cli, job_set,
+            registry=registry,
+            session_id=session_id,
             remote=True,
             api_key="your-api-key",
-            callback=callback.record,
         )
 
-        # Or dry run first:
-        results = run_sweep(cli, job_set, dry_run=True)
+        # Or without registry (just execute, no tracking):
+        results = run_sweep(cli, job_set)
     """
-    if remote and not api_key:
-        raise ValueError("api_key is required for remote execution (remote=True)")
+    # Import here to avoid circular dependency
+    from joshpy.registry import RegistryCallback
+
+    if registry is not None and session_id is None:
+        raise ValueError("session_id is required when registry is provided")
+
+    # Setup registry callback if registry provided
+    registry_callback: RegistryCallback | None = None
+    if registry is not None and session_id is not None:
+        registry_callback = RegistryCallback(registry, session_id)
+
     total_jobs = job_set.total_jobs
     total_replicates = job_set.total_replicates
 
@@ -924,8 +943,13 @@ def run_sweep(
             if not quiet:
                 print(f"  [FAIL] Exit code: {result.exit_code}")
 
-        if callback is not None:
-            callback(job, result)
+        # Record to registry if configured
+        if registry_callback is not None:
+            registry_callback.record(job, result)
+
+        # Call user's callback if provided
+        if on_complete is not None:
+            on_complete(job, result)
 
         if stop_on_failure and not result.success:
             if not quiet:
