@@ -112,21 +112,21 @@ class RunConfig:
 class RunRemoteConfig:
     """Arguments for 'java -jar joshsim.jar runRemote' command.
 
-    Executes simulations on Josh Cloud infrastructure.
+    Executes simulations on remote Josh infrastructure (Josh Cloud or local server).
 
     Attributes:
         script: Path to Josh simulation file (.josh).
         simulation: Name of simulation to execute.
-        api_key: Josh Cloud API key.
+        api_key: API key for authentication (optional for local servers).
         replicates: Number of replicates to run.
-        endpoint: Custom Josh Cloud endpoint URL.
+        endpoint: Custom endpoint URL (e.g., local server or Josh Cloud).
         data: Map of data file names to paths.
         custom_tags: Custom tags for template resolution.
     """
 
     script: Path
     simulation: str
-    api_key: str
+    api_key: str | None = None
     replicates: int = 1
     endpoint: str | None = None
     data: dict[str, Path] = field(default_factory=dict)
@@ -483,8 +483,9 @@ class JoshCLI:
         """
         args = ["runRemote", str(config.script.resolve()), config.simulation]
 
-        # API key (required)
-        args.extend(["--api-key", config.api_key])
+        # API key (optional - not needed for local servers)
+        if config.api_key is not None:
+            args.extend(["--api-key", config.api_key])
 
         # Replicates
         if config.replicates > 1:
