@@ -77,10 +77,10 @@ class TestCellDataLoader:
             ).fetchone()
             assert result[0] == 3
 
-            # Verify a specific row
+            # Verify a specific row - now using typed columns instead of JSON
             row = registry.conn.execute(
                 """
-                SELECT step, replicate, longitude, latitude, variables
+                SELECT step, replicate, longitude, latitude, treeCount, avgHeight
                 FROM cell_data
                 WHERE run_hash = 'abc123' AND step = 1
                 """
@@ -90,10 +90,8 @@ class TestCellDataLoader:
             assert row[1] == 0  # replicate
             assert row[2] == -116.0  # longitude
             assert row[3] == 34.0  # latitude
-
-            variables = json.loads(row[4])
-            assert variables["treeCount"] == 12
-            assert variables["avgHeight"] == 6.5
+            assert row[4] == 12  # treeCount (typed column)
+            assert row[5] == 6.5  # avgHeight (typed column)
 
         finally:
             csv_path.unlink()

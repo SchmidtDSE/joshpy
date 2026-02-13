@@ -998,5 +998,151 @@ class TestSessionInfoJobConfig(unittest.TestCase):
         self.assertIsNotNone(reconstructed_config.template_string)
 
 
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestTypedVariableColumns(unittest.TestCase):
+    """Tests for Phase 7: Typed Variable Columns feature."""
+
+    def setUp(self):
+        """Create a registry for each test."""
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+
+    def tearDown(self):
+        """Close registry after each test."""
+        self.registry.close()
+
+    def test_list_variable_columns_empty(self):
+        """list_variable_columns should return empty list when no data loaded."""
+        result = self.registry.list_variable_columns()
+        self.assertEqual(result, [])
+
+    def test_ensure_variable_columns_creates_double(self):
+        """_ensure_variable_columns should create DOUBLE columns."""
+        self.registry._ensure_variable_columns({"testVar": "DOUBLE"})
+        
+        columns = self.registry.list_variable_columns()
+        self.assertIn("testVar", columns)
+
+    def test_ensure_variable_columns_creates_varchar(self):
+        """_ensure_variable_columns should create VARCHAR columns."""
+        self.registry._ensure_variable_columns({"status": "VARCHAR"})
+        
+        columns = self.registry.list_variable_columns()
+        self.assertIn("status", columns)
+
+    def test_ensure_variable_columns_rejects_type_mismatch(self):
+        """_ensure_variable_columns should reject type mismatches."""
+        # Create column as DOUBLE
+        self.registry._ensure_variable_columns({"testVar": "DOUBLE"})
+        
+        # Try to add same column as VARCHAR - should raise
+        with self.assertRaises(ValueError) as ctx:
+            self.registry._ensure_variable_columns({"testVar": "VARCHAR"})
+        
+        self.assertIn("exists as", str(ctx.exception))
+        self.assertIn("DOUBLE", str(ctx.exception))
+
+    def test_ensure_variable_columns_allows_same_type(self):
+        """_ensure_variable_columns should allow re-adding same type."""
+        # Create column as DOUBLE
+        self.registry._ensure_variable_columns({"testVar": "DOUBLE"})
+        
+        # Re-adding as DOUBLE should not raise
+        self.registry._ensure_variable_columns({"testVar": "DOUBLE"})
+        
+        columns = self.registry.list_variable_columns()
+        self.assertIn("testVar", columns)
+
+    def test_check_sparsity_empty_table(self):
+        """check_sparsity should handle empty table."""
+        report = self.registry.check_sparsity()
+        
+        self.assertEqual(report.total_rows, 0)
+        self.assertEqual(report.column_stats, [])
+        self.assertFalse(report.should_warn)
+
+    def test_check_sparsity_with_data(self):
+        """check_sparsity should report column statistics."""
+        from joshpy.registry import SPARSITY_WARN_MIN_ROWS
+        
+        # Create a column
+        self.registry._ensure_variable_columns({"testVar": "DOUBLE"})
+        
+        # Insert some rows with NULLs
+        for i in range(SPARSITY_WARN_MIN_ROWS + 100):
+            val = "1.0" if i < SPARSITY_WARN_MIN_ROWS // 2 else "NULL"
+            self.registry.conn.execute(
+                f"INSERT INTO cell_data (step, replicate, testVar) VALUES ({i}, 0, {val})"
+            )
+        
+        report = self.registry.check_sparsity()
+        
+        self.assertGreater(report.total_rows, SPARSITY_WARN_MIN_ROWS)
+        self.assertEqual(len(report.column_stats), 1)
+        self.assertEqual(report.column_stats[0].name, "testVar")
+
+    def test_sparsity_report_str(self):
+        """SparsityReport.__str__ should provide readable output."""
+        from joshpy.registry import SparsityReport, ColumnStats
+        
+        # Report with sparse columns
+        report = SparsityReport(
+            total_rows=10000,
+            column_stats=[
+                ColumnStats(name="sparseCol", dtype="DOUBLE", total_rows=10000, null_count=7500),
+            ],
+            threshold_percent=50,
+        )
+        
+        report_str = str(report)
+        self.assertIn("SparsityWarning", report_str)
+        self.assertIn("sparseCol", report_str)
+        self.assertIn("75.0%", report_str)
+
+    def test_column_stats_null_percent(self):
+        """ColumnStats.null_percent should calculate correctly."""
+        from joshpy.registry import ColumnStats
+        
+        stats = ColumnStats(name="test", dtype="DOUBLE", total_rows=100, null_count=25)
+        self.assertEqual(stats.null_percent, 25.0)
+        
+        # Zero rows should return 0
+        stats_empty = ColumnStats(name="test", dtype="DOUBLE", total_rows=0, null_count=0)
+        self.assertEqual(stats_empty.null_percent, 0.0)
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestQuoteIdentifier(unittest.TestCase):
+    """Tests for _quote_identifier helper function."""
+
+    def test_quote_simple_name(self):
+        """Should quote simple names."""
+        from joshpy.registry import _quote_identifier
+        
+        self.assertEqual(_quote_identifier("treeCount"), '"treeCount"')
+        self.assertEqual(_quote_identifier("avgHeight"), '"avgHeight"')
+
+    def test_quote_names_with_dots(self):
+        """Should preserve dots in quoted names."""
+        from joshpy.registry import _quote_identifier
+        
+        self.assertEqual(_quote_identifier("avg.height"), '"avg.height"')
+        self.assertEqual(_quote_identifier("a.b.c"), '"a.b.c"')
+
+    def test_quote_names_with_dashes(self):
+        """Should preserve dashes in quoted names."""
+        from joshpy.registry import _quote_identifier
+        
+        self.assertEqual(_quote_identifier("tree-count"), '"tree-count"')
+
+    def test_quote_escapes_internal_quotes(self):
+        """Should escape double quotes inside names."""
+        from joshpy.registry import _quote_identifier
+        
+        # Edge case: name contains a double quote
+        self.assertEqual(_quote_identifier('a"b'), '"a""b"')
+
+
 if __name__ == "__main__":
     unittest.main()
