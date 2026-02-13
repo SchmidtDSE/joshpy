@@ -35,7 +35,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 
-from joshpy.registry import RunRegistry
+from joshpy.registry import RunRegistry, _quote_identifier
 
 
 def _sort_key_numeric_then_string(value: str) -> tuple[int, float | str]:
@@ -333,9 +333,10 @@ class SimulationDiagnostics:
         label: str | None,
     ) -> None:
         """Plot per-patch time series with low alpha."""
+        quoted = _quote_identifier(variable)
         query = f"""
             SELECT step, replicate, position_x, position_y,
-                   CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE) as value
+                   {quoted} as value
             FROM cell_data cd
             WHERE cd.run_hash = ? {step_filter}
             ORDER BY position_x, position_y, replicate, step
@@ -378,11 +379,12 @@ class SimulationDiagnostics:
     ) -> None:
         """Plot spatially aggregated time series with optional replicate bands."""
         agg_func = aggregate.upper()
+        quoted = _quote_identifier(variable)
 
         # First aggregate spatially per step/replicate
         query = f"""
             SELECT step, replicate,
-                   {agg_func}(CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE)) as value
+                   {agg_func}({quoted}) as value
             FROM cell_data cd
             WHERE cd.run_hash = ? {step_filter}
             GROUP BY step, replicate
@@ -476,6 +478,9 @@ class SimulationDiagnostics:
                 "Use 'mean', 'sum', 'min', or 'max'."
             )
 
+        # Quote variable column name for SQL
+        var_quoted = _quote_identifier(variable)
+
         # Auto-detect group_by source
         config_params = self.registry.list_config_parameters()
         export_vars = self.registry.list_export_variables()
@@ -486,7 +491,8 @@ class SimulationDiagnostics:
             needs_join = True
         elif group_by in export_vars:
             group_source = "export_variable"
-            group_expr = f"json_extract_string(cd.variables, '$.{group_by}')"
+            # For export variables, use quoted column directly
+            group_expr = _quote_identifier(group_by)
             needs_join = False
         else:
             raise ValueError(
@@ -523,7 +529,7 @@ class SimulationDiagnostics:
             query = f"""
                 SELECT
                     {group_expr} as group_value,
-                    {agg_func}(CAST(json_extract_string(cd.variables, '$.{variable}') AS DOUBLE)) as value
+                    {agg_func}({var_quoted}) as value
                 FROM cell_data cd
                 {join_clause}
                 WHERE cd.step = ? {where_clause}
@@ -566,7 +572,7 @@ class SimulationDiagnostics:
                 SELECT
                     {group_expr} as group_value,
                     cd.step,
-                    {agg_func}(CAST(json_extract_string(cd.variables, '$.{variable}') AS DOUBLE)) as value
+                    {agg_func}({var_quoted}) as value
                 FROM cell_data cd
                 {join_clause}
                 WHERE 1=1 {where_clause}
@@ -637,7 +643,7 @@ class SimulationDiagnostics:
         users should export to geopandas.
 
         Args:
-            variable: Variable name to plot.
+            variable: Variable name to plot (e.g., "treeCount", "avg.height").
             step: Timestep to visualize.
             run_hash: Run hash to filter by.
             replicate: Replicate number (default: 0).
@@ -652,11 +658,12 @@ class SimulationDiagnostics:
         """
         self._validate_variable(variable)
 
+        quoted = _quote_identifier(variable)
         query = f"""
             SELECT
                 longitude,
                 latitude,
-                CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE) as value
+                {quoted} as value
             FROM cell_data
             WHERE run_hash = ?
               AND step = ?
