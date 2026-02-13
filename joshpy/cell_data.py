@@ -4,6 +4,15 @@ This module provides tools for loading simulation export CSVs into DuckDB and
 querying them for diagnostic plots and analysis. All query methods return pandas
 DataFrames for seamless integration with the scientific Python stack.
 
+Variable columns are stored as typed columns (DOUBLE for numeric, VARCHAR for
+strings) rather than JSON, enabling clean SQL queries:
+
+    SELECT AVG("avg.height") FROM cell_data WHERE step = 10
+
+Column names preserve original .josh names using quoted identifiers:
+- 'avg.height' -> "avg.height"  (dots preserved)
+- 'tree-count' -> "tree-count"  (dashes preserved)
+
 Example usage:
     from joshpy.registry import RunRegistry
     from joshpy.cell_data import CellDataLoader, DiagnosticQueries
@@ -29,9 +38,12 @@ Example usage:
 
 from __future__ import annotations
 
-import json
+import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+
+from joshpy.registry import _quote_identifier
 
 try:
     from pydantic import BaseModel, Field
@@ -147,6 +159,11 @@ class CellDataLoader:
         - position.x, position.y: grid coordinates
         - position.longitude, position.latitude: Earth coordinates (optional)
 
+        Variable columns are stored as typed columns (DOUBLE for numeric values,
+        VARCHAR for strings). Column names preserve original .josh names using
+        quoted identifiers (e.g., 'avg.height' stays as "avg.height"), requiring
+        double quotes when referenced with direct calls to DuckDB.
+
         Uses DuckDB's native CSV reader for optimal performance.
 
         Args:
@@ -160,7 +177,7 @@ class CellDataLoader:
 
         Raises:
             FileNotFoundError: If csv_path doesn't exist.
-            ValueError: If CSV is missing required columns.
+            ValueError: If CSV is missing required columns or type mismatch.
         """
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV not found: {csv_path}")
@@ -169,16 +186,12 @@ class CellDataLoader:
         csv_path_str = str(csv_path.resolve())
 
         # Read CSV header to identify columns using DuckDB
-        header_result = conn.execute(
-            f"SELECT * FROM read_csv_auto('{csv_path_str}') LIMIT 0"
-        )
+        header_result = conn.execute(f"SELECT * FROM read_csv_auto('{csv_path_str}') LIMIT 0")
         columns = [desc[0] for desc in header_result.description]
 
         # Check required columns
         if "step" not in columns or "replicate" not in columns:
-            raise ValueError(
-                f"CSV must have 'step' and 'replicate' columns. Found: {columns}"
-            )
+            raise ValueError(f"CSV must have 'step' and 'replicate' columns. Found: {columns}")
 
         # Identify metadata vs variable columns
         meta_cols = {
@@ -191,15 +204,38 @@ class CellDataLoader:
         }
         var_cols = [c for c in columns if c not in meta_cols]
 
-        # Build JSON object expression for variable columns using DuckDB's json functions
+        # Get row count first (we'll need it for sparsity check)
+        existing_rows_result = conn.execute("SELECT COUNT(*) FROM cell_data").fetchone()
+        existing_rows = existing_rows_result[0] if existing_rows_result else 0
+
+        # Infer types for variable columns and ensure they exist
         if var_cols:
-            # Build key-value pairs for json_object, filtering NULLs per column
-            json_pairs = ", ".join(
-                f"'{col}', \"{col}\"" for col in var_cols
-            )
-            json_expr = f"json_object({json_pairs})"
-        else:
-            json_expr = "'{}'::JSON"
+            # Sample data for type inference
+            sample_result = conn.execute(
+                f"SELECT * FROM read_csv_auto('{csv_path_str}') LIMIT 1000"
+            ).fetchall()
+
+            # Get column indices for variable columns
+            col_indices = {col: i for i, col in enumerate(columns)}
+
+            # Infer types - preserve original column names
+            new_columns: dict[str, str] = {}
+            for var_col in var_cols:
+                col_type = self._infer_column_type(
+                    row[col_indices[var_col]] for row in sample_result
+                )
+                new_columns[var_col] = col_type
+
+            # Ensure columns exist (this also validates type consistency)
+            self.registry._ensure_variable_columns(new_columns)
+
+            # Check for sparsity if we're adding columns to a non-empty table
+            if existing_rows > 0 and new_columns:
+                existing_var_cols = set(self.registry.list_variable_columns())
+                truly_new = [c for c in new_columns if c not in existing_var_cols]
+                if truly_new:
+                    # Will issue warning later after data is loaded
+                    pass
 
         # Build column expressions with proper NULL handling
         pos_x_expr = '"position.x"' if "position.x" in columns else "NULL"
@@ -212,12 +248,19 @@ class CellDataLoader:
         safe_run_hash = run_hash.replace("'", "''")
         safe_entity_type = entity_type.replace("'", "''")
 
-        # Insert directly from CSV using DuckDB's native CSV reader
-        insert_sql = f"""
-            INSERT INTO cell_data
-            (run_id, run_hash, step, replicate, position_x, position_y,
-             longitude, latitude, entity_type, variables)
-            SELECT
+        # Build variable column expressions - use quoted identifiers for both
+        # target column (in cell_data) and source column (in CSV)
+        var_col_names = []
+        var_col_exprs = []
+        for var_col in var_cols:
+            # Both target and source use same quoted name
+            quoted = _quote_identifier(var_col)
+            var_col_names.append(quoted)
+            var_col_exprs.append(quoted)
+
+        # Build the INSERT statement with all columns
+        core_cols = "run_id, run_hash, step, replicate, position_x, position_y, longitude, latitude, entity_type"
+        core_exprs = f"""
                 '{safe_run_id}' as run_id,
                 '{safe_run_hash}' as run_hash,
                 CAST(step AS INTEGER) as step,
@@ -226,15 +269,26 @@ class CellDataLoader:
                 {pos_y_expr} as position_y,
                 {lon_expr} as longitude,
                 {lat_expr} as latitude,
-                '{safe_entity_type}' as entity_type,
-                {json_expr} as variables
+                '{safe_entity_type}' as entity_type"""
+
+        if var_col_names:
+            all_cols = f"{core_cols}, {', '.join(var_col_names)}"
+            all_exprs = f"{core_exprs},\n                {', '.join(var_col_exprs)}"
+        else:
+            all_cols = core_cols
+            all_exprs = core_exprs
+
+        insert_sql = f"""
+            INSERT INTO cell_data
+            ({all_cols})
+            SELECT{all_exprs}
             FROM read_csv_auto('{csv_path_str}')
         """
 
         conn.execute(insert_sql)
 
         # Populate geometry column if spatial is enabled
-        if hasattr(self.registry, 'enable_spatial') and self.registry.enable_spatial:
+        if hasattr(self.registry, "enable_spatial") and self.registry.enable_spatial:
             try:
                 conn.execute("""
                     UPDATE cell_data
@@ -249,8 +303,33 @@ class CellDataLoader:
         count_result = conn.execute(
             f"SELECT COUNT(*) FROM read_csv_auto('{csv_path_str}')"
         ).fetchone()
+        rows_loaded = count_result[0] if count_result else 0
 
-        return count_result[0] if count_result else 0
+        # Check sparsity and warn if needed
+        if existing_rows > 0:
+            report = self.registry.check_sparsity()
+            if report.should_warn:
+                warnings.warn(str(report), UserWarning, stacklevel=2)
+
+        return rows_loaded
+
+    def _infer_column_type(self, values: Iterable[Any]) -> str:
+        """Infer SQL type from values.
+
+        Args:
+            values: Iterable of values from a column.
+
+        Returns:
+            'DOUBLE' if all non-null values are numeric, 'VARCHAR' otherwise.
+        """
+        for val in values:
+            if val is None or (isinstance(val, str) and val == ""):
+                continue
+            try:
+                float(val)
+            except (ValueError, TypeError):
+                return "VARCHAR"
+        return "DOUBLE"
 
     def load_csv_batch(
         self,
@@ -343,7 +422,7 @@ class DiagnosticQueries:
         Args:
             longitude: Longitude of the cell.
             latitude: Latitude of the cell.
-            variable: Variable name to extract (e.g., "treeCount").
+            variable: Variable name to extract (e.g., "treeCount", "avg.height").
             run_hash: Optional filter by run hash.
             tolerance: Spatial tolerance in degrees (default: ~1km at equator).
             show_sql: If True, print the SQL query for copy/paste modification.
@@ -353,18 +432,20 @@ class DiagnosticQueries:
         """
         _check_pandas()
 
-        query = """
+        # Use quoted identifier to preserve original column name
+        quoted = _quote_identifier(variable)
+
+        query = f"""
             SELECT
                 step,
                 replicate,
-                CAST(json_extract_string(variables, ?) AS DOUBLE) as value,
+                {quoted} as value,
                 run_hash
             FROM cell_data
             WHERE longitude BETWEEN ? AND ?
               AND latitude BETWEEN ? AND ?
         """
-        params: list = [
-            f"$.{variable}",
+        params: list[Any] = [
             longitude - tolerance,
             longitude + tolerance,
             latitude - tolerance,
@@ -395,7 +476,7 @@ class DiagnosticQueries:
 
         Args:
             step: The timestep to query.
-            variable: Variable name to extract.
+            variable: Variable name to extract (e.g., "treeCount", "avg.height").
             run_hash: Run hash to filter by.
             replicate: Replicate number (default: 0).
 
@@ -404,19 +485,21 @@ class DiagnosticQueries:
         """
         _check_pandas()
 
+        quoted = _quote_identifier(variable)
+
         return self.registry.conn.execute(
-            """
+            f"""
             SELECT
                 longitude,
                 latitude,
-                CAST(json_extract_string(variables, ?) AS DOUBLE) as value
+                {quoted} as value
             FROM cell_data
             WHERE step = ?
               AND run_hash = ?
               AND replicate = ?
               AND longitude IS NOT NULL
             """,
-            [f"$.{variable}", step, run_hash, replicate],
+            [step, run_hash, replicate],
         ).df()
 
     def get_parameter_comparison(
@@ -430,7 +513,7 @@ class DiagnosticQueries:
         """Compare a variable across parameter values.
 
         Args:
-            variable: Variable name to analyze.
+            variable: Variable name to analyze (e.g., "treeCount", "avg.height").
             param_name: Parameter name to group by.
             step: Optional timestep filter (if None, groups by step).
             aggregation: Aggregation function (AVG, MIN, MAX, SUM).
@@ -441,6 +524,7 @@ class DiagnosticQueries:
         """
         _check_pandas()
 
+        quoted = _quote_identifier(variable)
         step_filter = "AND cd.step = ?" if step else ""
         step_group = "" if step else ", cd.step"
 
@@ -448,8 +532,8 @@ class DiagnosticQueries:
             SELECT
                 json_extract_string(jc.parameters, '$.{param_name}') as param_value,
                 cd.step,
-                {aggregation}(CAST(json_extract_string(cd.variables, '$.{variable}') AS DOUBLE)) as mean_value,
-                STDDEV(CAST(json_extract_string(cd.variables, '$.{variable}') AS DOUBLE)) as std_value,
+                {aggregation}({quoted}) as mean_value,
+                STDDEV({quoted}) as std_value,
                 COUNT(*) as n_cells
             FROM cell_data cd
             JOIN job_configs jc ON cd.run_hash = jc.run_hash
@@ -458,7 +542,7 @@ class DiagnosticQueries:
             ORDER BY param_value, cd.step
         """
 
-        params = [step] if step else []
+        params: list[Any] = [step] if step else []
 
         if show_sql:
             self._print_sql(query, params)
@@ -474,7 +558,7 @@ class DiagnosticQueries:
         """Get mean and confidence intervals across replicates.
 
         Args:
-            variable: Variable name to analyze.
+            variable: Variable name to analyze (e.g., "treeCount", "avg.height").
             run_hash: Run hash to filter by.
             step: Optional timestep filter (if None, aggregates across all steps).
 
@@ -483,6 +567,7 @@ class DiagnosticQueries:
         """
         _check_pandas()
 
+        quoted = _quote_identifier(variable)
         step_filter = "AND step = ?" if step else ""
 
         query = f"""
@@ -490,7 +575,7 @@ class DiagnosticQueries:
                 SELECT
                     step,
                     replicate,
-                    AVG(CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE)) as rep_mean
+                    AVG({quoted}) as rep_mean
                 FROM cell_data
                 WHERE run_hash = ? {step_filter}
                 GROUP BY step, replicate
@@ -507,7 +592,7 @@ class DiagnosticQueries:
             ORDER BY step
         """
 
-        params = [run_hash, step] if step else [run_hash]
+        params: list[Any] = [run_hash, step] if step else [run_hash]
         return self.registry.conn.execute(query, params).df()
 
     def get_bbox_timeseries(
@@ -527,7 +612,7 @@ class DiagnosticQueries:
             max_lon: Maximum longitude.
             min_lat: Minimum latitude.
             max_lat: Maximum latitude.
-            variable: Variable name to analyze.
+            variable: Variable name to analyze (e.g., "treeCount", "avg.height").
             run_hash: Optional run hash filter.
             aggregation: Aggregation function (AVG, MIN, MAX, SUM).
 
@@ -536,18 +621,20 @@ class DiagnosticQueries:
         """
         _check_pandas()
 
+        quoted = _quote_identifier(variable)
+
         query = f"""
             SELECT
                 step,
                 replicate,
                 run_hash,
-                {aggregation}(CAST(json_extract_string(variables, '$.{variable}') AS DOUBLE)) as value,
+                {aggregation}({quoted}) as value,
                 COUNT(*) as n_cells
             FROM cell_data
             WHERE longitude BETWEEN ? AND ?
               AND latitude BETWEEN ? AND ?
         """
-        params = [min_lon, max_lon, min_lat, max_lat]
+        params: list[Any] = [min_lon, max_lon, min_lat, max_lat]
 
         if run_hash:
             query += " AND run_hash = ?"
@@ -565,7 +652,7 @@ class DiagnosticQueries:
     ) -> Any:
         """Get all variables for all cells at a specific timestep.
 
-        Returns the raw JSON variables column unpacked into DataFrame columns.
+        Returns position columns plus all variable columns.
 
         Args:
             step: The timestep to query.
@@ -577,28 +664,27 @@ class DiagnosticQueries:
         """
         _check_pandas()
 
-        # Get raw data
-        df = self.registry.conn.execute(
-            """
+        # Build column list: core position columns + all variable columns
+        var_cols = self.registry.list_variable_columns()
+
+        if var_cols:
+            var_col_sql = ", " + ", ".join(_quote_identifier(c) for c in var_cols)
+        else:
+            var_col_sql = ""
+
+        query = f"""
             SELECT
                 longitude,
                 latitude,
                 position_x,
-                position_y,
-                variables
+                position_y{var_col_sql}
             FROM cell_data
             WHERE step = ?
               AND run_hash = ?
               AND replicate = ?
-            """,
+        """
+
+        return self.registry.conn.execute(
+            query,
             [step, run_hash, replicate],
         ).df()
-
-        if df.empty:
-            return df
-
-        # Unpack JSON variables into columns
-        variables_df = df["variables"].apply(json.loads).apply(pd.Series)
-        result = pd.concat([df.drop(columns=["variables"]), variables_df], axis=1)
-
-        return result
