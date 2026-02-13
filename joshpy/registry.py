@@ -65,6 +65,36 @@ def _check_duckdb() -> None:
         )
 
 
+# Sparsity warning thresholds (configurable module globals)
+SPARSITY_WARN_COLUMN_NULL_PERCENT = 50  # Warn if column >50% NULL
+SPARSITY_WARN_MIN_SPARSE_COLUMNS = 2    # Only warn if >=2 columns are sparse
+SPARSITY_WARN_MIN_ROWS = 1000           # Don't warn for tiny datasets
+
+# Core columns that exist in cell_data schema (not variable columns)
+CELL_DATA_CORE_COLUMNS = frozenset({
+    "cell_id", "run_id", "run_hash", "step", "replicate",
+    "position_x", "position_y", "longitude", "latitude",
+    "entity_type", "geom",
+})
+
+
+def _quote_identifier(name: str) -> str:
+    """Quote an identifier for use in SQL.
+    
+    Uses double quotes to preserve original names with special characters
+    like dots (e.g., "avg.height").
+    
+    Args:
+        name: Original variable name.
+        
+    Returns:
+        Quoted identifier safe for SQL (e.g., '"avg.height"').
+    """
+    # Escape any double quotes in the name by doubling them
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
+
+
 # SQL Schema
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sweep_sessions (
@@ -124,8 +154,7 @@ CREATE TABLE IF NOT EXISTS cell_data (
     position_y      DOUBLE,
     longitude       DOUBLE,
     latitude        DOUBLE,
-    entity_type     VARCHAR,
-    variables       JSON NOT NULL
+    entity_type     VARCHAR
 );
 
 CREATE INDEX IF NOT EXISTS idx_cell_run ON cell_data(run_id);
@@ -236,6 +265,82 @@ class RunInfo:
     output_path: str | None
     error_message: str | None
     metadata: dict[str, Any] | None
+
+
+@dataclass
+class ColumnStats:
+    """Statistics for a single column in cell_data.
+    
+    Attributes:
+        name: Column name (sanitized).
+        dtype: SQL data type (DOUBLE or VARCHAR).
+        total_rows: Total number of rows in the table.
+        null_count: Number of NULL values in this column.
+    """
+    
+    name: str
+    dtype: str
+    total_rows: int
+    null_count: int
+    
+    @property
+    def null_percent(self) -> float:
+        """Percentage of NULL values (0-100)."""
+        if self.total_rows == 0:
+            return 0.0
+        return (self.null_count / self.total_rows) * 100
+
+
+@dataclass
+class SparsityReport:
+    """Report on column sparsity in cell_data.
+    
+    Used to detect when different simulation types are being mixed,
+    which creates sparse columns that hurt query performance.
+    
+    Attributes:
+        total_rows: Total rows in cell_data.
+        column_stats: List of ColumnStats for each variable column.
+        threshold_percent: NULL percentage threshold used for warnings.
+    """
+    
+    total_rows: int
+    column_stats: list[ColumnStats]
+    threshold_percent: float = SPARSITY_WARN_COLUMN_NULL_PERCENT
+    
+    @property
+    def sparse_columns(self) -> list[ColumnStats]:
+        """Columns exceeding the sparsity threshold."""
+        return [c for c in self.column_stats if c.null_percent > self.threshold_percent]
+    
+    @property
+    def should_warn(self) -> bool:
+        """True if enough sparse columns to warrant a warning."""
+        return (
+            self.total_rows >= SPARSITY_WARN_MIN_ROWS
+            and len(self.sparse_columns) >= SPARSITY_WARN_MIN_SPARSE_COLUMNS
+        )
+    
+    def __str__(self) -> str:
+        """Human-readable sparsity report."""
+        if not self.sparse_columns:
+            return f"No sparse columns (threshold: {self.threshold_percent}% NULL)"
+        
+        lines = [
+            f"SparsityWarning: {len(self.sparse_columns)} columns are "
+            f">{self.threshold_percent}% NULL:"
+        ]
+        for col in self.sparse_columns:
+            lines.append(
+                f"  - {col.name}: {col.null_percent:.1f}% NULL "
+                f"({col.null_count:,}/{col.total_rows:,})"
+            )
+        lines.append("")
+        lines.append(
+            "Consider removing unused columns or using a separate registry "
+            "for different simulations."
+        )
+        return "\n".join(lines)
 
 
 @dataclass
@@ -1176,48 +1281,197 @@ class RunRegistry:
 
     # ========== Discovery Methods ==========
 
+    def list_variable_columns(self) -> list[str]:
+        """List all variable column names in cell_data.
+        
+        Returns the dynamically-added variable columns. Column names preserve
+        original names with special characters (e.g., 'avg.height').
+        
+        Returns:
+            Sorted list of variable column names.
+            
+        Example:
+            >>> registry.list_variable_columns()
+            ['averageAge', 'avg.height', 'treeCount']
+        """
+        result = self.conn.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'cell_data'
+            ORDER BY column_name
+            """
+        ).fetchall()
+        
+        # Filter out core columns, return only variable columns
+        all_cols = [row[0] for row in result]
+        return sorted([c for c in all_cols if c not in CELL_DATA_CORE_COLUMNS])
+
     def list_export_variables(self, session_id: str | None = None) -> list[str]:
         """List all export variable names from simulation outputs.
 
         These are the variables exported by Josh simulations,
-        stored in the cell_data table's variables JSON column.
+        stored as typed columns in the cell_data table. Variable names
+        preserve original .josh names (e.g., 'avg.height').
+        
+        When session_id is provided, only returns variables that have at least
+        one non-NULL value for runs in that session.
 
         Args:
-            session_id: Optional session ID to filter by.
+            session_id: Optional session ID to filter by. If provided, only
+                        returns variables with data in that session.
 
         Returns:
-            Sorted list of variable names.
+            Sorted list of variable column names.
 
         Example:
             >>> registry.list_export_variables()
-            ['averageAge', 'averageHeight', 'treeCount']
+            ['averageAge', 'avg.height', 'treeCount']
+            
+            >>> registry.list_export_variables(session_id="abc123")
+            ['treeCount']  # Only variables with data in this session
         """
-        if session_id:
+        all_vars = self.list_variable_columns()
+        
+        if not session_id or not all_vars:
+            return all_vars
+        
+        # Filter to variables that have non-NULL values in this session
+        # Build a query that checks each column for non-NULL values
+        vars_with_data = []
+        for var_name in all_vars:
+            quoted = _quote_identifier(var_name)
             result = self.conn.execute(
-                """
-                SELECT DISTINCT unnest(json_keys(variables)) as var_name
+                f"""
+                SELECT 1
                 FROM cell_data cd
                 JOIN job_configs jc ON cd.run_hash = jc.run_hash
-                WHERE jc.session_id = ?
-                ORDER BY var_name
+                WHERE jc.session_id = ? AND {quoted} IS NOT NULL
+                LIMIT 1
                 """,
                 [session_id],
-            ).fetchall()
-        else:
-            result = self.conn.execute(
-                """
-                SELECT DISTINCT unnest(json_keys(variables)) as var_name
-                FROM cell_data
-                ORDER BY var_name
-                """
-            ).fetchall()
-
-        return [row[0] for row in result]
+            ).fetchone()
+            if result:
+                vars_with_data.append(var_name)
+        
+        return sorted(vars_with_data)
 
     # Alias for backward compatibility
     def list_variables(self, session_id: str | None = None) -> list[str]:
         """Alias for list_export_variables(). Deprecated, use list_export_variables()."""
         return self.list_export_variables(session_id)
+    
+    def _ensure_variable_columns(self, columns: dict[str, str]) -> None:
+        """Ensure variable columns exist in cell_data table.
+        
+        Adds missing columns with the specified types. This is called by
+        CellDataLoader when loading CSVs with new variables.
+        
+        Column names are preserved exactly as provided (with quotes for SQL).
+        For example, 'avg.height' becomes column "avg.height".
+        
+        Args:
+            columns: Dict mapping column name (original) to SQL type
+                     (either 'DOUBLE' or 'VARCHAR').
+                     
+        Raises:
+            ValueError: If trying to add a column that exists with a different type.
+        """
+        existing = self.list_variable_columns()
+        
+        for col_name, col_type in columns.items():
+            if col_name in existing:
+                # Verify type matches
+                type_result = self.conn.execute(
+                    """
+                    SELECT data_type
+                    FROM information_schema.columns
+                    WHERE table_name = 'cell_data' AND column_name = ?
+                    """,
+                    [col_name],
+                ).fetchone()
+                
+                if type_result:
+                    existing_type = type_result[0].upper()
+                    requested_type = col_type.upper()
+                    # Normalize type names for comparison
+                    if existing_type in ('DOUBLE', 'FLOAT', 'REAL'):
+                        existing_type = 'DOUBLE'
+                    if requested_type in ('DOUBLE', 'FLOAT', 'REAL'):
+                        requested_type = 'DOUBLE'
+                    
+                    if existing_type != requested_type:
+                        raise ValueError(
+                            f"Column '{col_name}' exists as {existing_type} but "
+                            f"new data has {requested_type}. This may indicate "
+                            f"mixed simulation types. Use a separate registry."
+                        )
+            else:
+                # Add new column with quoted identifier
+                quoted = _quote_identifier(col_name)
+                self.conn.execute(
+                    f"ALTER TABLE cell_data ADD COLUMN {quoted} {col_type}"
+                )
+    
+    def check_sparsity(self) -> SparsityReport:
+        """Check for sparse columns in cell_data.
+        
+        Sparse columns (>50% NULL by default) often indicate that different
+        simulation types are being mixed in the same registry, which hurts
+        query performance.
+        
+        Returns:
+            SparsityReport with statistics for each variable column.
+            
+        Example:
+            >>> report = registry.check_sparsity()
+            >>> if report.should_warn:
+            ...     print(report)
+        """
+        # Get total row count
+        total_result = self.conn.execute(
+            "SELECT COUNT(*) FROM cell_data"
+        ).fetchone()
+        total_rows = total_result[0] if total_result else 0
+        
+        if total_rows == 0:
+            return SparsityReport(total_rows=0, column_stats=[])
+        
+        # Get stats for each variable column
+        variable_cols = self.list_variable_columns()
+        column_stats = []
+        
+        for col_name in variable_cols:
+            # Get column type
+            type_result = self.conn.execute(
+                """
+                SELECT data_type
+                FROM information_schema.columns
+                WHERE table_name = 'cell_data' AND column_name = ?
+                """,
+                [col_name],
+            ).fetchone()
+            
+            dtype = type_result[0] if type_result else 'UNKNOWN'
+            
+            # Count NULLs
+            null_result = self.conn.execute(
+                f"SELECT COUNT(*) FROM cell_data WHERE \"{col_name}\" IS NULL"
+            ).fetchone()
+            null_count = null_result[0] if null_result else 0
+            
+            column_stats.append(ColumnStats(
+                name=col_name,
+                dtype=dtype,
+                total_rows=total_rows,
+                null_count=null_count,
+            ))
+        
+        return SparsityReport(
+            total_rows=total_rows,
+            column_stats=column_stats,
+            threshold_percent=SPARSITY_WARN_COLUMN_NULL_PERCENT,
+        )
 
     def list_config_parameters(self, session_id: str | None = None) -> list[str]:
         """List all config parameter names from sweep configurations.
