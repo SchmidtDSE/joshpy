@@ -571,14 +571,22 @@ class TestSweepManager(unittest.TestCase):
 
     def test_run_remote_without_api_key(self):
         """run() with remote=True without api_key should work (for local servers)."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import MagicMock
+        from joshpy.cli import CLIResult
         
         manager = SweepManager.from_config(self.config, registry=":memory:")
         
         try:
             # Mock the CLI to avoid actual execution
+            # Use a real CLIResult since RegistryCallback.record() checks isinstance
+            mock_result = CLIResult(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                command=["mock", "command"],
+            )
             manager.cli = MagicMock()
-            manager.cli.run_remote.return_value = MagicMock(success=True, exit_code=0)
+            manager.cli.run_remote.return_value = mock_result
             
             # This should NOT raise - api_key is optional for local servers
             result = manager.run(remote=True, quiet=True)

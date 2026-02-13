@@ -539,21 +539,31 @@ result = cli.run_remote(run_remote_config)
 ### Running Sweeps with run_sweep()
 
 The `run_sweep()` convenience function handles the common case of executing
-all jobs in a JobSet with optional callbacks for tracking:
+all jobs in a JobSet with automatic registry tracking:
 
 ```python
 from joshpy.jobs import run_sweep, SweepResult
 from joshpy.cli import JoshCLI
-from joshpy.registry import RunRegistry, RegistryCallback
+from joshpy.registry import RunRegistry
 
 # Setup
 cli = JoshCLI()
 registry = RunRegistry("experiment.duckdb")
 session_id = registry.create_session(experiment_name="my_sweep")
-callback = RegistryCallback(registry, session_id)
 
-# Run all jobs with tracking
-results = run_sweep(cli, job_set, callback=callback.record)
+# Register job configs
+for job in job_set:
+    registry.register_run(
+        session_id=session_id,
+        run_hash=job.run_hash,
+        josh_path=str(job.source_path),
+        config_content=job.config_content,
+        file_mappings=job.file_mappings,
+        parameters=job.parameters,
+    )
+
+# Run all jobs with automatic tracking
+results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
 
 # Check results
 print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
@@ -561,7 +571,7 @@ print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
 # Iterate over job results
 for job, result in results:
     if result.success:
-        print(f"Job {job.config_hash} succeeded")
+        print(f"Job {job.run_hash} succeeded")
 ```
 
 #### run_sweep Options
@@ -570,7 +580,12 @@ for job, result in results:
 |-----------|------|-------------|
 | `cli` | JoshCLI | JoshCLI instance to use for execution (required) |
 | `job_set` | JobSet | Expanded jobs to run (required) |
-| `callback` | Callable | Optional callback invoked after each job (e.g., `callback.record`) |
+| `registry` | RunRegistry | Optional registry for automatic run tracking |
+| `session_id` | str | Session ID for registry (required if registry provided) |
+| `remote` | bool | If True, use run_remote() for remote execution (default: False) |
+| `api_key` | str | API key for remote execution (optional, not needed for local servers) |
+| `endpoint` | str | Custom endpoint URL for remote execution (optional) |
+| `on_complete` | Callable | Optional callback invoked after each job (for progress, logging, etc.) |
 | `stop_on_failure` | bool | If True, stop on first failure (default: False) |
 | `dry_run` | bool | If True, print plan without executing (default: False) |
 | `quiet` | bool | If True, suppress progress output (default: False) |
@@ -1187,7 +1202,7 @@ End-to-end parameter sweep with tracking:
 from pathlib import Path
 from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, run_sweep
 from joshpy.cli import JoshCLI
-from joshpy.registry import RunRegistry, RegistryCallback
+from joshpy.registry import RunRegistry
 
 # Setup
 registry = RunRegistry("experiment.duckdb")
@@ -1214,24 +1229,25 @@ expander = JobExpander()
 job_set = expander.expand(config)
 print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicates)")
 
-# Create session (total_jobs/total_replicates no longer needed)
+# Create session
 session_id = registry.create_session(
     experiment_name="jotr_sensitivity",
     simulation=config.simulation,
 )
 
-# Register configs
+# Register job configs
 for job in job_set:
-    registry.register_config(
+    registry.register_run(
         session_id=session_id,
-        config_hash=job.config_hash,
+        run_hash=job.run_hash,
+        josh_path=str(job.source_path),
         config_content=job.config_content,
+        file_mappings=job.file_mappings,
         parameters=job.parameters,
     )
 
-# Execute with run_sweep() - handles iteration and callbacks
-callback = RegistryCallback(registry, session_id)
-results = run_sweep(cli, job_set, callback=callback.record)
+# Execute with run_sweep() - automatic registry tracking
+results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
 
 print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
 
