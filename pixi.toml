@@ -22,6 +22,10 @@ r-reticulate = ">=1.38"
 r-ggplot2 = ">=3.5"
 r-dplyr = ">=1.1"
 conda = "*"
+
+[target.linux-64.dependencies]
+r-dbi = ">=1.2"
+r-duckdb = ">=1.0"
 matplotlib = ">=3.10.8,<4"
 
 [feature.dev.dependencies]
@@ -44,4 +48,5 @@ format = "ruff format joshpy/"
 get-jars = "bash .devcontainer/scripts/on_build/get_fat_jar.sh"
 render-manual = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_manual.qmd"
 render-sweep-manager = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_sweep_manager.qmd"
-render-all = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_manual.qmd && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_sweep_manager.qmd"
+render-analysis = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_analysis.qmd"
+render-all = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_manual.qmd && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_sweep_manager.qmd && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto render docs/demo_analysis.qmd"

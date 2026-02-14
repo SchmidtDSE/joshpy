@@ -248,23 +248,26 @@ maxGrowth = {{ maxGrowth }} meters</code></pre>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb13"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.jobs <span class="im">import</span> JobExpander</span>
 <span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.registry <span class="im">import</span> RunRegistry</span>
 <span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Create in-memory registry for this demo</span></span>
-<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>registry <span class="op">=</span> RunRegistry(<span class="st">":memory:"</span>)</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Registry path - saved to disk for use in demo_analysis.qmd</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>REGISTRY_PATH <span class="op">=</span> <span class="st">"demo_registry.duckdb"</span></span>
 <span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Expand config into individual jobs</span></span>
-<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>expander <span class="op">=</span> JobExpander()</span>
-<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>job_set <span class="op">=</span> expander.expand(config)</span>
-<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a><span class="co"># Create a session to track this experiment</span></span>
-<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>session_id <span class="op">=</span> registry.create_session(</span>
-<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a>    experiment_name<span class="op">=</span><span class="st">"growth_rate_sweep"</span>,</span>
-<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a>    simulation<span class="op">=</span><span class="st">"Main"</span>,</span>
-<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a>    template_path<span class="op">=</span><span class="bu">str</span>(TEMPLATE_PATH),</span>
-<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a>    metadata<span class="op">=</span>{<span class="st">"job_config"</span>: config.to_dict()},  <span class="co"># Store for reconstruction</span></span>
-<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb13-18"><a href="#cb13-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Session ID: </span><span class="sc">{</span>session_id<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a><span class="co"># Create registry (overwrites if exists)</span></span>
+<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>registry <span class="op">=</span> RunRegistry(REGISTRY_PATH)</span>
+<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a><span class="co"># Expand config into individual jobs</span></span>
+<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a>expander <span class="op">=</span> JobExpander()</span>
+<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>job_set <span class="op">=</span> expander.expand(config)</span>
+<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a><span class="co"># Create a session to track this experiment</span></span>
+<span id="cb13-15"><a href="#cb13-15" aria-hidden="true" tabindex="-1"></a>session_id <span class="op">=</span> registry.create_session(</span>
+<span id="cb13-16"><a href="#cb13-16" aria-hidden="true" tabindex="-1"></a>    experiment_name<span class="op">=</span><span class="st">"growth_rate_sweep"</span>,</span>
+<span id="cb13-17"><a href="#cb13-17" aria-hidden="true" tabindex="-1"></a>    simulation<span class="op">=</span><span class="st">"Main"</span>,</span>
+<span id="cb13-18"><a href="#cb13-18" aria-hidden="true" tabindex="-1"></a>    template_path<span class="op">=</span><span class="bu">str</span>(TEMPLATE_PATH),</span>
+<span id="cb13-19"><a href="#cb13-19" aria-hidden="true" tabindex="-1"></a>    metadata<span class="op">=</span>{<span class="st">"job_config"</span>: config.to_dict()},  <span class="co"># Store for reconstruction</span></span>
+<span id="cb13-20"><a href="#cb13-20" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb13-21"><a href="#cb13-21" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Session ID: </span><span class="sc">{</span>session_id<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>Session ID: 0a81d55c-dbc5-49fb-b857-5fb7a2a33b96</code></pre>
+<pre><code>Session ID: 10d38dcc-7252-4e59-a754-0ee3f45efe95</code></pre>
 </div>
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Will run </span><span class="sc">{</span>job_set<span class="sc">.</span>total_jobs<span class="sc">}</span><span class="ss"> jobs (</span><span class="sc">{</span>job_set<span class="sc">.</span>total_replicates<span class="sc">}</span><span class="ss"> replicates)"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
@@ -406,12 +409,9 @@ Loaded 1,043,460 rows</code></pre>
 </div>
 </div>
 </section>
-<section id="step-5-diagnostic-plotting-python" class="level2">
-<h2 class="anchored" data-anchor-id="step-5-diagnostic-plotting-python">Step 5: Diagnostic Plotting (Python)</h2>
-<p>The <code>SimulationDiagnostics</code> class provides quick matplotlib-based visualizations for simulation sanity checks - useful for verifying that simulations behave as expected before deeper analysis.</p>
-<section id="discover-available-data" class="level3">
-<h3 class="anchored" data-anchor-id="discover-available-data">Discover Available Data</h3>
-<p>First, let’s see what data is available in the registry:</p>
+<section id="step-5-verify-data-loaded" class="level2">
+<h2 class="anchored" data-anchor-id="step-5-verify-data-loaded">Step 5: Verify Data Loaded</h2>
+<p>Let’s verify the data is in the registry and ready for analysis:</p>
 <div class="cell">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb32"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get summary of loaded data</span></span>
 <span id="cb32-2"><a href="#cb32-2" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> registry.get_data_summary()</span>
@@ -419,10 +419,10 @@ Loaded 1,043,460 rows</code></pre>
 <div class="cell-output cell-output-stdout">
 <pre><code>Registry Data Summary
 ========================================
-Sessions: 1
+Sessions: 3
 Configs:  10
-Runs:     10
-Rows:     1,043,460
+Runs:     30
+Rows:     3,130,380
 
 Variables: averageAge, averageHeight
 Entity types: patch
@@ -432,7 +432,6 @@ Replicates: 0 - 2
 Spatial extent: lon [-115.39, -114.40], lat [33.40, 33.70]</code></pre>
 </div>
 </div>
-<p>We can also query individual lists:</p>
 <div class="cell">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb34"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Export variables: </span><span class="sc">{</span>registry<span class="sc">.</span>list_export_variables()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
@@ -442,247 +441,35 @@ Spatial extent: lon [-115.39, -114.40], lat [33.40, 33.70]</code></pre>
 <div class="cell-output cell-output-stdout">
 <pre><code>Config parameters: ['maxGrowth']</code></pre>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb38"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Entity types: </span><span class="sc">{</span>registry<span class="sc">.</span>list_entity_types()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Entity types: ['patch']</code></pre>
-</div>
 </div>
 </section>
-<section id="time-series-visualization" class="level3">
-<h3 class="anchored" data-anchor-id="time-series-visualization">Time Series Visualization</h3>
-<p>The <code>plot_timeseries()</code> method shows how a variable evolves over simulation steps. By default, it spatially aggregates across patches and shows uncertainty bands across replicates.</p>
+<section id="next-steps-analysis" class="level2">
+<h2 class="anchored" data-anchor-id="next-steps-analysis">Next Steps: Analysis</h2>
+<p>Now that data is loaded, see <strong><code>demo_analysis.qmd</code></strong> for comprehensive coverage of:</p>
+<ul>
+<li><strong>Diagnostic Plots</strong> (<code>SimulationDiagnostics</code>) - quick matplotlib visualizations</li>
+<li><strong>Custom Queries</strong> (<code>DiagnosticQueries</code>) - get pandas DataFrames</li>
+<li><strong>Direct SQL</strong> - full DuckDB access for advanced analysis</li>
+<li><strong>R/ggplot2</strong> - publication-quality figures</li>
+</ul>
+<p>Quick example:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb40"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.diagnostics <span class="im">import</span> SimulationDiagnostics</span>
-<span id="cb40-2"><a href="#cb40-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb40-3"><a href="#cb40-3" aria-hidden="true" tabindex="-1"></a>diag <span class="op">=</span> SimulationDiagnostics(registry)</span>
-<span id="cb40-4"><a href="#cb40-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb40-5"><a href="#cb40-5" aria-hidden="true" tabindex="-1"></a><span class="co"># Plot time series for a specific parameter value</span></span>
-<span id="cb40-6"><a href="#cb40-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Filter by maxGrowth=50 to see a single experiment</span></span>
-<span id="cb40-7"><a href="#cb40-7" aria-hidden="true" tabindex="-1"></a>diag.plot_timeseries(</span>
-<span id="cb40-8"><a href="#cb40-8" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb40-9"><a href="#cb40-9" aria-hidden="true" tabindex="-1"></a>    maxGrowth<span class="op">=</span><span class="dv">50</span>,</span>
-<span id="cb40-10"><a href="#cb40-10" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Average Tree Height Over Time (maxGrowth=50)"</span>,</span>
-<span id="cb40-11"><a href="#cb40-11" aria-hidden="true" tabindex="-1"></a>    show<span class="op">=</span><span class="va">True</span>,</span>
-<span id="cb40-12"><a href="#cb40-12" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb38"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.diagnostics <span class="im">import</span> SimulationDiagnostics</span>
+<span id="cb38-2"><a href="#cb38-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb38-3"><a href="#cb38-3" aria-hidden="true" tabindex="-1"></a>diag <span class="op">=</span> SimulationDiagnostics(registry)</span>
+<span id="cb38-4"><a href="#cb38-4" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
+<span id="cb38-5"><a href="#cb38-5" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
+<span id="cb38-6"><a href="#cb38-6" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
+<span id="cb38-7"><a href="#cb38-7" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Tree Height by Growth Rate Parameter"</span>,</span>
+<span id="cb38-8"><a href="#cb38-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
-<div id="fig-diag-timeseries" class="quarto-float quarto-figure quarto-figure-center anchored">
+<div id="fig-quick-comparison" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
-<div aria-describedby="fig-diag-timeseries-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-<img src="demo_manual_files/figure-html/fig-diag-timeseries-1.png" class="img-fluid figure-img" width="960">
+<div aria-describedby="fig-quick-comparison-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="demo_manual_files/figure-html/fig-quick-comparison-1.png" class="img-fluid figure-img" width="960">
 </div>
-<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-diag-timeseries-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-Figure&nbsp;1: Tree height over time for maxGrowth=50, with uncertainty bands across replicates.
-</figcaption>
-</figure>
-</div>
-</div>
-</div>
-</section>
-<section id="parameter-comparison" class="level3">
-<h3 class="anchored" data-anchor-id="parameter-comparison">Parameter Comparison</h3>
-<p>The <code>plot_comparison()</code> method compares a variable across different parameter values - ideal for visualizing parameter sweep results.</p>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb41"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Compare averageHeight across all maxGrowth values</span></span>
-<span id="cb41-2"><a href="#cb41-2" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
-<span id="cb41-3"><a href="#cb41-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb41-4"><a href="#cb41-4" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb41-5"><a href="#cb41-5" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Tree Height by Growth Rate Parameter"</span>,</span>
-<span id="cb41-6"><a href="#cb41-6" aria-hidden="true" tabindex="-1"></a>    show<span class="op">=</span><span class="va">True</span>,</span>
-<span id="cb41-7"><a href="#cb41-7" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output-display">
-<div id="fig-diag-comparison" class="quarto-float quarto-figure quarto-figure-center anchored">
-<figure class="quarto-float quarto-float-fig figure">
-<div aria-describedby="fig-diag-comparison-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-<img src="demo_manual_files/figure-html/fig-diag-comparison-3.png" class="img-fluid figure-img" width="960">
-</div>
-<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-diag-comparison-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-Figure&nbsp;2: Tree height trajectories across all maxGrowth parameter values.
-</figcaption>
-</figure>
-</div>
-</div>
-</div>
-<p>We can also create a bar chart at a specific timestep:</p>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb42"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Bar chart at final step</span></span>
-<span id="cb42-2"><a href="#cb42-2" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
-<span id="cb42-3"><a href="#cb42-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb42-4"><a href="#cb42-4" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb42-5"><a href="#cb42-5" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
-<span id="cb42-6"><a href="#cb42-6" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Final Tree Height vs Growth Rate"</span>,</span>
-<span id="cb42-7"><a href="#cb42-7" aria-hidden="true" tabindex="-1"></a>    show<span class="op">=</span><span class="va">True</span>,</span>
-<span id="cb42-8"><a href="#cb42-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output-display">
-<div id="fig-diag-barchart" class="quarto-float quarto-figure quarto-figure-center anchored">
-<figure class="quarto-float quarto-float-fig figure">
-<div aria-describedby="fig-diag-barchart-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-<img src="demo_manual_files/figure-html/fig-diag-barchart-5.png" class="img-fluid figure-img" width="960">
-</div>
-<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-diag-barchart-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-Figure&nbsp;3: Final tree height at step 10 for each maxGrowth value.
-</figcaption>
-</figure>
-</div>
-</div>
-</div>
-</section>
-<section id="saving-figures" class="level3">
-<h3 class="anchored" data-anchor-id="saving-figures">Saving Figures</h3>
-<p>All plot methods return a matplotlib Figure that can be saved:</p>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb43"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb43-1"><a href="#cb43-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Save to file instead of showing inline</span></span>
-<span id="cb43-2"><a href="#cb43-2" aria-hidden="true" tabindex="-1"></a>fig <span class="op">=</span> diag.plot_comparison(</span>
-<span id="cb43-3"><a href="#cb43-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb43-4"><a href="#cb43-4" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb43-5"><a href="#cb43-5" aria-hidden="true" tabindex="-1"></a>    show<span class="op">=</span><span class="va">False</span>,</span>
-<span id="cb43-6"><a href="#cb43-6" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb43-7"><a href="#cb43-7" aria-hidden="true" tabindex="-1"></a>fig.savefig(<span class="st">"/tmp/diagnostic_comparison.png"</span>, dpi<span class="op">=</span><span class="dv">150</span>, bbox_inches<span class="op">=</span><span class="st">"tight"</span>)</span>
-<span id="cb43-8"><a href="#cb43-8" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Saved to /tmp/diagnostic_comparison.png"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Saved to /tmp/diagnostic_comparison.png</code></pre>
-</div>
-<div class="cell-output-display">
-<div>
-<figure class="figure">
-<p><img src="demo_manual_files/figure-html/unnamed-chunk-9-7.png" class="img-fluid figure-img" width="960"></p>
-</figure>
-</div>
-</div>
-</div>
-</section>
-</section>
-<section id="step-6-visualize-results-r" class="level2">
-<h2 class="anchored" data-anchor-id="step-6-visualize-results-r">Step 6: Visualize Results (R)</h2>
-<p>For publication-quality figures or more customized visualizations, we can pass data to R for visualization using ggplot2. The <code>DiagnosticQueries</code> class provides ready-made queries that return pandas DataFrames, which we can export to CSV for R.</p>
-<p>First, let’s query the data and export it:</p>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb45"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.cell_data <span class="im">import</span> DiagnosticQueries</span>
-<span id="cb45-2"><a href="#cb45-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb45-3"><a href="#cb45-3" aria-hidden="true" tabindex="-1"></a>queries <span class="op">=</span> DiagnosticQueries(registry)</span>
-<span id="cb45-4"><a href="#cb45-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb45-5"><a href="#cb45-5" aria-hidden="true" tabindex="-1"></a><span class="co"># Compare averageHeight across all maxGrowth values</span></span>
-<span id="cb45-6"><a href="#cb45-6" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_parameter_comparison(</span>
-<span id="cb45-7"><a href="#cb45-7" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
-<span id="cb45-8"><a href="#cb45-8" aria-hidden="true" tabindex="-1"></a>    param_name<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb45-9"><a href="#cb45-9" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb45-10"><a href="#cb45-10" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb45-11"><a href="#cb45-11" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Retrieved </span><span class="sc">{</span><span class="bu">len</span>(df)<span class="sc">}</span><span class="ss"> rows</span><span class="ch">\n</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Retrieved 110 rows</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb47"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> <span class="kw">not</span> df.empty:</span>
-<span id="cb47-2"><a href="#cb47-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"Sample data (first 15 rows):"</span>)</span>
-<span id="cb47-3"><a href="#cb47-3" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(df.head(<span class="dv">15</span>).to_string(index<span class="op">=</span><span class="va">False</span>))</span>
-<span id="cb47-4"><a href="#cb47-4" aria-hidden="true" tabindex="-1"></a>    <span class="co"># Save to CSV for R visualization</span></span>
-<span id="cb47-5"><a href="#cb47-5" aria-hidden="true" tabindex="-1"></a>    df.to_csv(<span class="st">"/tmp/sweep_results.csv"</span>, index<span class="op">=</span><span class="va">False</span>)</span>
-<span id="cb47-6"><a href="#cb47-6" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="st">"</span><span class="ch">\n</span><span class="st">Saved results to /tmp/sweep_results.csv"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Sample data (first 15 rows):
-param_value  step  mean_value  std_value  n_cells
-         10     0    4.994691   0.923664     9486
-         10     1    9.997439   1.290687     9486
-         10     2   14.999771   1.599005     9486
-         10     3   20.006012   1.837692     9486
-         10     4   24.998995   2.039149     9486
-         10     5   30.004264   2.242548     9486
-         10     6   35.016119   2.442119     9486
-         10     7   40.010611   2.601343     9486
-         10     8   45.013985   2.748260     9486
-         10     9   50.006084   2.891600     9486
-         10    10   54.985590   3.018592     9486
-        100     0   49.790584   9.038708     9486
-        100     1   99.658353  12.908035     9486
-        100     2  149.800329  15.834618     9486
-        100     3  199.903060  18.259350     9486
-
-Saved results to /tmp/sweep_results.csv</code></pre>
-</div>
-</div>
-<p>Now we can use ggplot2 in R to create publication-quality figures:</p>
-<ol type="1">
-<li><strong>Time series</strong>: Tree height over simulation steps with ribbon for uncertainty</li>
-<li><strong>Bar chart</strong>: Final height vs growth rate parameter with error bars</li>
-</ol>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb49"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Read results from CSV exported by Python</span></span>
-<span id="cb49-2"><a href="#cb49-2" aria-hidden="true" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="st">"/tmp/sweep_results.csv"</span>)</span>
-<span id="cb49-3"><a href="#cb49-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb49-4"><a href="#cb49-4" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">nrow</span>(df) <span class="sc">&gt;</span> <span class="dv">0</span>) {</span>
-<span id="cb49-5"><a href="#cb49-5" aria-hidden="true" tabindex="-1"></a>  p <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(df, <span class="fu">aes</span>(<span class="at">x =</span> step, <span class="at">y =</span> mean_value, <span class="at">color =</span> <span class="fu">factor</span>(param_value), <span class="at">fill =</span> <span class="fu">factor</span>(param_value))) <span class="sc">+</span></span>
-<span id="cb49-6"><a href="#cb49-6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_ribbon</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value), <span class="at">alpha =</span> <span class="fl">0.2</span>, <span class="at">color =</span> <span class="cn">NA</span>) <span class="sc">+</span></span>
-<span id="cb49-7"><a href="#cb49-7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_line</span>(<span class="at">linewidth =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
-<span id="cb49-8"><a href="#cb49-8" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_point</span>(<span class="at">size =</span> <span class="dv">2</span>) <span class="sc">+</span></span>
-<span id="cb49-9"><a href="#cb49-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">labs</span>(</span>
-<span id="cb49-10"><a href="#cb49-10" aria-hidden="true" tabindex="-1"></a>      <span class="at">x =</span> <span class="st">"Simulation Step"</span>,</span>
-<span id="cb49-11"><a href="#cb49-11" aria-hidden="true" tabindex="-1"></a>      <span class="at">y =</span> <span class="st">"Average Tree Height (meters)"</span>,</span>
-<span id="cb49-12"><a href="#cb49-12" aria-hidden="true" tabindex="-1"></a>      <span class="at">title =</span> <span class="st">"Tree Growth Over Time by maxGrowth Parameter"</span>,</span>
-<span id="cb49-13"><a href="#cb49-13" aria-hidden="true" tabindex="-1"></a>      <span class="at">color =</span> <span class="st">"maxGrowth"</span>,</span>
-<span id="cb49-14"><a href="#cb49-14" aria-hidden="true" tabindex="-1"></a>      <span class="at">fill =</span> <span class="st">"maxGrowth"</span></span>
-<span id="cb49-15"><a href="#cb49-15" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">+</span></span>
-<span id="cb49-16"><a href="#cb49-16" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
-<span id="cb49-17"><a href="#cb49-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(</span>
-<span id="cb49-18"><a href="#cb49-18" aria-hidden="true" tabindex="-1"></a>      <span class="at">legend.position =</span> <span class="st">"right"</span>,</span>
-<span id="cb49-19"><a href="#cb49-19" aria-hidden="true" tabindex="-1"></a>      <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>()</span>
-<span id="cb49-20"><a href="#cb49-20" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb49-21"><a href="#cb49-21" aria-hidden="true" tabindex="-1"></a>  <span class="fu">print</span>(p)</span>
-<span id="cb49-22"><a href="#cb49-22" aria-hidden="true" tabindex="-1"></a>} <span class="cf">else</span> {</span>
-<span id="cb49-23"><a href="#cb49-23" aria-hidden="true" tabindex="-1"></a>  <span class="fu">cat</span>(<span class="st">"No data to plot."</span>)</span>
-<span id="cb49-24"><a href="#cb49-24" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output-display">
-<div id="fig-timeseries" class="quarto-float quarto-figure quarto-figure-center anchored">
-<figure class="quarto-float quarto-float-fig figure">
-<div aria-describedby="fig-timeseries-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-<img src="demo_manual_files/figure-html/fig-timeseries-9.png" class="img-fluid figure-img" width="960">
-</div>
-<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-timeseries-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-Figure&nbsp;4: Tree height trajectories for different maxGrowth parameter values. Higher growth rates produce taller trees, as expected.
-</figcaption>
-</figure>
-</div>
-</div>
-</div>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb50"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Read results from CSV exported by Python</span></span>
-<span id="cb50-2"><a href="#cb50-2" aria-hidden="true" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="st">"/tmp/sweep_results.csv"</span>)</span>
-<span id="cb50-3"><a href="#cb50-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb50-4"><a href="#cb50-4" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">nrow</span>(df) <span class="sc">&gt;</span> <span class="dv">0</span>) {</span>
-<span id="cb50-5"><a href="#cb50-5" aria-hidden="true" tabindex="-1"></a>  final_df <span class="ot">&lt;-</span> df <span class="sc">|&gt;</span></span>
-<span id="cb50-6"><a href="#cb50-6" aria-hidden="true" tabindex="-1"></a>    dplyr<span class="sc">::</span><span class="fu">filter</span>(step <span class="sc">==</span> <span class="fu">max</span>(step))</span>
-<span id="cb50-7"><a href="#cb50-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb50-8"><a href="#cb50-8" aria-hidden="true" tabindex="-1"></a>  p <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(final_df, <span class="fu">aes</span>(<span class="at">x =</span> param_value, <span class="at">y =</span> mean_value)) <span class="sc">+</span></span>
-<span id="cb50-9"><a href="#cb50-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_col</span>(<span class="at">fill =</span> <span class="st">"steelblue"</span>, <span class="at">alpha =</span> <span class="fl">0.7</span>) <span class="sc">+</span></span>
-<span id="cb50-10"><a href="#cb50-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_errorbar</span>(</span>
-<span id="cb50-11"><a href="#cb50-11" aria-hidden="true" tabindex="-1"></a>      <span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value),</span>
-<span id="cb50-12"><a href="#cb50-12" aria-hidden="true" tabindex="-1"></a>      <span class="at">width =</span> <span class="dv">3</span>,</span>
-<span id="cb50-13"><a href="#cb50-13" aria-hidden="true" tabindex="-1"></a>      <span class="at">linewidth =</span> <span class="fl">0.6</span></span>
-<span id="cb50-14"><a href="#cb50-14" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">+</span></span>
-<span id="cb50-15"><a href="#cb50-15" aria-hidden="true" tabindex="-1"></a>    <span class="fu">labs</span>(</span>
-<span id="cb50-16"><a href="#cb50-16" aria-hidden="true" tabindex="-1"></a>      <span class="at">x =</span> <span class="st">"maxGrowth (meters/step)"</span>,</span>
-<span id="cb50-17"><a href="#cb50-17" aria-hidden="true" tabindex="-1"></a>      <span class="at">y =</span> <span class="st">"Final Average Height (meters)"</span>,</span>
-<span id="cb50-18"><a href="#cb50-18" aria-hidden="true" tabindex="-1"></a>      <span class="at">title =</span> <span class="st">"Final Tree Height vs Growth Rate"</span></span>
-<span id="cb50-19"><a href="#cb50-19" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">+</span></span>
-<span id="cb50-20"><a href="#cb50-20" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
-<span id="cb50-21"><a href="#cb50-21" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(<span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>())</span>
-<span id="cb50-22"><a href="#cb50-22" aria-hidden="true" tabindex="-1"></a>  <span class="fu">print</span>(p)</span>
-<span id="cb50-23"><a href="#cb50-23" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb50-24"><a href="#cb50-24" aria-hidden="true" tabindex="-1"></a>  <span class="co"># Calculate and print correlation</span></span>
-<span id="cb50-25"><a href="#cb50-25" aria-hidden="true" tabindex="-1"></a>  r <span class="ot">&lt;-</span> <span class="fu">cor</span>(final_df<span class="sc">$</span>param_value, final_df<span class="sc">$</span>mean_value)</span>
-<span id="cb50-26"><a href="#cb50-26" aria-hidden="true" tabindex="-1"></a>  <span class="fu">cat</span>(<span class="fu">sprintf</span>(<span class="st">"</span><span class="sc">\n</span><span class="st">Correlation between maxGrowth and final height: r = %.4f</span><span class="sc">\n</span><span class="st">"</span>, r))</span>
-<span id="cb50-27"><a href="#cb50-27" aria-hidden="true" tabindex="-1"></a>} <span class="cf">else</span> {</span>
-<span id="cb50-28"><a href="#cb50-28" aria-hidden="true" tabindex="-1"></a>  <span class="fu">cat</span>(<span class="st">"No data to plot."</span>)</span>
-<span id="cb50-29"><a href="#cb50-29" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>
-Correlation between maxGrowth and final height: r = 1.0000</code></pre>
-</div>
-<div class="cell-output-display">
-<div id="fig-final-height" class="quarto-float quarto-figure quarto-figure-center anchored">
-<figure class="quarto-float quarto-float-fig figure">
-<div aria-describedby="fig-final-height-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-<img src="demo_manual_files/figure-html/fig-final-height-1.png" class="img-fluid figure-img" width="960">
-</div>
-<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-final-height-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
-Figure&nbsp;5: Final tree height vs growth rate parameter. Error bars show standard deviation across replicates.
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-quick-comparison-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: Tree height trajectories across maxGrowth values.
 </figcaption>
 </figure>
 </div>
@@ -696,10 +483,9 @@ Figure&nbsp;5: Final tree height vs growth rate parameter. Error bars show stand
 <li><strong>Define</strong> a parameter sweep using <code>JobConfig</code> and <code>SweepConfig</code></li>
 <li><strong>Expand</strong> jobs with <code>JobExpander</code> to get concrete job specifications</li>
 <li><strong>Register</strong> jobs with <code>registry.register_run()</code> for tracking</li>
-<li><strong>Execute</strong> with <code>run_sweep()</code> and <code>RegistryCallback</code> for automatic recording</li>
+<li><strong>Execute</strong> with <code>run_sweep()</code> for automatic recording</li>
 <li><strong>Load</strong> outputs with <code>recover_sweep_results()</code> for automatic path discovery</li>
-<li><strong>Query</strong> with <code>DiagnosticQueries</code> or direct DuckDB access</li>
-<li><strong>Visualize</strong> with <code>SimulationDiagnostics</code> (Python) or ggplot2 (R)</li>
+<li><strong>Analyze</strong> - see <code>demo_analysis.qmd</code> for visualization and queries</li>
 </ol>
 <p><strong>Key Design Principles:</strong></p>
 <ul>
@@ -708,16 +494,24 @@ Figure&nbsp;5: Final tree height vs growth rate parameter. Error bars show stand
 <li><strong>Convenience helpers</strong>: <code>run_sweep()</code> and <code>recover_sweep_results()</code> for common patterns</li>
 <li><strong>Full control</strong>: Each step is explicit and visible</li>
 </ul>
-<p>For a simplified workflow, see <code>demo_sweep_manager.qmd</code> which uses <code>SweepManager</code> to encapsulate these steps.</p>
+<p><strong>Related Demos:</strong></p>
+<ul>
+<li><code>demo_sweep_manager.qmd</code> - Simplified orchestration with <code>SweepManager</code></li>
+<li><code>demo_analysis.qmd</code> - Analysis and visualization (decoupled from orchestration)</li>
+</ul>
 </section>
 <section id="cleanup" class="level2">
 <h2 class="anchored" data-anchor-id="cleanup">Cleanup</h2>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb52"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb52-1"><a href="#cb52-1" aria-hidden="true" tabindex="-1"></a>job_set.cleanup()  <span class="co"># Remove temporary config files</span></span>
-<span id="cb52-2"><a href="#cb52-2" aria-hidden="true" tabindex="-1"></a>registry.close()</span>
-<span id="cb52-3"><a href="#cb52-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Cleanup complete."</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb39"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb39-1"><a href="#cb39-1" aria-hidden="true" tabindex="-1"></a>job_set.cleanup()  <span class="co"># Remove temporary config files</span></span>
+<span id="cb39-2"><a href="#cb39-2" aria-hidden="true" tabindex="-1"></a>registry.close()</span>
+<span id="cb39-3"><a href="#cb39-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Cleanup complete. Registry saved to </span><span class="sc">{</span>REGISTRY_PATH<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>Cleanup complete.</code></pre>
+<pre><code>Cleanup complete. Registry saved to demo_registry.duckdb</code></pre>
+</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb41"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Run demo_analysis.qmd to explore the results."</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Run demo_analysis.qmd to explore the results.</code></pre>
 </div>
 </div>
 </section>

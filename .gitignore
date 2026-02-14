@@ -71,6 +71,10 @@ Thumbs.db
 tmp/
 temp/
 
+# Demo output files
+docs/demo_registry.duckdb
+docs/*.csv
+
 # AI context
 .claude
 .opencode

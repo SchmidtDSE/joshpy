@@ -1,5 +1,5 @@
 ---
-title: "joshpy Parameter Sweep Demo (Manual Workflow)"
+title: "joshpy Parameter Sweep Demo (SweepManager)"
 format: html
 execute:
   warning: false
@@ -30,9 +30,10 @@ This demo assumes familiarity with Josh's simulation language and runtime.
 - **Diagnostics**: Quick matplotlib visualizations for simulation sanity checks
 - **Visualization**: Create publication-quality plots with R/ggplot2 integration
 
-This demo walks through a complete parameter sweep workflow **using each component
-directly**. This approach provides maximum control and visibility into each step.
-For a simplified workflow using `SweepManager`, see `demo_sweep_manager.qmd`.
+This demo walks through a complete parameter sweep workflow **using `SweepManager`**,
+which encapsulates the common workflow of expanding, running, and collecting
+sweep results. For a more detailed walkthrough using each component directly,
+see `demo_manual.qmd`.
 
 We vary the `maxGrowth` parameter from 10 to 100 meters/step across 10 experiments,
 each with 3 replicates, then load, query, and visualize the results.
@@ -51,7 +52,7 @@ For visualization, ensure R is installed with the following packages:
 install.packages(c("reticulate", "ggplot2", "dplyr"))
 ```
 
-## Step 1: Setup - Define Parameter Sweep
+## Step 1: Define Parameter Sweep
 
 The first step is to define our experiment configuration. joshpy uses three key
 abstractions:
@@ -60,9 +61,6 @@ abstractions:
   and sweep parameters
 - **`SweepConfig`**: Defines which parameters to sweep and their values
 - **`SweepParameter`**: A single parameter with a name and list of values
-
-The `JobExpander` will later compute the cartesian product of all parameters,
-generating one job per combination.
 
 ```{python}
 from pathlib import Path
@@ -109,99 +107,68 @@ print(TEMPLATE_PATH.read_text())
 Notice that the `.josh` file references `config sweep_config.maxGrowth` - this
 pulls the value from our generated config file at runtime.
 
-## Step 2: Initialize Registry and Expand Jobs
+## Step 2: Create SweepManager
 
-The `RunRegistry` provides experiment tracking backed by DuckDB. It stores:
+The `SweepManager` encapsulates the entire sweep workflow. It uses a builder
+pattern for flexible configuration:
 
-- **Sessions**: High-level experiment metadata
-- **Configs**: Rendered configuration files with parameter values and input file hashes
-- **Runs**: Individual execution records with timing and exit codes
-
-The `JobExpander` takes our `JobConfig` and generates concrete jobs - one per
-parameter combination, each with a unique **run hash** for tracking. The run hash
-includes the `.josh` file content, rendered `.jshc` content, and hashes of any
-input data files.
+- **`with_registry()`**: Configure DuckDB registry (path or existing instance)
+- **`with_cli()`**: Configure JoshCLI (JAR path or existing instance)
+- **`build()`**: Expand jobs, create session, and register configurations
 
 ```{python}
-from joshpy.jobs import JobExpander
-from joshpy.registry import RunRegistry
+from joshpy.sweep import SweepManager
 
 # Registry path - saved to disk for use in demo_analysis.qmd
 REGISTRY_PATH = "demo_registry.duckdb"
 
-# Create registry (overwrites if exists)
-registry = RunRegistry(REGISTRY_PATH)
-
-# Expand config into individual jobs
-expander = JobExpander()
-job_set = expander.expand(config)
-
-# Create a session to track this experiment
-session_id = registry.create_session(
-    experiment_name="growth_rate_sweep",
-    simulation="Main",
-    template_path=str(TEMPLATE_PATH),
-    metadata={"job_config": config.to_dict()},  # Store for reconstruction
+# Create manager with builder pattern
+manager = (
+    SweepManager.builder(config)
+    .with_registry(REGISTRY_PATH, experiment_name="growth_rate_sweep")
+    .with_cli(jar_path=Path("../jar/joshsim-fat.jar"))
+    .build()
 )
-print(f"Session ID: {session_id}")
-print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicates)")
 
-# Register each job's configuration in the registry
-for job in job_set.jobs:
-    registry.register_run(
-        session_id=session_id,
-        run_hash=job.run_hash,
-        josh_path=str(job.source_path),
-        config_content=job.config_content,
-        file_mappings=job.file_mappings,
-        parameters=job.parameters,
-    )
+print(f"Session ID: {manager.session_id}")
+print(f"Jobs: {manager.job_set.total_jobs}")
+print(f"Total replicates: {manager.job_set.total_replicates}")
+
+# Show registered job hashes
+for job in manager.job_set.jobs:
     print(f"  maxGrowth={job.parameters['maxGrowth']:>3} -> hash={job.run_hash}")
 ```
 
-## Step 3: Run the Simulations
+## Step 3: Run Simulations
 
-The `JoshCLI` executes jobs via the Josh command-line interface. The `run_sweep()`
-function handles execution and automatically records runs in the registry when
-`registry` and `session_id` are provided.
+The `run()` method executes all jobs with automatic registry tracking:
 
 ```{python}
-from joshpy.cli import JoshCLI
-from joshpy.jobs import run_sweep
-
-# Update session status
-registry.update_session_status(session_id, "running")
-
-# Create CLI targeting the local fat JAR
-cli = JoshCLI(josh_jar=Path("../jar/joshsim-fat.jar"))
-
 print("Running 10 experiments (3 replicates each)...\n")
 
-# Run all jobs with automatic tracking
-results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
+# Run all jobs
+results = manager.run()
 
 print(f"\nCompleted: {results.succeeded}/{len(results)} succeeded")
 
-# Update final session status
-final_status = "completed" if results.failed == 0 else "failed"
-registry.update_session_status(session_id, final_status)
+if results.failed > 0:
+    print(f"Failed: {results.failed}")
+    for job, result in results:
+        if not result.success:
+            print(f"  maxGrowth={job.parameters['maxGrowth']}: {result.stderr[:100]}...")
 ```
 
-## Step 4: Load Cell Data from CSVs
+## Step 4: Load Results
 
-Josh exports simulation data to CSV files. The `recover_sweep_results()` function
-automatically discovers export paths from the Josh file (using `inspect_exports`),
-resolves template variables for each job, and loads results into the registry.
+The `load_results()` method automatically discovers export paths from the Josh
+file, resolves template variables for each job, and loads CSV results:
 
 ```{python}
-from joshpy.sweep import recover_sweep_results
-
 print("Loading CSV exports into registry...")
 
-# Automatically discover and load CSV results
-total_loaded = recover_sweep_results(cli, job_set, registry)
+rows_loaded = manager.load_results()
 
-print(f"\nLoaded {total_loaded:,} rows")
+print(f"\nLoaded {rows_loaded:,} rows")
 ```
 
 ## Step 5: Verify Data Loaded
@@ -210,13 +177,13 @@ Let's verify the data is in the registry and ready for analysis:
 
 ```{python}
 # Get summary of loaded data
-summary = registry.get_data_summary()
+summary = manager.registry.get_data_summary()
 print(summary)
 ```
 
 ```{python}
-print(f"Export variables: {registry.list_export_variables()}")
-print(f"Config parameters: {registry.list_config_parameters()}")
+print(f"Export variables: {manager.registry.list_export_variables()}")
+print(f"Config parameters: {manager.registry.list_config_parameters()}")
 ```
 
 ## Next Steps: Analysis
@@ -228,7 +195,14 @@ Now that data is loaded, see **`demo_analysis.qmd`** for comprehensive coverage 
 - **Direct SQL** - full DuckDB access for advanced analysis
 - **R/ggplot2** - publication-quality figures
 
-Quick example:
+Quick example using `manager.query()`:
+
+```{python}
+# Query with parameter grouping
+df = manager.query("averageHeight", group_by="maxGrowth")
+print(f"Retrieved {len(df)} rows")
+print(df.head(10).to_string(index=False))
+```
 
 ```{python}
 #| label: fig-quick-comparison
@@ -236,7 +210,7 @@ Quick example:
 
 from joshpy.diagnostics import SimulationDiagnostics
 
-diag = SimulationDiagnostics(registry)
+diag = SimulationDiagnostics(manager.registry)
 diag.plot_comparison(
     "averageHeight",
     group_by="maxGrowth",
@@ -246,32 +220,62 @@ diag.plot_comparison(
 
 ## Summary
 
-This demo illustrated the manual joshpy workflow using each component directly:
+This demo illustrated the `SweepManager` workflow:
 
 1. **Define** a parameter sweep using `JobConfig` and `SweepConfig`
-2. **Expand** jobs with `JobExpander` to get concrete job specifications
-3. **Register** jobs with `registry.register_run()` for tracking
-4. **Execute** with `run_sweep()` for automatic recording
-5. **Load** outputs with `recover_sweep_results()` for automatic path discovery
-6. **Analyze** - see `demo_analysis.qmd` for visualization and queries
+2. **Build** a `SweepManager` with builder pattern (handles expansion and registration)
+3. **Execute** with `manager.run()` - single method replaces manual loops
+4. **Load** outputs with `manager.load_results()` - automatic path discovery
+5. **Analyze** - see `demo_analysis.qmd` for visualization and queries
 
-**Key Design Principles:**
+**SweepManager Benefits:**
 
-- **Thin CLI wrapper**: `JoshCLI` maps 1:1 to CLI commands
-- **Thin DuckDB wrapper**: Direct `registry.conn` access for custom SQL
-- **Convenience helpers**: `run_sweep()` and `recover_sweep_results()` for common patterns
-- **Full control**: Each step is explicit and visible
+- **Encapsulation**: One object manages registry, CLI, and job set
+- **Context manager**: Automatic cleanup with `with` statement
+- **Builder pattern**: Flexible configuration with sensible defaults
+- **Convenience methods**: `run()`, `load_results()`, `query()` for common operations
+
+**Alternative Creation Methods:**
+
+```python
+# From dictionary
+manager = SweepManager.from_dict(config.to_dict(), registry=":memory:")
+
+# From YAML file
+manager = SweepManager.from_yaml(Path("experiment.yaml"))
+
+# With existing components
+manager = (
+    SweepManager.builder(config)
+    .with_registry(existing_registry, session_id="existing-session")
+    .with_cli(existing_cli)
+    .build()
+)
+```
 
 **Related Demos:**
 
-- `demo_sweep_manager.qmd` - Simplified orchestration with `SweepManager`
+- `demo_manual.qmd` - Step-by-step control using individual components
 - `demo_analysis.qmd` - Analysis and visualization (decoupled from orchestration)
 
 ## Cleanup
 
 ```{python}
-job_set.cleanup()  # Remove temporary config files
-registry.close()
+# SweepManager cleanup (also works as context manager)
+manager.cleanup()  # Remove temporary config files
+manager.close()    # Close registry connection
 print(f"Cleanup complete. Registry saved to {REGISTRY_PATH}")
 print("Run demo_analysis.qmd to explore the results.")
 ```
+
+**Alternative: Context Manager**
+
+```python
+# Automatic cleanup with context manager
+with SweepManager.from_dict(config.to_dict()) as manager:
+    manager.run()
+    manager.load_results()
+    df = manager.query("averageHeight", group_by="maxGrowth")
+# Resources automatically cleaned up here
+```
+
