@@ -82,14 +82,17 @@ config = JobConfig(
     simulation="Main",
     replicates=3,
     sweep=SweepConfig(
-        parameters=[SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES)]
+        parameters=[
+            SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
+            # Constant parameters use single-value lists
+            SweepParameter(name="seedDensity", values=[100]),
+        ]
     ),
 )
-
-print(f"Parameter values: {MAX_GROWTH_VALUES}")
-print(f"Replicates per job: {config.replicates}")
-print(f"Total runs: {len(MAX_GROWTH_VALUES)} x {config.replicates} = {len(MAX_GROWTH_VALUES) * config.replicates}")
 ```
+
+Parameters with single values are held constant across the sweep. Here, 
+`seedDensity=100` is the same for all runs, while `maxGrowth` varies from 10 to 100.
 
 Let's examine the source files. The `.josh` file defines the simulation, and
 the `.jshc.j2` template provides parameterized configuration:
@@ -143,8 +146,6 @@ session_id = registry.create_session(
     template_path=str(TEMPLATE_PATH),
     metadata={"job_config": config.to_dict()},  # Store for reconstruction
 )
-print(f"Session ID: {session_id}")
-print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicates)")
 
 # Register each job's configuration in the registry
 for job in job_set.jobs:
@@ -156,7 +157,6 @@ for job in job_set.jobs:
         file_mappings=job.file_mappings,
         parameters=job.parameters,
     )
-    print(f"  maxGrowth={job.parameters['maxGrowth']:>3} -> hash={job.run_hash}")
 ```
 
 ## Step 3: Run the Simulations
@@ -175,12 +175,8 @@ registry.update_session_status(session_id, "running")
 # Create CLI targeting the local fat JAR
 cli = JoshCLI(josh_jar=Path("../jar/joshsim-fat.jar"))
 
-print("Running 10 experiments (3 replicates each)...\n")
-
 # Run all jobs with automatic tracking
 results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
-
-print(f"\nCompleted: {results.succeeded}/{len(results)} succeeded")
 
 # Update final session status
 final_status = "completed" if results.failed == 0 else "failed"
@@ -196,12 +192,8 @@ resolves template variables for each job, and loads results into the registry.
 ```{python}
 from joshpy.sweep import recover_sweep_results
 
-print("Loading CSV exports into registry...")
-
 # Automatically discover and load CSV results
-total_loaded = recover_sweep_results(cli, job_set, registry)
-
-print(f"\nLoaded {total_loaded:,} rows")
+recover_sweep_results(cli, job_set, registry)
 ```
 
 ## Step 5: Verify Data Loaded
@@ -215,8 +207,11 @@ print(summary)
 ```
 
 ```{python}
-print(f"Export variables: {registry.list_export_variables()}")
-print(f"Config parameters: {registry.list_config_parameters()}")
+registry.list_export_variables()
+```
+
+```{python}
+registry.list_config_parameters()
 ```
 
 ## Next Steps: Analysis
@@ -272,6 +267,7 @@ This demo illustrated the manual joshpy workflow using each component directly:
 ```{python}
 job_set.cleanup()  # Remove temporary config files
 registry.close()
-print(f"Cleanup complete. Registry saved to {REGISTRY_PATH}")
-print("Run demo_analysis.qmd to explore the results.")
 ```
+
+The registry has been saved to `demo_registry.duckdb`. Run `demo_analysis.qmd` to 
+explore the results.

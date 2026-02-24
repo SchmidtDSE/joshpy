@@ -147,28 +147,20 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a>    simulation<span class="op">=</span><span class="st">"Main"</span>,</span>
 <span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a>    replicates<span class="op">=</span><span class="dv">3</span>,</span>
 <span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>    sweep<span class="op">=</span>SweepConfig(</span>
-<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>        parameters<span class="op">=</span>[SweepParameter(name<span class="op">=</span><span class="st">"maxGrowth"</span>, values<span class="op">=</span>MAX_GROWTH_VALUES)]</span>
-<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>    ),</span>
-<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Parameter values: </span><span class="sc">{</span>MAX_GROWTH_VALUES<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Parameter values: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]</code></pre>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a>        parameters<span class="op">=</span>[</span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>            SweepParameter(name<span class="op">=</span><span class="st">"maxGrowth"</span>, values<span class="op">=</span>MAX_GROWTH_VALUES),</span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>            <span class="co"># Constant parameters use single-value lists</span></span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>            SweepParameter(name<span class="op">=</span><span class="st">"seedDensity"</span>, values<span class="op">=</span>[<span class="dv">100</span>]),</span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a>        ]</span>
+<span id="cb3-23"><a href="#cb3-23" aria-hidden="true" tabindex="-1"></a>    ),</span>
+<span id="cb3-24"><a href="#cb3-24" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Replicates per job: </span><span class="sc">{</span>config<span class="sc">.</span>replicates<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Replicates per job: 3</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Total runs: </span><span class="sc">{</span><span class="bu">len</span>(MAX_GROWTH_VALUES)<span class="sc">}</span><span class="ss"> x </span><span class="sc">{</span>config<span class="sc">.</span>replicates<span class="sc">}</span><span class="ss"> = </span><span class="sc">{</span><span class="bu">len</span>(MAX_GROWTH_VALUES) <span class="op">*</span> config<span class="sc">.</span>replicates<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Total runs: 10 x 3 = 30</code></pre>
-</div>
-</div>
+<p>Parameters with single values are held constant across the sweep. Here, <code>seedDensity=100</code> is the same for all runs, while <code>maxGrowth</code> varies from 10 to 100.</p>
 <p>Let’s examine the source files. The <code>.josh</code> file defines the simulation, and the <code>.jshc.j2</code> template provides parameterized configuration:</p>
 <section id="josh-source" class="level4">
 <h4 class="anchored" data-anchor-id="josh-source">Josh Source</h4>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb9"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(SOURCE_PATH.read_text())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(SOURCE_PATH.read_text())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
 <pre><code># A configurable version of hello_cli.josh
 # Uses config variables from sweep_config.jshc for parameterization
@@ -222,7 +214,7 @@ end unit</code></pre>
 <section id="template-configuration" class="level4">
 <h4 class="anchored" data-anchor-id="template-configuration">Template Configuration</h4>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(TEMPLATE_PATH.read_text())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(TEMPLATE_PATH.read_text())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
 <pre><code># Auto-generated configuration for hello_cli_configurable.josh
 # Parameter sweep: maxGrowth={{ maxGrowth }}
@@ -243,104 +235,57 @@ maxGrowth = {{ maxGrowth }} meters</code></pre>
 <li><strong><code>build()</code></strong>: Expand jobs, create session, and register configurations</li>
 </ul>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb13"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.sweep <span class="im">import</span> SweepManager</span>
-<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Registry path - saved to disk for use in demo_analysis.qmd</span></span>
-<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>REGISTRY_PATH <span class="op">=</span> <span class="st">"demo_registry.duckdb"</span></span>
-<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Create manager with builder pattern</span></span>
-<span id="cb13-7"><a href="#cb13-7" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> (</span>
-<span id="cb13-8"><a href="#cb13-8" aria-hidden="true" tabindex="-1"></a>    SweepManager.builder(config)</span>
-<span id="cb13-9"><a href="#cb13-9" aria-hidden="true" tabindex="-1"></a>    .with_registry(REGISTRY_PATH, experiment_name<span class="op">=</span><span class="st">"growth_rate_sweep"</span>)</span>
-<span id="cb13-10"><a href="#cb13-10" aria-hidden="true" tabindex="-1"></a>    .with_cli(jar_path<span class="op">=</span>Path(<span class="st">"../jar/joshsim-fat.jar"</span>))</span>
-<span id="cb13-11"><a href="#cb13-11" aria-hidden="true" tabindex="-1"></a>    .build()</span>
-<span id="cb13-12"><a href="#cb13-12" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb13-13"><a href="#cb13-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-14"><a href="#cb13-14" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Session ID: </span><span class="sc">{</span>manager<span class="sc">.</span>session_id<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Session ID: 35e8b546-5055-4736-bedf-e11042be6034</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Jobs: </span><span class="sc">{</span>manager<span class="sc">.</span>job_set<span class="sc">.</span>total_jobs<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Jobs: 10</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb17"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Total replicates: </span><span class="sc">{</span>manager<span class="sc">.</span>job_set<span class="sc">.</span>total_replicates<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Total replicates: 30</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb19"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Show registered job hashes</span></span>
-<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> job <span class="kw">in</span> manager.job_set.jobs:</span>
-<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f"  maxGrowth=</span><span class="sc">{</span>job<span class="sc">.</span>parameters[<span class="st">'maxGrowth'</span>]<span class="sc">:&gt;3}</span><span class="ss"> -&gt; hash=</span><span class="sc">{</span>job<span class="sc">.</span>run_hash<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>  maxGrowth= 10 -&gt; hash=cdeb49a9fb7e
-  maxGrowth= 20 -&gt; hash=56a235a13ede
-  maxGrowth= 30 -&gt; hash=722a7e03d3f4
-  maxGrowth= 40 -&gt; hash=78b950899c7a
-  maxGrowth= 50 -&gt; hash=ff883a9408df
-  maxGrowth= 60 -&gt; hash=8e6ca68ea66a
-  maxGrowth= 70 -&gt; hash=cf693cc7582a
-  maxGrowth= 80 -&gt; hash=cefe9e4a6f2d
-  maxGrowth= 90 -&gt; hash=18aa116c5f0e
-  maxGrowth=100 -&gt; hash=57fcc2990d10</code></pre>
-</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.sweep <span class="im">import</span> SweepManager</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Registry path - saved to disk for use in demo_analysis.qmd</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>REGISTRY_PATH <span class="op">=</span> <span class="st">"demo_registry.duckdb"</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Create manager with builder pattern</span></span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> (</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a>    SweepManager.builder(config)</span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>    .with_registry(REGISTRY_PATH, experiment_name<span class="op">=</span><span class="st">"growth_rate_sweep"</span>)</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a>    .with_cli(jar_path<span class="op">=</span>Path(<span class="st">"../jar/joshsim-fat.jar"</span>))</span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a>    .build()</span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 </section>
 <section id="step-3-run-simulations" class="level2">
 <h2 class="anchored" data-anchor-id="step-3-run-simulations">Step 3: Run Simulations</h2>
 <p>The <code>run()</code> method executes all jobs with automatic registry tracking:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb21"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Running 10 experiments (3 replicates each)...</span><span class="ch">\n</span><span class="st">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Running 10 experiments (3 replicates each)...</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb23"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Run all jobs</span></span>
-<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a>results <span class="op">=</span> manager.run()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb9"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Run all jobs</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>results <span class="op">=</span> manager.run()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>Running 10 jobs (30 total replicates)
-[1/10] Running (local): {'maxGrowth': 10}
+[1/10] Running (local): {'maxGrowth': 10, 'seedDensity': 100}
   [OK] Completed successfully
-[2/10] Running (local): {'maxGrowth': 20}
+[2/10] Running (local): {'maxGrowth': 20, 'seedDensity': 100}
   [OK] Completed successfully
-[3/10] Running (local): {'maxGrowth': 30}
+[3/10] Running (local): {'maxGrowth': 30, 'seedDensity': 100}
   [OK] Completed successfully
-[4/10] Running (local): {'maxGrowth': 40}
+[4/10] Running (local): {'maxGrowth': 40, 'seedDensity': 100}
   [OK] Completed successfully
-[5/10] Running (local): {'maxGrowth': 50}
+[5/10] Running (local): {'maxGrowth': 50, 'seedDensity': 100}
   [OK] Completed successfully
-[6/10] Running (local): {'maxGrowth': 60}
+[6/10] Running (local): {'maxGrowth': 60, 'seedDensity': 100}
   [OK] Completed successfully
-[7/10] Running (local): {'maxGrowth': 70}
+[7/10] Running (local): {'maxGrowth': 70, 'seedDensity': 100}
   [OK] Completed successfully
-[8/10] Running (local): {'maxGrowth': 80}
+[8/10] Running (local): {'maxGrowth': 80, 'seedDensity': 100}
   [OK] Completed successfully
-[9/10] Running (local): {'maxGrowth': 90}
+[9/10] Running (local): {'maxGrowth': 90, 'seedDensity': 100}
   [OK] Completed successfully
-[10/10] Running (local): {'maxGrowth': 100}
+[10/10] Running (local): {'maxGrowth': 100, 'seedDensity': 100}
   [OK] Completed successfully
 Completed: 10 succeeded, 0 failed</code></pre>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb25"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"</span><span class="ch">\n</span><span class="ss">Completed: </span><span class="sc">{</span>results<span class="sc">.</span>succeeded<span class="sc">}</span><span class="ss">/</span><span class="sc">{</span><span class="bu">len</span>(results)<span class="sc">}</span><span class="ss"> succeeded"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>
-Completed: 10/10 succeeded</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb27"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> results.failed <span class="op">&gt;</span> <span class="dv">0</span>:</span>
-<span id="cb27-3"><a href="#cb27-3" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f"Failed: </span><span class="sc">{</span>results<span class="sc">.</span>failed<span class="sc">}</span><span class="ss">"</span>)</span>
-<span id="cb27-4"><a href="#cb27-4" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> job, result <span class="kw">in</span> results:</span>
-<span id="cb27-5"><a href="#cb27-5" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="kw">not</span> result.success:</span>
-<span id="cb27-6"><a href="#cb27-6" aria-hidden="true" tabindex="-1"></a>            <span class="bu">print</span>(<span class="ss">f"  maxGrowth=</span><span class="sc">{</span>job<span class="sc">.</span>parameters[<span class="st">'maxGrowth'</span>]<span class="sc">}</span><span class="ss">: </span><span class="sc">{</span>result<span class="sc">.</span>stderr[:<span class="dv">100</span>]<span class="sc">}</span><span class="ss">..."</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 </section>
 <section id="step-4-load-results" class="level2">
 <h2 class="anchored" data-anchor-id="step-4-load-results">Step 4: Load Results</h2>
 <p>The <code>load_results()</code> method automatically discovers export paths from the Josh file, resolves template variables for each job, and loads CSV results:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb28"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Loading CSV exports into registry..."</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Loading CSV exports into registry...</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb30"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a>rows_loaded <span class="op">=</span> manager.load_results()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>manager.load_results()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>Loading patch results from: /tmp/hello_josh_{maxGrowth}_{replicate}.csv
   Loaded 34782 rows from hello_josh_10_0.csv
@@ -377,12 +322,8 @@ Completed: 10/10 succeeded</code></pre>
 Results:
   Jobs in sweep: 10
   Jobs with results loaded: 10
-  Total rows loaded: 1043460</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb32"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"</span><span class="ch">\n</span><span class="ss">Loaded </span><span class="sc">{</span>rows_loaded<span class="sc">:,}</span><span class="ss"> rows"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>
-Loaded 1,043,460 rows</code></pre>
+  Total rows loaded: 1043460
+1043460</code></pre>
 </div>
 </div>
 </section>
@@ -390,9 +331,9 @@ Loaded 1,043,460 rows</code></pre>
 <h2 class="anchored" data-anchor-id="step-5-verify-data-loaded">Step 5: Verify Data Loaded</h2>
 <p>Let’s verify the data is in the registry and ready for analysis:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb34"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get summary of loaded data</span></span>
-<span id="cb34-2"><a href="#cb34-2" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> manager.registry.get_data_summary()</span>
-<span id="cb34-3"><a href="#cb34-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(summary)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb13"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get summary of loaded data</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> manager.registry.get_data_summary()</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(summary)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>Registry Data Summary
 ========================================
@@ -403,20 +344,22 @@ Rows:     1,043,460
 
 Variables: averageAge, averageHeight
 Entity types: patch
-Parameters: maxGrowth
+Parameters: maxGrowth, seedDensity
 Steps: 0 - 10
 Replicates: 0 - 2
 Spatial extent: lon [-115.39, -114.40], lat [33.40, 33.70]</code></pre>
 </div>
 </div>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb36"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Export variables: </span><span class="sc">{</span>manager<span class="sc">.</span>registry<span class="sc">.</span>list_export_variables()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>manager.registry.list_export_variables()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>Export variables: ['averageAge', 'averageHeight']</code></pre>
+<pre><code>['averageAge', 'averageHeight']</code></pre>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb38"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Config parameters: </span><span class="sc">{</span>manager<span class="sc">.</span>registry<span class="sc">.</span>list_config_parameters()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb17"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>manager.registry.list_config_parameters()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>Config parameters: ['maxGrowth']</code></pre>
+<pre><code>['maxGrowth', 'seedDensity']</code></pre>
 </div>
 </div>
 </section>
@@ -431,36 +374,120 @@ Spatial extent: lon [-115.39, -114.40], lat [33.40, 33.70]</code></pre>
 </ul>
 <p>Quick example using <code>manager.query()</code>:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb40"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Query with parameter grouping</span></span>
-<span id="cb40-2"><a href="#cb40-2" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> manager.query(<span class="st">"averageHeight"</span>, group_by<span class="op">=</span><span class="st">"maxGrowth"</span>)</span>
-<span id="cb40-3"><a href="#cb40-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Retrieved </span><span class="sc">{</span><span class="bu">len</span>(df)<span class="sc">}</span><span class="ss"> rows"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Retrieved 110 rows</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb19"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Query with parameter grouping</span></span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> manager.query(<span class="st">"averageHeight"</span>, group_by<span class="op">=</span><span class="st">"maxGrowth"</span>)</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>df.head(<span class="dv">10</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">param_value</th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">mean_value</th>
+<th data-quarto-table-cell-role="th">std_value</th>
+<th data-quarto-table-cell-role="th">n_cells</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>10.0</td>
+<td>0</td>
+<td>4.985592</td>
+<td>0.916868</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>10.0</td>
+<td>1</td>
+<td>9.992988</td>
+<td>1.295249</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>10.0</td>
+<td>2</td>
+<td>14.998024</td>
+<td>1.591674</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>10.0</td>
+<td>3</td>
+<td>19.995482</td>
+<td>1.849681</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>10.0</td>
+<td>4</td>
+<td>24.991823</td>
+<td>2.074878</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>10.0</td>
+<td>5</td>
+<td>29.992699</td>
+<td>2.264158</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>10.0</td>
+<td>6</td>
+<td>34.995377</td>
+<td>2.439542</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>10.0</td>
+<td>7</td>
+<td>40.001904</td>
+<td>2.604242</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>10.0</td>
+<td>8</td>
+<td>45.005914</td>
+<td>2.752203</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>10.0</td>
+<td>9</td>
+<td>50.010752</td>
+<td>2.903562</td>
+<td>9486</td>
+</tr>
+</tbody>
+</table>
+
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb42"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(df.head(<span class="dv">10</span>).to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>param_value  step  mean_value  std_value  n_cells
-         10     0    5.009376   0.917804     9486
-         10     1   10.003440   1.310943     9486
-         10     2   14.995881   1.592931     9486
-         10     3   20.007350   1.852940     9486
-         10     4   24.994360   2.069938     9486
-         10     5   29.993450   2.259884     9486
-         10     6   34.989588   2.456728     9486
-         10     7   39.988188   2.618377     9486
-         10     8   44.990899   2.769564     9486
-         10     9   50.004606   2.913311     9486</code></pre>
 </div>
 </div>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb44"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.diagnostics <span class="im">import</span> SimulationDiagnostics</span>
-<span id="cb44-2"><a href="#cb44-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb44-3"><a href="#cb44-3" aria-hidden="true" tabindex="-1"></a>diag <span class="op">=</span> SimulationDiagnostics(manager.registry)</span>
-<span id="cb44-4"><a href="#cb44-4" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
-<span id="cb44-5"><a href="#cb44-5" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb44-6"><a href="#cb44-6" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb44-7"><a href="#cb44-7" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Tree Height by Growth Rate Parameter"</span>,</span>
-<span id="cb44-8"><a href="#cb44-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb20"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.diagnostics <span class="im">import</span> SimulationDiagnostics</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a>diag <span class="op">=</span> SimulationDiagnostics(manager.registry)</span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
+<span id="cb20-6"><a href="#cb20-6" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
+<span id="cb20-7"><a href="#cb20-7" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Tree Height by Growth Rate Parameter"</span>,</span>
+<span id="cb20-8"><a href="#cb20-8" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-quick-comparison" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -493,19 +520,19 @@ Figure&nbsp;1: Tree height trajectories across maxGrowth values.
 <li><strong>Convenience methods</strong>: <code>run()</code>, <code>load_results()</code>, <code>query()</code> for common operations</li>
 </ul>
 <p><strong>Alternative Creation Methods:</strong></p>
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb45"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb45-1"><a href="#cb45-1" aria-hidden="true" tabindex="-1"></a><span class="co"># From dictionary</span></span>
-<span id="cb45-2"><a href="#cb45-2" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> SweepManager.from_dict(config.to_dict(), registry<span class="op">=</span><span class="st">":memory:"</span>)</span>
-<span id="cb45-3"><a href="#cb45-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb45-4"><a href="#cb45-4" aria-hidden="true" tabindex="-1"></a><span class="co"># From YAML file</span></span>
-<span id="cb45-5"><a href="#cb45-5" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> SweepManager.from_yaml(Path(<span class="st">"experiment.yaml"</span>))</span>
-<span id="cb45-6"><a href="#cb45-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb45-7"><a href="#cb45-7" aria-hidden="true" tabindex="-1"></a><span class="co"># With existing components</span></span>
-<span id="cb45-8"><a href="#cb45-8" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> (</span>
-<span id="cb45-9"><a href="#cb45-9" aria-hidden="true" tabindex="-1"></a>    SweepManager.builder(config)</span>
-<span id="cb45-10"><a href="#cb45-10" aria-hidden="true" tabindex="-1"></a>    .with_registry(existing_registry, session_id<span class="op">=</span><span class="st">"existing-session"</span>)</span>
-<span id="cb45-11"><a href="#cb45-11" aria-hidden="true" tabindex="-1"></a>    .with_cli(existing_cli)</span>
-<span id="cb45-12"><a href="#cb45-12" aria-hidden="true" tabindex="-1"></a>    .build()</span>
-<span id="cb45-13"><a href="#cb45-13" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb21"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="co"># From dictionary</span></span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> SweepManager.from_dict(config.to_dict(), registry<span class="op">=</span><span class="st">":memory:"</span>)</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true" tabindex="-1"></a><span class="co"># From YAML file</span></span>
+<span id="cb21-5"><a href="#cb21-5" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> SweepManager.from_yaml(Path(<span class="st">"experiment.yaml"</span>))</span>
+<span id="cb21-6"><a href="#cb21-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb21-7"><a href="#cb21-7" aria-hidden="true" tabindex="-1"></a><span class="co"># With existing components</span></span>
+<span id="cb21-8"><a href="#cb21-8" aria-hidden="true" tabindex="-1"></a>manager <span class="op">=</span> (</span>
+<span id="cb21-9"><a href="#cb21-9" aria-hidden="true" tabindex="-1"></a>    SweepManager.builder(config)</span>
+<span id="cb21-10"><a href="#cb21-10" aria-hidden="true" tabindex="-1"></a>    .with_registry(existing_registry, session_id<span class="op">=</span><span class="st">"existing-session"</span>)</span>
+<span id="cb21-11"><a href="#cb21-11" aria-hidden="true" tabindex="-1"></a>    .with_cli(existing_cli)</span>
+<span id="cb21-12"><a href="#cb21-12" aria-hidden="true" tabindex="-1"></a>    .build()</span>
+<span id="cb21-13"><a href="#cb21-13" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <p><strong>Related Demos:</strong></p>
 <ul>
 <li><code>demo_manual.qmd</code> - Step-by-step control using individual components</li>
@@ -515,25 +542,18 @@ Figure&nbsp;1: Tree height trajectories across maxGrowth values.
 <section id="cleanup" class="level2">
 <h2 class="anchored" data-anchor-id="cleanup">Cleanup</h2>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb46"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a><span class="co"># SweepManager cleanup (also works as context manager)</span></span>
-<span id="cb46-2"><a href="#cb46-2" aria-hidden="true" tabindex="-1"></a>manager.cleanup()  <span class="co"># Remove temporary config files</span></span>
-<span id="cb46-3"><a href="#cb46-3" aria-hidden="true" tabindex="-1"></a>manager.close()    <span class="co"># Close registry connection</span></span>
-<span id="cb46-4"><a href="#cb46-4" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Cleanup complete. Registry saved to </span><span class="sc">{</span>REGISTRY_PATH<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Cleanup complete. Registry saved to demo_registry.duckdb</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb22"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a><span class="co"># SweepManager cleanup (also works as context manager)</span></span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>manager.cleanup()  <span class="co"># Remove temporary config files</span></span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a>manager.close()    <span class="co"># Close registry connection</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb48"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Run demo_analysis.qmd to explore the results."</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Run demo_analysis.qmd to explore the results.</code></pre>
-</div>
-</div>
+<p>The registry has been saved to <code>demo_registry.duckdb</code>. Run <code>demo_analysis.qmd</code> to explore the results.</p>
 <p><strong>Alternative: Context Manager</strong></p>
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb50"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Automatic cleanup with context manager</span></span>
-<span id="cb50-2"><a href="#cb50-2" aria-hidden="true" tabindex="-1"></a><span class="cf">with</span> SweepManager.from_dict(config.to_dict()) <span class="im">as</span> manager:</span>
-<span id="cb50-3"><a href="#cb50-3" aria-hidden="true" tabindex="-1"></a>    manager.run()</span>
-<span id="cb50-4"><a href="#cb50-4" aria-hidden="true" tabindex="-1"></a>    manager.load_results()</span>
-<span id="cb50-5"><a href="#cb50-5" aria-hidden="true" tabindex="-1"></a>    df <span class="op">=</span> manager.query(<span class="st">"averageHeight"</span>, group_by<span class="op">=</span><span class="st">"maxGrowth"</span>)</span>
-<span id="cb50-6"><a href="#cb50-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Resources automatically cleaned up here</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb23"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Automatic cleanup with context manager</span></span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a><span class="cf">with</span> SweepManager.from_dict(config.to_dict()) <span class="im">as</span> manager:</span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a>    manager.run()</span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a>    manager.load_results()</span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a>    df <span class="op">=</span> manager.query(<span class="st">"averageHeight"</span>, group_by<span class="op">=</span><span class="st">"maxGrowth"</span>)</span>
+<span id="cb23-6"><a href="#cb23-6" aria-hidden="true" tabindex="-1"></a><span class="co"># Resources automatically cleaned up here</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </section>
 
 </main>

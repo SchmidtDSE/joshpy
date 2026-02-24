@@ -80,14 +80,17 @@ config = JobConfig(
     simulation="Main",
     replicates=3,
     sweep=SweepConfig(
-        parameters=[SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES)]
+        parameters=[
+            SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
+            # Constant parameters use single-value lists
+            SweepParameter(name="seedDensity", values=[100]),
+        ]
     ),
 )
-
-print(f"Parameter values: {MAX_GROWTH_VALUES}")
-print(f"Replicates per job: {config.replicates}")
-print(f"Total runs: {len(MAX_GROWTH_VALUES)} x {config.replicates} = {len(MAX_GROWTH_VALUES) * config.replicates}")
 ```
+
+Parameters with single values are held constant across the sweep. Here, 
+`seedDensity=100` is the same for all runs, while `maxGrowth` varies from 10 to 100.
 
 Let's examine the source files. The `.josh` file defines the simulation, and
 the `.jshc.j2` template provides parameterized configuration:
@@ -129,14 +132,6 @@ manager = (
     .with_cli(jar_path=Path("../jar/joshsim-fat.jar"))
     .build()
 )
-
-print(f"Session ID: {manager.session_id}")
-print(f"Jobs: {manager.job_set.total_jobs}")
-print(f"Total replicates: {manager.job_set.total_replicates}")
-
-# Show registered job hashes
-for job in manager.job_set.jobs:
-    print(f"  maxGrowth={job.parameters['maxGrowth']:>3} -> hash={job.run_hash}")
 ```
 
 ## Step 3: Run Simulations
@@ -144,18 +139,8 @@ for job in manager.job_set.jobs:
 The `run()` method executes all jobs with automatic registry tracking:
 
 ```{python}
-print("Running 10 experiments (3 replicates each)...\n")
-
 # Run all jobs
 results = manager.run()
-
-print(f"\nCompleted: {results.succeeded}/{len(results)} succeeded")
-
-if results.failed > 0:
-    print(f"Failed: {results.failed}")
-    for job, result in results:
-        if not result.success:
-            print(f"  maxGrowth={job.parameters['maxGrowth']}: {result.stderr[:100]}...")
 ```
 
 ## Step 4: Load Results
@@ -164,11 +149,7 @@ The `load_results()` method automatically discovers export paths from the Josh
 file, resolves template variables for each job, and loads CSV results:
 
 ```{python}
-print("Loading CSV exports into registry...")
-
-rows_loaded = manager.load_results()
-
-print(f"\nLoaded {rows_loaded:,} rows")
+manager.load_results()
 ```
 
 ## Step 5: Verify Data Loaded
@@ -182,8 +163,11 @@ print(summary)
 ```
 
 ```{python}
-print(f"Export variables: {manager.registry.list_export_variables()}")
-print(f"Config parameters: {manager.registry.list_config_parameters()}")
+manager.registry.list_export_variables()
+```
+
+```{python}
+manager.registry.list_config_parameters()
 ```
 
 ## Next Steps: Analysis
@@ -200,8 +184,7 @@ Quick example using `manager.query()`:
 ```{python}
 # Query with parameter grouping
 df = manager.query("averageHeight", group_by="maxGrowth")
-print(f"Retrieved {len(df)} rows")
-print(df.head(10).to_string(index=False))
+df.head(10)
 ```
 
 ```{python}
@@ -264,9 +247,10 @@ manager = (
 # SweepManager cleanup (also works as context manager)
 manager.cleanup()  # Remove temporary config files
 manager.close()    # Close registry connection
-print(f"Cleanup complete. Registry saved to {REGISTRY_PATH}")
-print("Run demo_analysis.qmd to explore the results.")
 ```
+
+The registry has been saved to `demo_registry.duckdb`. Run `demo_analysis.qmd` to 
+explore the results.
 
 **Alternative: Context Manager**
 

@@ -125,12 +125,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Load registry from disk (created by demo_manual.qmd or demo_sweep_manager.qmd)</span></span>
 <span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>REGISTRY_PATH <span class="op">=</span> <span class="st">"demo_registry.duckdb"</span></span>
-<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>registry <span class="op">=</span> RunRegistry(REGISTRY_PATH)</span>
-<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Loaded registry from </span><span class="sc">{</span>REGISTRY_PATH<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Loaded registry from demo_registry.duckdb</code></pre>
-</div>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>registry <span class="op">=</span> RunRegistry(REGISTRY_PATH)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 </section>
 <section id="part-1-data-discovery" class="level2">
@@ -139,19 +134,19 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="full-summary" class="level3">
 <h3 class="anchored" data-anchor-id="full-summary">Full Summary</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> registry.get_data_summary()</span>
-<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(summary)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>summary <span class="op">=</span> registry.get_data_summary()</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(summary)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
 <pre><code>Registry Data Summary
 ========================================
-Sessions: 2
+Sessions: 1
 Configs:  10
-Runs:     20
-Rows:     2,086,920
+Runs:     10
+Rows:     1,043,460
 
 Variables: averageAge, averageHeight
 Entity types: patch
-Parameters: maxGrowth
+Parameters: maxGrowth, seedDensity
 Steps: 0 - 10
 Replicates: 0 - 2
 Spatial extent: lon [-115.39, -114.40], lat [33.40, 33.70]</code></pre>
@@ -161,31 +156,34 @@ Spatial extent: lon [-115.39, -114.40], lat [33.40, 33.70]</code></pre>
 <section id="specific-queries" class="level3">
 <h3 class="anchored" data-anchor-id="specific-queries">Specific Queries</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="co"># What variables were exported from the simulation?</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Export variables: </span><span class="sc">{</span>registry<span class="sc">.</span>list_export_variables()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="co"># What variables were exported from the simulation?</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>registry.list_export_variables()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>Export variables: ['averageAge', 'averageHeight']</code></pre>
+<pre><code>['averageAge', 'averageHeight']</code></pre>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="co"># What parameters were swept?</span></span>
-<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Config parameters: </span><span class="sc">{</span>registry<span class="sc">.</span>list_config_parameters()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Config parameters: ['maxGrowth']</code></pre>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb9"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="co"># What entity types are in the data?</span></span>
-<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Entity types: </span><span class="sc">{</span>registry<span class="sc">.</span>list_entity_types()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="co"># What parameters were swept?</span></span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>registry.list_config_parameters()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>Entity types: ['patch']</code></pre>
+<pre><code>['maxGrowth', 'seedDensity']</code></pre>
+</div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="co"># What entity types are in the data?</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>registry.list_entity_types()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>['patch']</code></pre>
 </div>
 </div>
 </section>
 <section id="variable-columns" class="level3">
 <h3 class="anchored" data-anchor-id="variable-columns">Variable Columns</h3>
-<p>Variables are stored as real database columns (not JSON), making queries fast and natural:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="co"># List all variable columns in the cell_data table</span></span>
-<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Variable columns: </span><span class="sc">{</span>registry<span class="sc">.</span>list_variable_columns()<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb10"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="co"># List all variable columns in the cell_data table</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>registry.list_variable_columns()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>Variable columns: ['averageAge', 'averageHeight']</code></pre>
+<pre><code>['averageAge', 'averageHeight']</code></pre>
 </div>
 </div>
 </section>
@@ -194,20 +192,20 @@ Spatial extent: lon [-115.39, -114.40], lat [33.40, 33.70]</code></pre>
 <h2 class="anchored" data-anchor-id="part-2-diagnostic-plots-simulationdiagnostics">Part 2: Diagnostic Plots (SimulationDiagnostics)</h2>
 <p>The <code>SimulationDiagnostics</code> class provides quick matplotlib-based visualizations for simulation sanity checks. These are designed for rapid exploration, not publication.</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb13"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.diagnostics <span class="im">import</span> SimulationDiagnostics</span>
-<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>diag <span class="op">=</span> SimulationDiagnostics(registry)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb12"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.diagnostics <span class="im">import</span> SimulationDiagnostics</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>diag <span class="op">=</span> SimulationDiagnostics(registry)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 <section id="time-series" class="level3">
 <h3 class="anchored" data-anchor-id="time-series">Time Series</h3>
 <p>Plot how a variable evolves over simulation steps. By default, spatially aggregates across patches and shows uncertainty bands across replicates.</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb14"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Filter by parameter value</span></span>
-<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>diag.plot_timeseries(</span>
-<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>    maxGrowth<span class="op">=</span><span class="dv">50</span>,</span>
-<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Average Tree Height Over Time (maxGrowth=50)"</span>,</span>
-<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb13"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Filter by parameter value</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>diag.plot_timeseries(</span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    maxGrowth<span class="op">=</span><span class="dv">50</span>,</span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Average Tree Height Over Time (maxGrowth=50)"</span>,</span>
+<span id="cb13-6"><a href="#cb13-6" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-timeseries-single" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -223,10 +221,10 @@ Figure&nbsp;1: Tree height over time for maxGrowth=50, with replicate uncertaint
 </div>
 <section id="aggregation-options" class="level4">
 <h4 class="anchored" data-anchor-id="aggregation-options">Aggregation Options</h4>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Sum across patches</span></span>
-<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>diag.plot_timeseries(<span class="st">"averageHeight"</span>, maxGrowth<span class="op">=</span><span class="dv">50</span>, aggregate<span class="op">=</span><span class="st">"sum"</span>, title<span class="op">=</span><span class="st">"Sum"</span>)</span>
-<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Min across patches</span></span>
-<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>diag.plot_timeseries(<span class="st">"averageHeight"</span>, maxGrowth<span class="op">=</span><span class="dv">50</span>, aggregate<span class="op">=</span><span class="st">"min"</span>, title<span class="op">=</span><span class="st">"Min"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb14"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Sum across patches</span></span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>diag.plot_timeseries(<span class="st">"averageHeight"</span>, maxGrowth<span class="op">=</span><span class="dv">50</span>, aggregate<span class="op">=</span><span class="st">"sum"</span>, title<span class="op">=</span><span class="st">"Sum"</span>)</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a><span class="co"># Min across patches</span></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>diag.plot_timeseries(<span class="st">"averageHeight"</span>, maxGrowth<span class="op">=</span><span class="dv">50</span>, aggregate<span class="op">=</span><span class="st">"min"</span>, title<span class="op">=</span><span class="st">"Min"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell quarto-layout-panel" data-layout-ncol="2">
 <div class="quarto-layout-row">
 <div class="cell-output-display quarto-layout-cell" style="flex-basis: 50.0%;justify-content: flex-start;">
@@ -261,11 +259,11 @@ Figure&nbsp;3: Different spatial aggregation methods.
 <h3 class="anchored" data-anchor-id="parameter-comparison">Parameter Comparison</h3>
 <p>Compare a variable across different parameter values - ideal for sweep results.</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb16"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
-<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Tree Height by Growth Rate Parameter"</span>,</span>
-<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Tree Height by Growth Rate Parameter"</span>,</span>
+<span id="cb15-5"><a href="#cb15-5" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-comparison-lines" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -282,12 +280,12 @@ Figure&nbsp;4: Tree height trajectories across all maxGrowth values.
 <section id="bar-chart-at-specific-step" class="level4">
 <h4 class="anchored" data-anchor-id="bar-chart-at-specific-step">Bar Chart at Specific Step</h4>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb17"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
-<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
-<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Final Tree Height vs Growth Rate"</span>,</span>
-<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb16"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a>diag.plot_comparison(</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Final Tree Height vs Growth Rate"</span>,</span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-comparison-bar" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -307,26 +305,15 @@ Figure&nbsp;5: Final tree height (step 10) for each maxGrowth value.
 <h3 class="anchored" data-anchor-id="spatial-snapshot">Spatial Snapshot</h3>
 <p>Scatter plot colored by value at a specific timestep:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb18"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get a run hash for the maxGrowth=50 runs</span></span>
-<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a><span class="co"># Find a session that has configs (in case of multiple sessions)</span></span>
-<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>sessions <span class="op">=</span> registry.list_sessions()</span>
-<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> session <span class="kw">in</span> sessions:</span>
-<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>    configs <span class="op">=</span> registry.get_configs_for_session(session.session_id)</span>
-<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> configs:</span>
-<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a>        <span class="cf">break</span></span>
-<span id="cb18-8"><a href="#cb18-8" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb18-9"><a href="#cb18-9" aria-hidden="true" tabindex="-1"></a><span class="co"># Parameters may be stored as strings or ints, so compare flexibly</span></span>
-<span id="cb18-10"><a href="#cb18-10" aria-hidden="true" tabindex="-1"></a>run_hash_50 <span class="op">=</span> <span class="bu">next</span>(</span>
-<span id="cb18-11"><a href="#cb18-11" aria-hidden="true" tabindex="-1"></a>    c.run_hash <span class="cf">for</span> c <span class="kw">in</span> configs </span>
-<span id="cb18-12"><a href="#cb18-12" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> <span class="bu">str</span>(c.parameters.get(<span class="st">"maxGrowth"</span>)) <span class="op">==</span> <span class="st">"50"</span></span>
-<span id="cb18-13"><a href="#cb18-13" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb18-14"><a href="#cb18-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb18-15"><a href="#cb18-15" aria-hidden="true" tabindex="-1"></a>diag.plot_spatial(</span>
-<span id="cb18-16"><a href="#cb18-16" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb18-17"><a href="#cb18-17" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
-<span id="cb18-18"><a href="#cb18-18" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
-<span id="cb18-19"><a href="#cb18-19" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Spatial Distribution (maxGrowth=50, step=10)"</span>,</span>
-<span id="cb18-20"><a href="#cb18-20" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb17"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get a run hash for maxGrowth=50</span></span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>run_hash_50 <span class="op">=</span> registry.get_runs_by_parameters(maxGrowth<span class="op">=</span><span class="dv">50</span>)[<span class="dv">0</span>][<span class="st">"run_hash"</span>]</span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>diag.plot_spatial(</span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
+<span id="cb17-7"><a href="#cb17-7" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
+<span id="cb17-8"><a href="#cb17-8" aria-hidden="true" tabindex="-1"></a>    title<span class="op">=</span><span class="st">"Spatial Distribution (maxGrowth=50, step=10)"</span>,</span>
+<span id="cb17-9"><a href="#cb17-9" aria-hidden="true" tabindex="-1"></a>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-spatial" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -345,20 +332,16 @@ Figure&nbsp;6: Spatial distribution of tree height at step 10 for maxGrowth=50.
 <h3 class="anchored" data-anchor-id="saving-figures">Saving Figures</h3>
 <p>All plot methods return a matplotlib Figure that can be saved:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb19"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>fig <span class="op">=</span> diag.plot_comparison(</span>
-<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
-<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>    show<span class="op">=</span><span class="va">False</span>,  <span class="co"># Don't display inline</span></span>
-<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>fig.savefig(<span class="st">"/tmp/comparison_plot.png"</span>, dpi<span class="op">=</span><span class="dv">150</span>, bbox_inches<span class="op">=</span><span class="st">"tight"</span>)</span>
-<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Saved to /tmp/comparison_plot.png"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Saved to /tmp/comparison_plot.png</code></pre>
-</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb18"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>fig <span class="op">=</span> diag.plot_comparison(</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>    <span class="st">"averageHeight"</span>,</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>    group_by<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>    show<span class="op">=</span><span class="va">False</span>,  <span class="co"># Don't display inline</span></span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a>fig.savefig(<span class="st">"/tmp/comparison_plot.png"</span>, dpi<span class="op">=</span><span class="dv">150</span>, bbox_inches<span class="op">=</span><span class="st">"tight"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div>
 <figure class="figure">
-<p><img src="demo_analysis_files/figure-html/unnamed-chunk-6-13.png" class="img-fluid figure-img" width="960"></p>
+<p><img src="demo_analysis_files/figure-html/unnamed-chunk-8-13.png" class="img-fluid figure-img" width="960"></p>
 </figure>
 </div>
 </div>
@@ -369,40 +352,158 @@ Figure&nbsp;6: Spatial distribution of tree height at step 10 for maxGrowth=50.
 <h2 class="anchored" data-anchor-id="part-3-custom-queries-diagnosticqueries">Part 3: Custom Queries (DiagnosticQueries)</h2>
 <p>For more control than <code>SimulationDiagnostics</code>, use <code>DiagnosticQueries</code> directly. These return pandas DataFrames for further processing.</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb21"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.cell_data <span class="im">import</span> DiagnosticQueries</span>
-<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a>queries <span class="op">=</span> DiagnosticQueries(registry)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb19"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> joshpy.cell_data <span class="im">import</span> DiagnosticQueries</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>queries <span class="op">=</span> DiagnosticQueries(registry)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 <section id="parameter-comparison-1" class="level3">
 <h3 class="anchored" data-anchor-id="parameter-comparison-1">Parameter Comparison</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb22"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_parameter_comparison(</span>
-<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
-<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a>    param_name<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
-<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb22-5"><a href="#cb22-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb22-6"><a href="#cb22-6" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Shape: </span><span class="sc">{</span>df<span class="sc">.</span>shape<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Shape: (110, 5)</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb20"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb20-1"><a href="#cb20-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_parameter_comparison(</span>
+<span id="cb20-2"><a href="#cb20-2" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
+<span id="cb20-3"><a href="#cb20-3" aria-hidden="true" tabindex="-1"></a>    param_name<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
+<span id="cb20-4"><a href="#cb20-4" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb20-5"><a href="#cb20-5" aria-hidden="true" tabindex="-1"></a>df.head(<span class="dv">15</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">param_value</th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">mean_value</th>
+<th data-quarto-table-cell-role="th">std_value</th>
+<th data-quarto-table-cell-role="th">n_cells</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>10.0</td>
+<td>0</td>
+<td>4.985592</td>
+<td>0.916868</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>10.0</td>
+<td>1</td>
+<td>9.992988</td>
+<td>1.295249</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>10.0</td>
+<td>2</td>
+<td>14.998024</td>
+<td>1.591674</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>10.0</td>
+<td>3</td>
+<td>19.995482</td>
+<td>1.849681</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>10.0</td>
+<td>4</td>
+<td>24.991823</td>
+<td>2.074878</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>10.0</td>
+<td>5</td>
+<td>29.992699</td>
+<td>2.264158</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>10.0</td>
+<td>6</td>
+<td>34.995377</td>
+<td>2.439542</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>10.0</td>
+<td>7</td>
+<td>40.001904</td>
+<td>2.604242</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>10.0</td>
+<td>8</td>
+<td>45.005914</td>
+<td>2.752203</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>10.0</td>
+<td>9</td>
+<td>50.010752</td>
+<td>2.903562</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">10</th>
+<td>10.0</td>
+<td>10</td>
+<td>55.012946</td>
+<td>3.048222</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">11</th>
+<td>20.0</td>
+<td>0</td>
+<td>9.973008</td>
+<td>1.825833</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">12</th>
+<td>20.0</td>
+<td>1</td>
+<td>19.958581</td>
+<td>2.630574</td>
+<td>9486</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">13</th>
+<td>20.0</td>
+<td>2</td>
+<td>29.914964</td>
+<td>3.203781</td>
+<td>9486</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">14</th>
+<td>20.0</td>
+<td>3</td>
+<td>39.893251</td>
+<td>3.668306</td>
+<td>9486</td>
+</tr>
+</tbody>
+</table>
+
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb24"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(df.head(<span class="dv">15</span>).to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>param_value  step  mean_value  std_value  n_cells
-         10     0    5.004015   0.916471    18972
-         10     1    9.999000   1.301983    18972
-         10     2   14.996997   1.586380    18972
-         10     3   20.012189   1.841309    18972
-         10     4   25.008809   2.057512    18972
-         10     5   30.004986   2.242819    18972
-         10     6   34.999683   2.436901    18972
-         10     7   40.010019   2.600161    18972
-         10     8   45.018812   2.754736    18972
-         10     9   50.027033   2.905722    18972
-         10    10   55.031537   3.035368    18972
-        100     0   50.068536   9.194580    18972
-        100     1  100.130654  12.985607    18972
-        100     2  150.170065  15.916049    18972
-        100     3  200.080298  18.381359    18972</code></pre>
 </div>
 </div>
 </section>
@@ -410,24 +511,122 @@ Figure&nbsp;6: Spatial distribution of tree height at step 10 for maxGrowth=50.
 <h3 class="anchored" data-anchor-id="replicate-uncertainty">Replicate Uncertainty</h3>
 <p>Get statistics across replicates for a specific run:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb26"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_replicate_uncertainty(</span>
-<span id="cb26-2"><a href="#cb26-2" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
-<span id="cb26-3"><a href="#cb26-3" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
-<span id="cb26-4"><a href="#cb26-4" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb26-5"><a href="#cb26-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb26-6"><a href="#cb26-6" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(df.head(<span class="dv">10</span>).to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code> step       mean      std     ci_low    ci_high  n_replicates
-    0  25.005708 0.024643  24.977822  25.033594             3
-    1  49.960193 0.043711  49.910729  50.009657             3
-    2  74.920443 0.047253  74.866971  74.973915             3
-    3  99.954487 0.044449  99.904188 100.004785             3
-    4 124.936705 0.059421 124.869464 125.003946             3
-    5 149.951804 0.074628 149.867354 150.036254             3
-    6 175.011358 0.104038 174.893629 175.129088             3
-    7 199.994556 0.171968 199.799956 200.189156             3
-    8 225.020564 0.149997 224.850826 225.190302             3
-    9 250.003318 0.144579 249.839712 250.166925             3</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb21"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_replicate_uncertainty(</span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb21-5"><a href="#cb21-5" aria-hidden="true" tabindex="-1"></a>df.head(<span class="dv">10</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">mean</th>
+<th data-quarto-table-cell-role="th">std</th>
+<th data-quarto-table-cell-role="th">ci_low</th>
+<th data-quarto-table-cell-role="th">ci_high</th>
+<th data-quarto-table-cell-role="th">n_replicates</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>0</td>
+<td>24.987137</td>
+<td>0.116160</td>
+<td>24.855693</td>
+<td>25.118582</td>
+<td>3</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>1</td>
+<td>49.961423</td>
+<td>0.119102</td>
+<td>49.826649</td>
+<td>50.096197</td>
+<td>3</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>2</td>
+<td>74.921864</td>
+<td>0.114632</td>
+<td>74.792147</td>
+<td>75.051580</td>
+<td>3</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>3</td>
+<td>100.002835</td>
+<td>0.160782</td>
+<td>99.820896</td>
+<td>100.184773</td>
+<td>3</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>4</td>
+<td>125.073777</td>
+<td>0.134196</td>
+<td>124.921923</td>
+<td>125.225631</td>
+<td>3</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>5</td>
+<td>150.043610</td>
+<td>0.276521</td>
+<td>149.730703</td>
+<td>150.356518</td>
+<td>3</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>6</td>
+<td>175.055694</td>
+<td>0.309715</td>
+<td>174.705225</td>
+<td>175.406163</td>
+<td>3</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>7</td>
+<td>200.060930</td>
+<td>0.302578</td>
+<td>199.718537</td>
+<td>200.403322</td>
+<td>3</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>8</td>
+<td>225.086460</td>
+<td>0.257702</td>
+<td>224.794848</td>
+<td>225.378071</td>
+<td>3</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>9</td>
+<td>250.093739</td>
+<td>0.340376</td>
+<td>249.708574</td>
+<td>250.478904</td>
+<td>3</td>
+</tr>
+</tbody>
+</table>
+
+</div>
 </div>
 </div>
 </section>
@@ -435,29 +634,90 @@ Figure&nbsp;6: Spatial distribution of tree height at step 10 for maxGrowth=50.
 <h3 class="anchored" data-anchor-id="spatial-snapshot-1">Spatial Snapshot</h3>
 <p>Get all spatial data for a given timestep:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb28"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_spatial_snapshot(</span>
-<span id="cb28-2"><a href="#cb28-2" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
-<span id="cb28-3"><a href="#cb28-3" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
-<span id="cb28-4"><a href="#cb28-4" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
-<span id="cb28-5"><a href="#cb28-5" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb28-6"><a href="#cb28-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb28-7"><a href="#cb28-7" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Shape: </span><span class="sc">{</span>df<span class="sc">.</span>shape<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Shape: (6324, 3)</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb22"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_spatial_snapshot(</span>
+<span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
+<span id="cb22-3"><a href="#cb22-3" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
+<span id="cb22-4"><a href="#cb22-4" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
+<span id="cb22-5"><a href="#cb22-5" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb22-6"><a href="#cb22-6" aria-hidden="true" tabindex="-1"></a>df.head(<span class="dv">10</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">longitude</th>
+<th data-quarto-table-cell-role="th">latitude</th>
+<th data-quarto-table-cell-role="th">value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>-114.670342</td>
+<td>33.515639</td>
+<td>285.867148</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>-114.940586</td>
+<td>33.434700</td>
+<td>250.227716</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>-114.573054</td>
+<td>33.605571</td>
+<td>270.741851</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>-114.616293</td>
+<td>33.686510</td>
+<td>261.999639</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>-114.746010</td>
+<td>33.470673</td>
+<td>290.455425</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>-114.616293</td>
+<td>33.542619</td>
+<td>290.053090</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>-114.605483</td>
+<td>33.497653</td>
+<td>266.357287</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>-114.648722</td>
+<td>33.524632</td>
+<td>240.455123</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>-114.486576</td>
+<td>33.578592</td>
+<td>291.656788</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>-114.918966</td>
+<td>33.524632</td>
+<td>307.008989</td>
+</tr>
+</tbody>
+</table>
+
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb30"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(df.head(<span class="dv">10</span>).to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>  longitude  latitude      value
--114.616293 33.686510 272.208856
--114.605483 33.497653 279.164949
--114.551435 33.488659 276.475050
--115.275688 33.515639 272.135284
--114.529815 33.578592 277.962930
--115.200020 33.596578 260.679492
--114.940586 33.434700 258.435147
--114.670342 33.515639 271.886648
--115.243259 33.524632 303.859780
--115.135161 33.398727 276.939079</code></pre>
 </div>
 </div>
 </section>
@@ -465,226 +725,810 @@ Figure&nbsp;6: Spatial distribution of tree height at step 10 for maxGrowth=50.
 <h3 class="anchored" data-anchor-id="get-all-variables-at-once">Get All Variables at Once</h3>
 <p>Retrieve all exported variables for a specific step:</p>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb32"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_all_variables_at_step(</span>
-<span id="cb32-2"><a href="#cb32-2" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
-<span id="cb32-3"><a href="#cb32-3" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
-<span id="cb32-4"><a href="#cb32-4" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb32-5"><a href="#cb32-5" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb32-6"><a href="#cb32-6" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Columns: </span><span class="sc">{</span><span class="bu">list</span>(df.columns)<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Columns: ['longitude', 'latitude', 'position_x', 'position_y', 'averageAge', 'averageHeight']</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb23"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb23-1"><a href="#cb23-1" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_all_variables_at_step(</span>
+<span id="cb23-2"><a href="#cb23-2" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
+<span id="cb23-3"><a href="#cb23-3" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
+<span id="cb23-4"><a href="#cb23-4" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a>df.head(<span class="dv">5</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">longitude</th>
+<th data-quarto-table-cell-role="th">latitude</th>
+<th data-quarto-table-cell-role="th">position_x</th>
+<th data-quarto-table-cell-role="th">position_y</th>
+<th data-quarto-table-cell-role="th">averageAge</th>
+<th data-quarto-table-cell-role="th">averageHeight</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>-114.670342</td>
+<td>33.515639</td>
+<td>67.5</td>
+<td>20.5</td>
+<td>11.0</td>
+<td>285.867148</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>-114.940586</td>
+<td>33.434700</td>
+<td>42.5</td>
+<td>29.5</td>
+<td>11.0</td>
+<td>250.227716</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>-114.573054</td>
+<td>33.605571</td>
+<td>76.5</td>
+<td>10.5</td>
+<td>11.0</td>
+<td>270.741851</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>-114.616293</td>
+<td>33.686510</td>
+<td>72.5</td>
+<td>1.5</td>
+<td>11.0</td>
+<td>261.999639</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>-114.746010</td>
+<td>33.470673</td>
+<td>60.5</td>
+<td>25.5</td>
+<td>11.0</td>
+<td>290.455425</td>
+</tr>
+</tbody>
+</table>
+
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb34"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(df.head(<span class="dv">5</span>).to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>  longitude  latitude  position_x  position_y  averageAge  averageHeight
--114.616293 33.686510        72.5         1.5        11.0     272.208856
--114.605483 33.497653        73.5        22.5        11.0     279.164949
--114.551435 33.488659        78.5        23.5        11.0     276.475050
--115.275688 33.515639        11.5        20.5        11.0     272.135284
--114.529815 33.578592        80.5        13.5        11.0     277.962930</code></pre>
 </div>
 </div>
 </section>
 </section>
 <section id="part-4-direct-sql-queries" class="level2">
 <h2 class="anchored" data-anchor-id="part-4-direct-sql-queries">Part 4: Direct SQL Queries</h2>
-<p>For full flexibility, query DuckDB directly. Export variables are stored as typed columns, making queries clean and fast.</p>
+<p>For full flexibility, query DuckDB directly.</p>
 <section id="simple-aggregations" class="level3">
 <h3 class="anchored" data-anchor-id="simple-aggregations">Simple Aggregations</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb36"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Mean, min, max across all cells per step</span></span>
-<span id="cb36-2"><a href="#cb36-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
-<span id="cb36-3"><a href="#cb36-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
-<span id="cb36-4"><a href="#cb36-4" aria-hidden="true" tabindex="-1"></a><span class="st">        step,</span></span>
-<span id="cb36-5"><a href="#cb36-5" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(averageHeight) as mean_height,</span></span>
-<span id="cb36-6"><a href="#cb36-6" aria-hidden="true" tabindex="-1"></a><span class="st">        MIN(averageHeight) as min_height,</span></span>
-<span id="cb36-7"><a href="#cb36-7" aria-hidden="true" tabindex="-1"></a><span class="st">        MAX(averageHeight) as max_height,</span></span>
-<span id="cb36-8"><a href="#cb36-8" aria-hidden="true" tabindex="-1"></a><span class="st">        STDDEV(averageHeight) as std_height,</span></span>
-<span id="cb36-9"><a href="#cb36-9" aria-hidden="true" tabindex="-1"></a><span class="st">        COUNT(*) as n_cells</span></span>
-<span id="cb36-10"><a href="#cb36-10" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
-<span id="cb36-11"><a href="#cb36-11" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
-<span id="cb36-12"><a href="#cb36-12" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
-<span id="cb36-13"><a href="#cb36-13" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
-<span id="cb36-14"><a href="#cb36-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb36-15"><a href="#cb36-15" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(result.df().to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code> step  mean_height  min_height  max_height  std_height  n_cells
-    0    27.521723    1.895352   84.526339   15.462339   189720
-    1    55.022456    4.909197  144.243124   29.850781   189720
-    2    82.528858    8.869090  208.892709   44.236965   189720
-    3   110.022796   11.935371  268.336400   58.584615   189720
-    4   137.509008   17.200418  328.980845   72.940196   189720
-    5   164.998622   20.291520  387.311238   87.291424   189720
-    6   192.504661   24.173376  443.443573  101.644558   189720
-    7   220.021874   27.705414  496.579758  116.017922   189720
-    8   247.526098   33.563277  554.421690  130.362970   189720
-    9   275.014027   36.710445  606.842930  144.718369   189720
-   10   302.504664   42.582639  667.195002  159.078395   189720</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb24"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Mean, min, max across all cells per step</span></span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true" tabindex="-1"></a><span class="st">        step,</span></span>
+<span id="cb24-5"><a href="#cb24-5" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(averageHeight) as mean_height,</span></span>
+<span id="cb24-6"><a href="#cb24-6" aria-hidden="true" tabindex="-1"></a><span class="st">        MIN(averageHeight) as min_height,</span></span>
+<span id="cb24-7"><a href="#cb24-7" aria-hidden="true" tabindex="-1"></a><span class="st">        MAX(averageHeight) as max_height,</span></span>
+<span id="cb24-8"><a href="#cb24-8" aria-hidden="true" tabindex="-1"></a><span class="st">        STDDEV(averageHeight) as std_height,</span></span>
+<span id="cb24-9"><a href="#cb24-9" aria-hidden="true" tabindex="-1"></a><span class="st">        COUNT(*) as n_cells</span></span>
+<span id="cb24-10"><a href="#cb24-10" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
+<span id="cb24-11"><a href="#cb24-11" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
+<span id="cb24-12"><a href="#cb24-12" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
+<span id="cb24-13"><a href="#cb24-13" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
+<span id="cb24-14"><a href="#cb24-14" aria-hidden="true" tabindex="-1"></a>result.df()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">mean_height</th>
+<th data-quarto-table-cell-role="th">min_height</th>
+<th data-quarto-table-cell-role="th">max_height</th>
+<th data-quarto-table-cell-role="th">std_height</th>
+<th data-quarto-table-cell-role="th">n_cells</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>0</td>
+<td>27.498219</td>
+<td>1.742091</td>
+<td>79.833337</td>
+<td>15.458657</td>
+<td>94860</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>1</td>
+<td>55.001141</td>
+<td>5.847044</td>
+<td>153.317391</td>
+<td>29.833821</td>
+<td>94860</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>2</td>
+<td>82.495479</td>
+<td>9.303530</td>
+<td>216.835021</td>
+<td>44.214606</td>
+<td>94860</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>3</td>
+<td>109.987677</td>
+<td>13.241369</td>
+<td>266.317071</td>
+<td>58.588280</td>
+<td>94860</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>4</td>
+<td>137.496345</td>
+<td>17.423860</td>
+<td>331.206587</td>
+<td>72.939624</td>
+<td>94860</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>5</td>
+<td>164.978456</td>
+<td>22.180849</td>
+<td>382.337688</td>
+<td>87.305097</td>
+<td>94860</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>6</td>
+<td>192.472503</td>
+<td>25.658508</td>
+<td>442.514266</td>
+<td>101.661092</td>
+<td>94860</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>7</td>
+<td>219.958529</td>
+<td>31.130329</td>
+<td>495.688919</td>
+<td>116.002482</td>
+<td>94860</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>8</td>
+<td>247.458007</td>
+<td>35.800588</td>
+<td>545.651852</td>
+<td>130.372669</td>
+<td>94860</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>9</td>
+<td>274.912546</td>
+<td>40.539135</td>
+<td>601.433259</td>
+<td>144.691901</td>
+<td>94860</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">10</th>
+<td>10</td>
+<td>302.420462</td>
+<td>44.108972</td>
+<td>658.114954</td>
+<td>159.059075</td>
+<td>94860</td>
+</tr>
+</tbody>
+</table>
+
+</div>
 </div>
 </div>
 </section>
 <section id="filtering-on-variable-values" class="level3">
 <h3 class="anchored" data-anchor-id="filtering-on-variable-values">Filtering on Variable Values</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb38"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Find cells where trees grew above a threshold</span></span>
-<span id="cb38-2"><a href="#cb38-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
-<span id="cb38-3"><a href="#cb38-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
-<span id="cb38-4"><a href="#cb38-4" aria-hidden="true" tabindex="-1"></a><span class="st">        step,</span></span>
-<span id="cb38-5"><a href="#cb38-5" aria-hidden="true" tabindex="-1"></a><span class="st">        COUNT(*) as n_cells_above_50,</span></span>
-<span id="cb38-6"><a href="#cb38-6" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(averageHeight) as mean_height_of_those</span></span>
-<span id="cb38-7"><a href="#cb38-7" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
-<span id="cb38-8"><a href="#cb38-8" aria-hidden="true" tabindex="-1"></a><span class="st">    WHERE averageHeight &gt; 50</span></span>
-<span id="cb38-9"><a href="#cb38-9" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
-<span id="cb38-10"><a href="#cb38-10" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
-<span id="cb38-11"><a href="#cb38-11" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
-<span id="cb38-12"><a href="#cb38-12" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb38-13"><a href="#cb38-13" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(result.df().to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code> step  n_cells_above_50  mean_height_of_those
-    0             16635             56.143647
-    1            102565             78.349584
-    2            134607            104.377845
-    3            151175            130.355631
-    4            161267            156.080659
-    5            170523            180.171286
-    6            170748            210.005214
-    7            170748            240.023191
-    8            171412            269.178711
-    9            180304            286.885679
-   10            188773            303.777592</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb25"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Find cells where trees grew above a threshold</span></span>
+<span id="cb25-2"><a href="#cb25-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
+<span id="cb25-3"><a href="#cb25-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
+<span id="cb25-4"><a href="#cb25-4" aria-hidden="true" tabindex="-1"></a><span class="st">        step,</span></span>
+<span id="cb25-5"><a href="#cb25-5" aria-hidden="true" tabindex="-1"></a><span class="st">        COUNT(*) as n_cells_above_50,</span></span>
+<span id="cb25-6"><a href="#cb25-6" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(averageHeight) as mean_height_of_those</span></span>
+<span id="cb25-7"><a href="#cb25-7" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
+<span id="cb25-8"><a href="#cb25-8" aria-hidden="true" tabindex="-1"></a><span class="st">    WHERE averageHeight &gt; 50</span></span>
+<span id="cb25-9"><a href="#cb25-9" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
+<span id="cb25-10"><a href="#cb25-10" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
+<span id="cb25-11"><a href="#cb25-11" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
+<span id="cb25-12"><a href="#cb25-12" aria-hidden="true" tabindex="-1"></a>result.df()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">n_cells_above_50</th>
+<th data-quarto-table-cell-role="th">mean_height_of_those</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>0</td>
+<td>8354</td>
+<td>56.162238</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>1</td>
+<td>51280</td>
+<td>78.321814</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>2</td>
+<td>67327</td>
+<td>104.309068</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>3</td>
+<td>75603</td>
+<td>130.308763</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>4</td>
+<td>80507</td>
+<td>156.239478</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>5</td>
+<td>85238</td>
+<td>180.186523</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>6</td>
+<td>85374</td>
+<td>209.969962</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>7</td>
+<td>85375</td>
+<td>239.951495</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>8</td>
+<td>85707</td>
+<td>269.102242</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>9</td>
+<td>90109</td>
+<td>286.892974</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">10</th>
+<td>10</td>
+<td>94386</td>
+<td>303.694174</td>
+</tr>
+</tbody>
+</table>
+
+</div>
 </div>
 </div>
 </section>
 <section id="percentile-analysis" class="level3">
 <h3 class="anchored" data-anchor-id="percentile-analysis">Percentile Analysis</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb40"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get distribution statistics per step</span></span>
-<span id="cb40-2"><a href="#cb40-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
-<span id="cb40-3"><a href="#cb40-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
-<span id="cb40-4"><a href="#cb40-4" aria-hidden="true" tabindex="-1"></a><span class="st">        step,</span></span>
-<span id="cb40-5"><a href="#cb40-5" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.25) as p25,</span></span>
-<span id="cb40-6"><a href="#cb40-6" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.50) as median,</span></span>
-<span id="cb40-7"><a href="#cb40-7" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.75) as p75,</span></span>
-<span id="cb40-8"><a href="#cb40-8" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.95) as p95</span></span>
-<span id="cb40-9"><a href="#cb40-9" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
-<span id="cb40-10"><a href="#cb40-10" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
-<span id="cb40-11"><a href="#cb40-11" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
-<span id="cb40-12"><a href="#cb40-12" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
-<span id="cb40-13"><a href="#cb40-13" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb40-14"><a href="#cb40-14" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(result.df().to_string(index<span class="op">=</span><span class="va">False</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code> step        p25     median        p75        p95
-    0  14.507946  26.578944  39.174741  54.067879
-    1  29.802358  53.991116  78.958196 104.157891
-    2  44.838123  81.411634 118.896837 154.146193
-    3  59.895704 108.860149 158.936583 203.799516
-    4  74.974667 136.158854 198.565803 253.619540
-    5  90.173248 163.400376 238.593287 303.069217
-    6 105.210964 190.792594 278.608857 352.857305
-    7 119.743327 218.267118 318.661434 402.386471
-    8 135.309556 245.191764 357.778915 451.978636
-    9 150.131145 271.818777 398.955534 501.462434
-   10 164.827604 300.236493 439.049585 551.492651</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb26"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get distribution statistics per step</span></span>
+<span id="cb26-2"><a href="#cb26-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
+<span id="cb26-3"><a href="#cb26-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
+<span id="cb26-4"><a href="#cb26-4" aria-hidden="true" tabindex="-1"></a><span class="st">        step,</span></span>
+<span id="cb26-5"><a href="#cb26-5" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.25) as p25,</span></span>
+<span id="cb26-6"><a href="#cb26-6" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.50) as median,</span></span>
+<span id="cb26-7"><a href="#cb26-7" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.75) as p75,</span></span>
+<span id="cb26-8"><a href="#cb26-8" aria-hidden="true" tabindex="-1"></a><span class="st">        APPROX_QUANTILE(averageHeight, 0.95) as p95</span></span>
+<span id="cb26-9"><a href="#cb26-9" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
+<span id="cb26-10"><a href="#cb26-10" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
+<span id="cb26-11"><a href="#cb26-11" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
+<span id="cb26-12"><a href="#cb26-12" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
+<span id="cb26-13"><a href="#cb26-13" aria-hidden="true" tabindex="-1"></a>result.df()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">p25</th>
+<th data-quarto-table-cell-role="th">median</th>
+<th data-quarto-table-cell-role="th">p75</th>
+<th data-quarto-table-cell-role="th">p95</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>0</td>
+<td>14.521352</td>
+<td>26.498282</td>
+<td>39.044853</td>
+<td>54.141045</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>1</td>
+<td>29.845078</td>
+<td>54.184792</td>
+<td>78.616196</td>
+<td>104.095711</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>2</td>
+<td>45.101176</td>
+<td>81.671419</td>
+<td>118.584697</td>
+<td>154.037254</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>3</td>
+<td>60.135226</td>
+<td>109.192233</td>
+<td>158.171450</td>
+<td>203.726931</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>4</td>
+<td>75.061258</td>
+<td>136.904656</td>
+<td>198.211455</td>
+<td>253.148649</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>5</td>
+<td>90.149561</td>
+<td>164.119449</td>
+<td>237.792066</td>
+<td>302.964635</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>6</td>
+<td>105.062050</td>
+<td>191.439414</td>
+<td>277.964791</td>
+<td>352.877183</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>7</td>
+<td>120.029624</td>
+<td>218.586041</td>
+<td>318.864665</td>
+<td>402.126256</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>8</td>
+<td>134.906554</td>
+<td>246.090952</td>
+<td>357.093775</td>
+<td>451.829441</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>9</td>
+<td>150.188662</td>
+<td>274.461495</td>
+<td>397.071419</td>
+<td>501.764907</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">10</th>
+<td>10</td>
+<td>164.952573</td>
+<td>300.619865</td>
+<td>438.198991</td>
+<td>551.595167</td>
+</tr>
+</tbody>
+</table>
+
+</div>
+</div>
+</div>
+</section>
+<section id="joining-with-config-parameters" class="level3">
+<h3 class="anchored" data-anchor-id="joining-with-config-parameters">Joining with Config Parameters</h3>
+<p>Config parameters are stored as typed columns in the <code>config_parameters</code> table:</p>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb27"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Compare results across different parameter values</span></span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
+<span id="cb27-3"><a href="#cb27-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
+<span id="cb27-4"><a href="#cb27-4" aria-hidden="true" tabindex="-1"></a><span class="st">        cp.maxGrowth,</span></span>
+<span id="cb27-5"><a href="#cb27-5" aria-hidden="true" tabindex="-1"></a><span class="st">        cd.step,</span></span>
+<span id="cb27-6"><a href="#cb27-6" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(cd.averageHeight) as mean_height,</span></span>
+<span id="cb27-7"><a href="#cb27-7" aria-hidden="true" tabindex="-1"></a><span class="st">        STDDEV(cd.averageHeight) as std_height</span></span>
+<span id="cb27-8"><a href="#cb27-8" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data cd</span></span>
+<span id="cb27-9"><a href="#cb27-9" aria-hidden="true" tabindex="-1"></a><span class="st">    JOIN config_parameters cp ON cd.run_hash = cp.run_hash</span></span>
+<span id="cb27-10"><a href="#cb27-10" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY cp.maxGrowth, cd.step</span></span>
+<span id="cb27-11"><a href="#cb27-11" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY cp.maxGrowth, cd.step</span></span>
+<span id="cb27-12"><a href="#cb27-12" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
+<span id="cb27-13"><a href="#cb27-13" aria-hidden="true" tabindex="-1"></a>result.df().head(<span class="dv">15</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">maxGrowth</th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">mean_height</th>
+<th data-quarto-table-cell-role="th">std_height</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>10.0</td>
+<td>0</td>
+<td>4.985592</td>
+<td>0.916868</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>10.0</td>
+<td>1</td>
+<td>9.992988</td>
+<td>1.295249</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>10.0</td>
+<td>2</td>
+<td>14.998024</td>
+<td>1.591674</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>10.0</td>
+<td>3</td>
+<td>19.995482</td>
+<td>1.849681</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>10.0</td>
+<td>4</td>
+<td>24.991823</td>
+<td>2.074878</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>10.0</td>
+<td>5</td>
+<td>29.992699</td>
+<td>2.264158</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>10.0</td>
+<td>6</td>
+<td>34.995377</td>
+<td>2.439542</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>10.0</td>
+<td>7</td>
+<td>40.001904</td>
+<td>2.604242</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>10.0</td>
+<td>8</td>
+<td>45.005914</td>
+<td>2.752203</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>10.0</td>
+<td>9</td>
+<td>50.010752</td>
+<td>2.903562</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">10</th>
+<td>10.0</td>
+<td>10</td>
+<td>55.012946</td>
+<td>3.048222</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">11</th>
+<td>20.0</td>
+<td>0</td>
+<td>9.973008</td>
+<td>1.825833</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">12</th>
+<td>20.0</td>
+<td>1</td>
+<td>19.958581</td>
+<td>2.630574</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">13</th>
+<td>20.0</td>
+<td>2</td>
+<td>29.914964</td>
+<td>3.203781</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">14</th>
+<td>20.0</td>
+<td>3</td>
+<td>39.893251</td>
+<td>3.668306</td>
+</tr>
+</tbody>
+</table>
+
+</div>
+</div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb28"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Filter by parameter value (maxGrowth &gt; 50)</span></span>
+<span id="cb28-2"><a href="#cb28-2" aria-hidden="true" tabindex="-1"></a>result <span class="op">=</span> registry.query(<span class="st">"""</span></span>
+<span id="cb28-3"><a href="#cb28-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
+<span id="cb28-4"><a href="#cb28-4" aria-hidden="true" tabindex="-1"></a><span class="st">        cd.step,</span></span>
+<span id="cb28-5"><a href="#cb28-5" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(cd.averageHeight) as mean_height</span></span>
+<span id="cb28-6"><a href="#cb28-6" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data cd</span></span>
+<span id="cb28-7"><a href="#cb28-7" aria-hidden="true" tabindex="-1"></a><span class="st">    JOIN config_parameters cp ON cd.run_hash = cp.run_hash</span></span>
+<span id="cb28-8"><a href="#cb28-8" aria-hidden="true" tabindex="-1"></a><span class="st">    WHERE cp.maxGrowth &gt; 50</span></span>
+<span id="cb28-9"><a href="#cb28-9" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY cd.step</span></span>
+<span id="cb28-10"><a href="#cb28-10" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY cd.step</span></span>
+<span id="cb28-11"><a href="#cb28-11" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>)</span>
+<span id="cb28-12"><a href="#cb28-12" aria-hidden="true" tabindex="-1"></a>result.df()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+
+
+<table class="dataframe caption-top table table-sm table-striped small" data-border="1">
+<thead>
+<tr class="header">
+<th data-quarto-table-cell-role="th"></th>
+<th data-quarto-table-cell-role="th">step</th>
+<th data-quarto-table-cell-role="th">mean_height</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">0</th>
+<td>0</td>
+<td>40.007384</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">1</th>
+<td>1</td>
+<td>80.013401</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">2</th>
+<td>2</td>
+<td>120.020435</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">3</th>
+<td>3</td>
+<td>160.016355</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">4</th>
+<td>4</td>
+<td>200.016374</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">5</th>
+<td>5</td>
+<td>239.997393</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">6</th>
+<td>6</td>
+<td>279.992010</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">7</th>
+<td>7</td>
+<td>319.946856</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">8</th>
+<td>8</td>
+<td>359.946741</td>
+</tr>
+<tr class="even">
+<th data-quarto-table-cell-role="th">9</th>
+<td>9</td>
+<td>399.849147</td>
+</tr>
+<tr class="odd">
+<th data-quarto-table-cell-role="th">10</th>
+<td>10</td>
+<td>439.850903</td>
+</tr>
+</tbody>
+</table>
+
+</div>
 </div>
 </div>
 </section>
 <section id="export-to-file" class="level3">
 <h3 class="anchored" data-anchor-id="export-to-file">Export to File</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb42"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Export query results to CSV</span></span>
-<span id="cb42-2"><a href="#cb42-2" aria-hidden="true" tabindex="-1"></a>registry.query(<span class="st">"""</span></span>
-<span id="cb42-3"><a href="#cb42-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT step, AVG(averageHeight) as mean_height</span></span>
-<span id="cb42-4"><a href="#cb42-4" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
-<span id="cb42-5"><a href="#cb42-5" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
-<span id="cb42-6"><a href="#cb42-6" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
-<span id="cb42-7"><a href="#cb42-7" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>).df().to_csv(<span class="st">"/tmp/height_by_step.csv"</span>, index<span class="op">=</span><span class="va">False</span>)</span>
-<span id="cb42-8"><a href="#cb42-8" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb42-9"><a href="#cb42-9" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Exported to /tmp/height_by_step.csv"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Exported to /tmp/height_by_step.csv</code></pre>
-</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb29"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb29-1"><a href="#cb29-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Export query results to CSV</span></span>
+<span id="cb29-2"><a href="#cb29-2" aria-hidden="true" tabindex="-1"></a>registry.query(<span class="st">"""</span></span>
+<span id="cb29-3"><a href="#cb29-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT step, AVG(averageHeight) as mean_height</span></span>
+<span id="cb29-4"><a href="#cb29-4" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data</span></span>
+<span id="cb29-5"><a href="#cb29-5" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY step</span></span>
+<span id="cb29-6"><a href="#cb29-6" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY step</span></span>
+<span id="cb29-7"><a href="#cb29-7" aria-hidden="true" tabindex="-1"></a><span class="st">"""</span>).df().to_csv(<span class="st">"/tmp/height_by_step.csv"</span>, index<span class="op">=</span><span class="va">False</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 </section>
 </section>
 <section id="part-5-rggplot2-visualization" class="level2">
 <h2 class="anchored" data-anchor-id="part-5-rggplot2-visualization">Part 5: R/ggplot2 Visualization</h2>
-<p>For publication-quality figures, R can query the DuckDB registry directly - no CSV export needed.</p>
-<section id="connect-r-to-duckdb" class="level3">
-<h3 class="anchored" data-anchor-id="connect-r-to-duckdb">Connect R to DuckDB</h3>
+<p>For publication-quality figures, there are <strong>three routes</strong> to get data from joshpy into R:</p>
+<ol type="1">
+<li><strong>CSV Export</strong> - Simple, always works</li>
+<li><strong>Direct DuckDB</strong> - Custom SQL queries from R, no Python needed</li>
+<li><strong><code>py$df</code> via reticulate</strong> - Zero-copy Python/R interop</li>
+</ol>
+<section id="route-1-export-to-csv-simple-always-works" class="level3">
+<h3 class="anchored" data-anchor-id="route-1-export-to-csv-simple-always-works">Route 1: Export to CSV (Simple, Always Works)</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb44"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Connect directly to the same registry file</span></span>
-<span id="cb44-2"><a href="#cb44-2" aria-hidden="true" tabindex="-1"></a>con <span class="ot">&lt;-</span> <span class="fu">dbConnect</span>(<span class="fu">duckdb</span>(), <span class="st">"demo_registry.duckdb"</span>, <span class="at">read_only =</span> <span class="cn">TRUE</span>)</span>
-<span id="cb44-3"><a href="#cb44-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb44-4"><a href="#cb44-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Install JSON extension for parameter extraction</span></span>
-<span id="cb44-5"><a href="#cb44-5" aria-hidden="true" tabindex="-1"></a><span class="fu">dbExecute</span>(con, <span class="st">"INSTALL json; LOAD json;"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>[1] 0</code></pre>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb30"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Python exports to CSV</span></span>
+<span id="cb30-2"><a href="#cb30-2" aria-hidden="true" tabindex="-1"></a>csv_df <span class="op">=</span> queries.get_parameter_comparison(</span>
+<span id="cb30-3"><a href="#cb30-3" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
+<span id="cb30-4"><a href="#cb30-4" aria-hidden="true" tabindex="-1"></a>    param_name<span class="op">=</span><span class="st">"maxGrowth"</span>,</span>
+<span id="cb30-5"><a href="#cb30-5" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb30-6"><a href="#cb30-6" aria-hidden="true" tabindex="-1"></a>csv_df.to_csv(<span class="st">"/tmp/sweep_results.csv"</span>, index<span class="op">=</span><span class="va">False</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb46"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Query directly from R - same SQL you'd use in Python</span></span>
-<span id="cb46-2"><a href="#cb46-2" aria-hidden="true" tabindex="-1"></a>df <span class="ot">&lt;-</span> <span class="fu">dbGetQuery</span>(con, <span class="st">"</span></span>
-<span id="cb46-3"><a href="#cb46-3" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
-<span id="cb46-4"><a href="#cb46-4" aria-hidden="true" tabindex="-1"></a><span class="st">        json_extract_string(j.parameters, '$.maxGrowth') as param_value,</span></span>
-<span id="cb46-5"><a href="#cb46-5" aria-hidden="true" tabindex="-1"></a><span class="st">        c.step,</span></span>
-<span id="cb46-6"><a href="#cb46-6" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(c.averageHeight) as mean_value,</span></span>
-<span id="cb46-7"><a href="#cb46-7" aria-hidden="true" tabindex="-1"></a><span class="st">        STDDEV(c.averageHeight) as std_value,</span></span>
-<span id="cb46-8"><a href="#cb46-8" aria-hidden="true" tabindex="-1"></a><span class="st">        COUNT(*) as n_cells</span></span>
-<span id="cb46-9"><a href="#cb46-9" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data c</span></span>
-<span id="cb46-10"><a href="#cb46-10" aria-hidden="true" tabindex="-1"></a><span class="st">    JOIN job_configs j ON c.run_hash = j.run_hash</span></span>
-<span id="cb46-11"><a href="#cb46-11" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY json_extract_string(j.parameters, '$.maxGrowth'), c.step</span></span>
-<span id="cb46-12"><a href="#cb46-12" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY CAST(json_extract_string(j.parameters, '$.maxGrowth') AS INTEGER), c.step</span></span>
-<span id="cb46-13"><a href="#cb46-13" aria-hidden="true" tabindex="-1"></a><span class="st">"</span>)</span>
-<span id="cb46-14"><a href="#cb46-14" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb46-15"><a href="#cb46-15" aria-hidden="true" tabindex="-1"></a><span class="co"># Convert param_value to numeric for proper ordering</span></span>
-<span id="cb46-16"><a href="#cb46-16" aria-hidden="true" tabindex="-1"></a>df<span class="sc">$</span>param_value <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(df<span class="sc">$</span>param_value)</span>
-<span id="cb46-17"><a href="#cb46-17" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb46-18"><a href="#cb46-18" aria-hidden="true" tabindex="-1"></a><span class="fu">print</span>(<span class="fu">paste</span>(<span class="st">"Loaded"</span>, <span class="fu">nrow</span>(df), <span class="st">"rows directly from DuckDB"</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb31"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb31-1"><a href="#cb31-1" aria-hidden="true" tabindex="-1"></a><span class="co"># R reads CSV</span></span>
+<span id="cb31-2"><a href="#cb31-2" aria-hidden="true" tabindex="-1"></a>df_csv <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="st">"/tmp/sweep_results.csv"</span>)</span>
+<span id="cb31-3"><a href="#cb31-3" aria-hidden="true" tabindex="-1"></a>df_csv<span class="sc">$</span>param_value <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(df_csv<span class="sc">$</span>param_value)</span>
+<span id="cb31-4"><a href="#cb31-4" aria-hidden="true" tabindex="-1"></a><span class="fu">head</span>(df_csv, <span class="dv">5</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>[1] "Loaded 110 rows directly from DuckDB"</code></pre>
+<pre><code>  param_value step mean_value std_value n_cells
+1          10    0   4.985592 0.9168679    9486
+2          10    1   9.992988 1.2952494    9486
+3          10    2  14.998024 1.5916744    9486
+4          10    3  19.995482 1.8496809    9486
+5          10    4  24.991823 2.0748781    9486</code></pre>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb48"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb48-1"><a href="#cb48-1" aria-hidden="true" tabindex="-1"></a><span class="fu">head</span>(df, <span class="dv">10</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p><strong>Pros</strong>: Always works, simple, portable<br>
+<strong>Cons</strong>: File I/O overhead, temp file management</p>
+</section>
+<section id="route-2-direct-duckdb-from-r-custom-queries" class="level3">
+<h3 class="anchored" data-anchor-id="route-2-direct-duckdb-from-r-custom-queries">Route 2: Direct DuckDB from R (Custom Queries)</h3>
+<p>R can query DuckDB directly with full SQL flexibility:</p>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb33"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(DBI)</span>
+<span id="cb33-2"><a href="#cb33-2" aria-hidden="true" tabindex="-1"></a><span class="fu">library</span>(duckdb)</span>
+<span id="cb33-3"><a href="#cb33-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb33-4"><a href="#cb33-4" aria-hidden="true" tabindex="-1"></a>con <span class="ot">&lt;-</span> <span class="fu">dbConnect</span>(<span class="fu">duckdb</span>(), <span class="st">"demo_registry.duckdb"</span>, <span class="at">read_only =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb33-5"><a href="#cb33-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb33-6"><a href="#cb33-6" aria-hidden="true" tabindex="-1"></a>df_duckdb <span class="ot">&lt;-</span> <span class="fu">dbGetQuery</span>(con, <span class="st">"</span></span>
+<span id="cb33-7"><a href="#cb33-7" aria-hidden="true" tabindex="-1"></a><span class="st">    SELECT </span></span>
+<span id="cb33-8"><a href="#cb33-8" aria-hidden="true" tabindex="-1"></a><span class="st">        cp.maxGrowth as param_value,</span></span>
+<span id="cb33-9"><a href="#cb33-9" aria-hidden="true" tabindex="-1"></a><span class="st">        cd.step,</span></span>
+<span id="cb33-10"><a href="#cb33-10" aria-hidden="true" tabindex="-1"></a><span class="st">        AVG(cd.averageHeight) as mean_value,</span></span>
+<span id="cb33-11"><a href="#cb33-11" aria-hidden="true" tabindex="-1"></a><span class="st">        STDDEV(cd.averageHeight) as std_value</span></span>
+<span id="cb33-12"><a href="#cb33-12" aria-hidden="true" tabindex="-1"></a><span class="st">    FROM cell_data cd</span></span>
+<span id="cb33-13"><a href="#cb33-13" aria-hidden="true" tabindex="-1"></a><span class="st">    JOIN config_parameters cp ON cd.run_hash = cp.run_hash</span></span>
+<span id="cb33-14"><a href="#cb33-14" aria-hidden="true" tabindex="-1"></a><span class="st">    GROUP BY cp.maxGrowth, cd.step</span></span>
+<span id="cb33-15"><a href="#cb33-15" aria-hidden="true" tabindex="-1"></a><span class="st">    ORDER BY cp.maxGrowth, cd.step</span></span>
+<span id="cb33-16"><a href="#cb33-16" aria-hidden="true" tabindex="-1"></a><span class="st">"</span>)</span>
+<span id="cb33-17"><a href="#cb33-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb33-18"><a href="#cb33-18" aria-hidden="true" tabindex="-1"></a><span class="fu">dbDisconnect</span>(con, <span class="at">shutdown =</span> <span class="cn">TRUE</span>)</span>
+<span id="cb33-19"><a href="#cb33-19" aria-hidden="true" tabindex="-1"></a><span class="fu">head</span>(df_duckdb, <span class="dv">10</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stdout">
-<pre><code>   param_value step mean_value std_value n_cells
-1           10    0   5.004015 0.9164712   18972
-2           10    1   9.999000 1.3019827   18972
-3           10    2  14.996997 1.5863798   18972
-4           10    3  20.012189 1.8413092   18972
-5           10    4  25.008809 2.0575122   18972
-6           10    5  30.004986 2.2428191   18972
-7           10    6  34.999683 2.4369012   18972
-8           10    7  40.010019 2.6001609   18972
-9           10    8  45.018812 2.7547358   18972
-10          10    9  50.027033 2.9057216   18972</code></pre>
+<pre><code>   param_value step mean_value std_value
+1           10    0   4.985592 0.9168679
+2           10    1   9.992988 1.2952494
+3           10    2  14.998024 1.5916744
+4           10    3  19.995482 1.8496809
+5           10    4  24.991823 2.0748781
+6           10    5  29.992699 2.2641579
+7           10    6  34.995377 2.4395419
+8           10    7  40.001904 2.6042419
+9           10    8  45.005914 2.7522030
+10          10    9  50.010752 2.9035623</code></pre>
 </div>
+</div>
+<p><strong>Pros</strong>: Full SQL flexibility, no Python needed for custom queries<br>
+<strong>Cons</strong>: Requires <code>r-duckdb</code> package (linux-64 only in pixi)</p>
+</section>
+<section id="route-3-pydf-via-reticulate-zero-copy" class="level3">
+<h3 class="anchored" data-anchor-id="route-3-pydf-via-reticulate-zero-copy">Route 3: <code>py$df</code> via reticulate (Zero-Copy)</h3>
+<p>In theory, you can access Python DataFrames directly via <code>py$df</code>:</p>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb35"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb35-1"><a href="#cb35-1" aria-hidden="true" tabindex="-1"></a><span class="co"># This should work:</span></span>
+<span id="cb35-2"><a href="#cb35-2" aria-hidden="true" tabindex="-1"></a><span class="co"># df &lt;- reticulate::py_to_r(py$sweep_df)</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>We’re working on this - for now, Routes 1 and 2 are recommended.</p>
+</section>
+<section id="plotting-with-ggplot2" class="level3">
+<h3 class="anchored" data-anchor-id="plotting-with-ggplot2">Plotting with ggplot2</h3>
+<p>The following examples use <code>df_duckdb</code> from Route 2 (direct DuckDB query). We assign it to <code>df</code> for cleaner ggplot code:</p>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb36"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Use the DuckDB query result for plotting</span></span>
+<span id="cb36-2"><a href="#cb36-2" aria-hidden="true" tabindex="-1"></a>df <span class="ot">&lt;-</span> df_duckdb</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 </section>
 <section id="time-series-with-uncertainty-ribbon" class="level3">
 <h3 class="anchored" data-anchor-id="time-series-with-uncertainty-ribbon">Time Series with Uncertainty Ribbon</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb50"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb50-1"><a href="#cb50-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">nrow</span>(df) <span class="sc">&gt;</span> <span class="dv">0</span>) {</span>
-<span id="cb50-2"><a href="#cb50-2" aria-hidden="true" tabindex="-1"></a>  p <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(df, <span class="fu">aes</span>(<span class="at">x =</span> step, <span class="at">y =</span> mean_value, </span>
-<span id="cb50-3"><a href="#cb50-3" aria-hidden="true" tabindex="-1"></a>                       <span class="at">color =</span> <span class="fu">factor</span>(param_value), </span>
-<span id="cb50-4"><a href="#cb50-4" aria-hidden="true" tabindex="-1"></a>                       <span class="at">fill =</span> <span class="fu">factor</span>(param_value))) <span class="sc">+</span></span>
-<span id="cb50-5"><a href="#cb50-5" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_ribbon</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, </span>
-<span id="cb50-6"><a href="#cb50-6" aria-hidden="true" tabindex="-1"></a>                    <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value), </span>
-<span id="cb50-7"><a href="#cb50-7" aria-hidden="true" tabindex="-1"></a>                <span class="at">alpha =</span> <span class="fl">0.2</span>, <span class="at">color =</span> <span class="cn">NA</span>) <span class="sc">+</span></span>
-<span id="cb50-8"><a href="#cb50-8" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_line</span>(<span class="at">linewidth =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
-<span id="cb50-9"><a href="#cb50-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_point</span>(<span class="at">size =</span> <span class="dv">2</span>) <span class="sc">+</span></span>
-<span id="cb50-10"><a href="#cb50-10" aria-hidden="true" tabindex="-1"></a>    <span class="fu">labs</span>(</span>
-<span id="cb50-11"><a href="#cb50-11" aria-hidden="true" tabindex="-1"></a>      <span class="at">x =</span> <span class="st">"Simulation Step"</span>,</span>
-<span id="cb50-12"><a href="#cb50-12" aria-hidden="true" tabindex="-1"></a>      <span class="at">y =</span> <span class="st">"Average Tree Height (meters)"</span>,</span>
-<span id="cb50-13"><a href="#cb50-13" aria-hidden="true" tabindex="-1"></a>      <span class="at">title =</span> <span class="st">"Tree Growth Over Time by maxGrowth Parameter"</span>,</span>
-<span id="cb50-14"><a href="#cb50-14" aria-hidden="true" tabindex="-1"></a>      <span class="at">color =</span> <span class="st">"maxGrowth"</span>,</span>
-<span id="cb50-15"><a href="#cb50-15" aria-hidden="true" tabindex="-1"></a>      <span class="at">fill =</span> <span class="st">"maxGrowth"</span></span>
-<span id="cb50-16"><a href="#cb50-16" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">+</span></span>
-<span id="cb50-17"><a href="#cb50-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
-<span id="cb50-18"><a href="#cb50-18" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(</span>
-<span id="cb50-19"><a href="#cb50-19" aria-hidden="true" tabindex="-1"></a>      <span class="at">legend.position =</span> <span class="st">"right"</span>,</span>
-<span id="cb50-20"><a href="#cb50-20" aria-hidden="true" tabindex="-1"></a>      <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>()</span>
-<span id="cb50-21"><a href="#cb50-21" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb50-22"><a href="#cb50-22" aria-hidden="true" tabindex="-1"></a>  <span class="fu">print</span>(p)</span>
-<span id="cb50-23"><a href="#cb50-23" aria-hidden="true" tabindex="-1"></a>} <span class="cf">else</span> {</span>
-<span id="cb50-24"><a href="#cb50-24" aria-hidden="true" tabindex="-1"></a>  <span class="fu">cat</span>(<span class="st">"No data to plot."</span>)</span>
-<span id="cb50-25"><a href="#cb50-25" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb37"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb37-1"><a href="#cb37-1" aria-hidden="true" tabindex="-1"></a><span class="fu">ggplot</span>(df, <span class="fu">aes</span>(<span class="at">x =</span> step, <span class="at">y =</span> mean_value, </span>
+<span id="cb37-2"><a href="#cb37-2" aria-hidden="true" tabindex="-1"></a>                     <span class="at">color =</span> <span class="fu">factor</span>(param_value), </span>
+<span id="cb37-3"><a href="#cb37-3" aria-hidden="true" tabindex="-1"></a>                     <span class="at">fill =</span> <span class="fu">factor</span>(param_value))) <span class="sc">+</span></span>
+<span id="cb37-4"><a href="#cb37-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_ribbon</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, </span>
+<span id="cb37-5"><a href="#cb37-5" aria-hidden="true" tabindex="-1"></a>                  <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value), </span>
+<span id="cb37-6"><a href="#cb37-6" aria-hidden="true" tabindex="-1"></a>              <span class="at">alpha =</span> <span class="fl">0.2</span>, <span class="at">color =</span> <span class="cn">NA</span>) <span class="sc">+</span></span>
+<span id="cb37-7"><a href="#cb37-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="at">linewidth =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
+<span id="cb37-8"><a href="#cb37-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_point</span>(<span class="at">size =</span> <span class="dv">2</span>) <span class="sc">+</span></span>
+<span id="cb37-9"><a href="#cb37-9" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
+<span id="cb37-10"><a href="#cb37-10" aria-hidden="true" tabindex="-1"></a>    <span class="at">x =</span> <span class="st">"Simulation Step"</span>,</span>
+<span id="cb37-11"><a href="#cb37-11" aria-hidden="true" tabindex="-1"></a>    <span class="at">y =</span> <span class="st">"Average Tree Height (meters)"</span>,</span>
+<span id="cb37-12"><a href="#cb37-12" aria-hidden="true" tabindex="-1"></a>    <span class="at">title =</span> <span class="st">"Tree Growth Over Time by maxGrowth Parameter"</span>,</span>
+<span id="cb37-13"><a href="#cb37-13" aria-hidden="true" tabindex="-1"></a>    <span class="at">color =</span> <span class="st">"maxGrowth"</span>,</span>
+<span id="cb37-14"><a href="#cb37-14" aria-hidden="true" tabindex="-1"></a>    <span class="at">fill =</span> <span class="st">"maxGrowth"</span></span>
+<span id="cb37-15"><a href="#cb37-15" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb37-16"><a href="#cb37-16" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
+<span id="cb37-17"><a href="#cb37-17" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
+<span id="cb37-18"><a href="#cb37-18" aria-hidden="true" tabindex="-1"></a>    <span class="at">legend.position =</span> <span class="st">"right"</span>,</span>
+<span id="cb37-19"><a href="#cb37-19" aria-hidden="true" tabindex="-1"></a>    <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>()</span>
+<span id="cb37-20"><a href="#cb37-20" aria-hidden="true" tabindex="-1"></a>  )</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-r-timeseries" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -702,35 +1546,23 @@ Figure&nbsp;7: Tree height trajectories with uncertainty ribbons (ggplot2).
 <section id="bar-chart-with-error-bars" class="level3">
 <h3 class="anchored" data-anchor-id="bar-chart-with-error-bars">Bar Chart with Error Bars</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb51"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb51-1"><a href="#cb51-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">nrow</span>(df) <span class="sc">&gt;</span> <span class="dv">0</span>) {</span>
-<span id="cb51-2"><a href="#cb51-2" aria-hidden="true" tabindex="-1"></a>  final_df <span class="ot">&lt;-</span> df <span class="sc">|&gt;</span></span>
-<span id="cb51-3"><a href="#cb51-3" aria-hidden="true" tabindex="-1"></a>    dplyr<span class="sc">::</span><span class="fu">filter</span>(step <span class="sc">==</span> <span class="fu">max</span>(step))</span>
-<span id="cb51-4"><a href="#cb51-4" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb51-5"><a href="#cb51-5" aria-hidden="true" tabindex="-1"></a>  p <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(final_df, <span class="fu">aes</span>(<span class="at">x =</span> param_value, <span class="at">y =</span> mean_value)) <span class="sc">+</span></span>
-<span id="cb51-6"><a href="#cb51-6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_col</span>(<span class="at">fill =</span> <span class="st">"steelblue"</span>, <span class="at">alpha =</span> <span class="fl">0.7</span>) <span class="sc">+</span></span>
-<span id="cb51-7"><a href="#cb51-7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_errorbar</span>(</span>
-<span id="cb51-8"><a href="#cb51-8" aria-hidden="true" tabindex="-1"></a>      <span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value),</span>
-<span id="cb51-9"><a href="#cb51-9" aria-hidden="true" tabindex="-1"></a>      <span class="at">width =</span> <span class="dv">3</span>,</span>
-<span id="cb51-10"><a href="#cb51-10" aria-hidden="true" tabindex="-1"></a>      <span class="at">linewidth =</span> <span class="fl">0.6</span></span>
-<span id="cb51-11"><a href="#cb51-11" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">+</span></span>
-<span id="cb51-12"><a href="#cb51-12" aria-hidden="true" tabindex="-1"></a>    <span class="fu">labs</span>(</span>
-<span id="cb51-13"><a href="#cb51-13" aria-hidden="true" tabindex="-1"></a>      <span class="at">x =</span> <span class="st">"maxGrowth (meters/step)"</span>,</span>
-<span id="cb51-14"><a href="#cb51-14" aria-hidden="true" tabindex="-1"></a>      <span class="at">y =</span> <span class="st">"Final Average Height (meters)"</span>,</span>
-<span id="cb51-15"><a href="#cb51-15" aria-hidden="true" tabindex="-1"></a>      <span class="at">title =</span> <span class="st">"Final Tree Height vs Growth Rate"</span></span>
-<span id="cb51-16"><a href="#cb51-16" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">+</span></span>
-<span id="cb51-17"><a href="#cb51-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
-<span id="cb51-18"><a href="#cb51-18" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(<span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>())</span>
-<span id="cb51-19"><a href="#cb51-19" aria-hidden="true" tabindex="-1"></a>  <span class="fu">print</span>(p)</span>
-<span id="cb51-20"><a href="#cb51-20" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb51-21"><a href="#cb51-21" aria-hidden="true" tabindex="-1"></a>  r <span class="ot">&lt;-</span> <span class="fu">cor</span>(final_df<span class="sc">$</span>param_value, final_df<span class="sc">$</span>mean_value)</span>
-<span id="cb51-22"><a href="#cb51-22" aria-hidden="true" tabindex="-1"></a>  <span class="fu">cat</span>(<span class="fu">sprintf</span>(<span class="st">"</span><span class="sc">\n</span><span class="st">Correlation between maxGrowth and final height: r = %.4f</span><span class="sc">\n</span><span class="st">"</span>, r))</span>
-<span id="cb51-23"><a href="#cb51-23" aria-hidden="true" tabindex="-1"></a>} <span class="cf">else</span> {</span>
-<span id="cb51-24"><a href="#cb51-24" aria-hidden="true" tabindex="-1"></a>  <span class="fu">cat</span>(<span class="st">"No data to plot."</span>)</span>
-<span id="cb51-25"><a href="#cb51-25" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>
-Correlation between maxGrowth and final height: r = 1.0000</code></pre>
-</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb38"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb38-1"><a href="#cb38-1" aria-hidden="true" tabindex="-1"></a>final_df <span class="ot">&lt;-</span> df <span class="sc">|&gt;</span></span>
+<span id="cb38-2"><a href="#cb38-2" aria-hidden="true" tabindex="-1"></a>  dplyr<span class="sc">::</span><span class="fu">filter</span>(step <span class="sc">==</span> <span class="fu">max</span>(step))</span>
+<span id="cb38-3"><a href="#cb38-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb38-4"><a href="#cb38-4" aria-hidden="true" tabindex="-1"></a><span class="fu">ggplot</span>(final_df, <span class="fu">aes</span>(<span class="at">x =</span> param_value, <span class="at">y =</span> mean_value)) <span class="sc">+</span></span>
+<span id="cb38-5"><a href="#cb38-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_col</span>(<span class="at">fill =</span> <span class="st">"steelblue"</span>, <span class="at">alpha =</span> <span class="fl">0.7</span>) <span class="sc">+</span></span>
+<span id="cb38-6"><a href="#cb38-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_errorbar</span>(</span>
+<span id="cb38-7"><a href="#cb38-7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value),</span>
+<span id="cb38-8"><a href="#cb38-8" aria-hidden="true" tabindex="-1"></a>    <span class="at">width =</span> <span class="dv">3</span>,</span>
+<span id="cb38-9"><a href="#cb38-9" aria-hidden="true" tabindex="-1"></a>    <span class="at">linewidth =</span> <span class="fl">0.6</span></span>
+<span id="cb38-10"><a href="#cb38-10" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb38-11"><a href="#cb38-11" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
+<span id="cb38-12"><a href="#cb38-12" aria-hidden="true" tabindex="-1"></a>    <span class="at">x =</span> <span class="st">"maxGrowth (meters/step)"</span>,</span>
+<span id="cb38-13"><a href="#cb38-13" aria-hidden="true" tabindex="-1"></a>    <span class="at">y =</span> <span class="st">"Final Average Height (meters)"</span>,</span>
+<span id="cb38-14"><a href="#cb38-14" aria-hidden="true" tabindex="-1"></a>    <span class="at">title =</span> <span class="st">"Final Tree Height vs Growth Rate"</span></span>
+<span id="cb38-15"><a href="#cb38-15" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb38-16"><a href="#cb38-16" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
+<span id="cb38-17"><a href="#cb38-17" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(<span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>())</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-r-barchart" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -748,28 +1580,23 @@ Figure&nbsp;8: Final tree height vs growth rate parameter with error bars.
 <section id="faceted-plot" class="level3">
 <h3 class="anchored" data-anchor-id="faceted-plot">Faceted Plot</h3>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb53"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb53-1"><a href="#cb53-1" aria-hidden="true" tabindex="-1"></a><span class="cf">if</span> (<span class="fu">nrow</span>(df) <span class="sc">&gt;</span> <span class="dv">0</span>) {</span>
-<span id="cb53-2"><a href="#cb53-2" aria-hidden="true" tabindex="-1"></a>  p <span class="ot">&lt;-</span> <span class="fu">ggplot</span>(df, <span class="fu">aes</span>(<span class="at">x =</span> step, <span class="at">y =</span> mean_value)) <span class="sc">+</span></span>
-<span id="cb53-3"><a href="#cb53-3" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_ribbon</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, </span>
-<span id="cb53-4"><a href="#cb53-4" aria-hidden="true" tabindex="-1"></a>                    <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value), </span>
-<span id="cb53-5"><a href="#cb53-5" aria-hidden="true" tabindex="-1"></a>                <span class="at">alpha =</span> <span class="fl">0.3</span>, <span class="at">fill =</span> <span class="st">"steelblue"</span>) <span class="sc">+</span></span>
-<span id="cb53-6"><a href="#cb53-6" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_line</span>(<span class="at">color =</span> <span class="st">"steelblue"</span>, <span class="at">linewidth =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
-<span id="cb53-7"><a href="#cb53-7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">geom_point</span>(<span class="at">color =</span> <span class="st">"steelblue"</span>, <span class="at">size =</span> <span class="fl">1.5</span>) <span class="sc">+</span></span>
-<span id="cb53-8"><a href="#cb53-8" aria-hidden="true" tabindex="-1"></a>    <span class="fu">facet_wrap</span>(<span class="sc">~</span>param_value, <span class="at">ncol =</span> <span class="dv">5</span>, <span class="at">labeller =</span> label_both) <span class="sc">+</span></span>
-<span id="cb53-9"><a href="#cb53-9" aria-hidden="true" tabindex="-1"></a>    <span class="fu">labs</span>(</span>
-<span id="cb53-10"><a href="#cb53-10" aria-hidden="true" tabindex="-1"></a>      <span class="at">x =</span> <span class="st">"Simulation Step"</span>,</span>
-<span id="cb53-11"><a href="#cb53-11" aria-hidden="true" tabindex="-1"></a>      <span class="at">y =</span> <span class="st">"Average Tree Height (meters)"</span>,</span>
-<span id="cb53-12"><a href="#cb53-12" aria-hidden="true" tabindex="-1"></a>      <span class="at">title =</span> <span class="st">"Tree Growth Trajectories by maxGrowth Parameter"</span></span>
-<span id="cb53-13"><a href="#cb53-13" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">+</span></span>
-<span id="cb53-14"><a href="#cb53-14" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
-<span id="cb53-15"><a href="#cb53-15" aria-hidden="true" tabindex="-1"></a>    <span class="fu">theme</span>(</span>
-<span id="cb53-16"><a href="#cb53-16" aria-hidden="true" tabindex="-1"></a>      <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>(),</span>
-<span id="cb53-17"><a href="#cb53-17" aria-hidden="true" tabindex="-1"></a>      <span class="at">strip.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">"gray90"</span>, <span class="at">color =</span> <span class="cn">NA</span>)</span>
-<span id="cb53-18"><a href="#cb53-18" aria-hidden="true" tabindex="-1"></a>    )</span>
-<span id="cb53-19"><a href="#cb53-19" aria-hidden="true" tabindex="-1"></a>  <span class="fu">print</span>(p)</span>
-<span id="cb53-20"><a href="#cb53-20" aria-hidden="true" tabindex="-1"></a>} <span class="cf">else</span> {</span>
-<span id="cb53-21"><a href="#cb53-21" aria-hidden="true" tabindex="-1"></a>  <span class="fu">cat</span>(<span class="st">"No data to plot."</span>)</span>
-<span id="cb53-22"><a href="#cb53-22" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb39"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb39-1"><a href="#cb39-1" aria-hidden="true" tabindex="-1"></a><span class="fu">ggplot</span>(df, <span class="fu">aes</span>(<span class="at">x =</span> step, <span class="at">y =</span> mean_value)) <span class="sc">+</span></span>
+<span id="cb39-2"><a href="#cb39-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_ribbon</span>(<span class="fu">aes</span>(<span class="at">ymin =</span> mean_value <span class="sc">-</span> std_value, </span>
+<span id="cb39-3"><a href="#cb39-3" aria-hidden="true" tabindex="-1"></a>                  <span class="at">ymax =</span> mean_value <span class="sc">+</span> std_value), </span>
+<span id="cb39-4"><a href="#cb39-4" aria-hidden="true" tabindex="-1"></a>              <span class="at">alpha =</span> <span class="fl">0.3</span>, <span class="at">fill =</span> <span class="st">"steelblue"</span>) <span class="sc">+</span></span>
+<span id="cb39-5"><a href="#cb39-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_line</span>(<span class="at">color =</span> <span class="st">"steelblue"</span>, <span class="at">linewidth =</span> <span class="fl">0.8</span>) <span class="sc">+</span></span>
+<span id="cb39-6"><a href="#cb39-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_point</span>(<span class="at">color =</span> <span class="st">"steelblue"</span>, <span class="at">size =</span> <span class="fl">1.5</span>) <span class="sc">+</span></span>
+<span id="cb39-7"><a href="#cb39-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">facet_wrap</span>(<span class="sc">~</span>param_value, <span class="at">ncol =</span> <span class="dv">5</span>, <span class="at">labeller =</span> label_both) <span class="sc">+</span></span>
+<span id="cb39-8"><a href="#cb39-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(</span>
+<span id="cb39-9"><a href="#cb39-9" aria-hidden="true" tabindex="-1"></a>    <span class="at">x =</span> <span class="st">"Simulation Step"</span>,</span>
+<span id="cb39-10"><a href="#cb39-10" aria-hidden="true" tabindex="-1"></a>    <span class="at">y =</span> <span class="st">"Average Tree Height (meters)"</span>,</span>
+<span id="cb39-11"><a href="#cb39-11" aria-hidden="true" tabindex="-1"></a>    <span class="at">title =</span> <span class="st">"Tree Growth Trajectories by maxGrowth Parameter"</span></span>
+<span id="cb39-12"><a href="#cb39-12" aria-hidden="true" tabindex="-1"></a>  ) <span class="sc">+</span></span>
+<span id="cb39-13"><a href="#cb39-13" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
+<span id="cb39-14"><a href="#cb39-14" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme</span>(</span>
+<span id="cb39-15"><a href="#cb39-15" aria-hidden="true" tabindex="-1"></a>    <span class="at">panel.grid.minor =</span> <span class="fu">element_blank</span>(),</span>
+<span id="cb39-16"><a href="#cb39-16" aria-hidden="true" tabindex="-1"></a>    <span class="at">strip.background =</span> <span class="fu">element_rect</span>(<span class="at">fill =</span> <span class="st">"gray90"</span>, <span class="at">color =</span> <span class="cn">NA</span>)</span>
+<span id="cb39-17"><a href="#cb39-17" aria-hidden="true" tabindex="-1"></a>  )</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output-display">
 <div id="fig-r-faceted" class="quarto-float quarto-figure quarto-figure-center anchored">
 <figure class="quarto-float quarto-float-fig figure">
@@ -781,73 +1608,6 @@ Figure&nbsp;9: Faceted time series - one panel per maxGrowth value.
 </figcaption>
 </figure>
 </div>
-</div>
-</div>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb54"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb54-1"><a href="#cb54-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Close the R connection when done</span></span>
-<span id="cb54-2"><a href="#cb54-2" aria-hidden="true" tabindex="-1"></a><span class="fu">dbDisconnect</span>(con, <span class="at">shutdown =</span> <span class="cn">TRUE</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-</div>
-</section>
-</section>
-<section id="part-6-advanced-patterns" class="level2">
-<h2 class="anchored" data-anchor-id="part-6-advanced-patterns">Part 6: Advanced Patterns</h2>
-<section id="spatial-analysis-with-geopandas" class="level3">
-<h3 class="anchored" data-anchor-id="spatial-analysis-with-geopandas">Spatial Analysis with GeoPandas</h3>
-<p>Export spatial data for GIS analysis:</p>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb55"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb55-1"><a href="#cb55-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Get spatial snapshot with coordinates</span></span>
-<span id="cb55-2"><a href="#cb55-2" aria-hidden="true" tabindex="-1"></a>df <span class="op">=</span> queries.get_spatial_snapshot(</span>
-<span id="cb55-3"><a href="#cb55-3" aria-hidden="true" tabindex="-1"></a>    step<span class="op">=</span><span class="dv">10</span>,</span>
-<span id="cb55-4"><a href="#cb55-4" aria-hidden="true" tabindex="-1"></a>    variable<span class="op">=</span><span class="st">"averageHeight"</span>,</span>
-<span id="cb55-5"><a href="#cb55-5" aria-hidden="true" tabindex="-1"></a>    run_hash<span class="op">=</span>run_hash_50,</span>
-<span id="cb55-6"><a href="#cb55-6" aria-hidden="true" tabindex="-1"></a>)</span>
-<span id="cb55-7"><a href="#cb55-7" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb55-8"><a href="#cb55-8" aria-hidden="true" tabindex="-1"></a><span class="co"># Save with coordinates for GIS tools</span></span>
-<span id="cb55-9"><a href="#cb55-9" aria-hidden="true" tabindex="-1"></a>df.to_csv(<span class="st">"/tmp/spatial_snapshot.csv"</span>, index<span class="op">=</span><span class="va">False</span>)</span>
-<span id="cb55-10"><a href="#cb55-10" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Saved </span><span class="sc">{</span><span class="bu">len</span>(df)<span class="sc">}</span><span class="ss"> cells to /tmp/spatial_snapshot.csv"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Saved 6324 cells to /tmp/spatial_snapshot.csv</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb57"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb57-1"><a href="#cb57-1" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb57-2"><a href="#cb57-2" aria-hidden="true" tabindex="-1"></a><span class="co"># If you have geopandas:</span></span>
-<span id="cb57-3"><a href="#cb57-3" aria-hidden="true" tabindex="-1"></a><span class="co"># import geopandas as gpd</span></span>
-<span id="cb57-4"><a href="#cb57-4" aria-hidden="true" tabindex="-1"></a><span class="co"># gdf = gpd.GeoDataFrame(</span></span>
-<span id="cb57-5"><a href="#cb57-5" aria-hidden="true" tabindex="-1"></a><span class="co">#     df, </span></span>
-<span id="cb57-6"><a href="#cb57-6" aria-hidden="true" tabindex="-1"></a><span class="co">#     geometry=gpd.points_from_xy(df.longitude, df.latitude),</span></span>
-<span id="cb57-7"><a href="#cb57-7" aria-hidden="true" tabindex="-1"></a><span class="co">#     crs="EPSG:4326"</span></span>
-<span id="cb57-8"><a href="#cb57-8" aria-hidden="true" tabindex="-1"></a><span class="co"># )</span></span>
-<span id="cb57-9"><a href="#cb57-9" aria-hidden="true" tabindex="-1"></a><span class="co"># gdf.to_file("/tmp/snapshot.gpkg")</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-</div>
-</section>
-<section id="combining-multiple-sessions" class="level3">
-<h3 class="anchored" data-anchor-id="combining-multiple-sessions">Combining Multiple Sessions</h3>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb58"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb58-1"><a href="#cb58-1" aria-hidden="true" tabindex="-1"></a><span class="co"># List all sessions in the registry</span></span>
-<span id="cb58-2"><a href="#cb58-2" aria-hidden="true" tabindex="-1"></a>sessions <span class="op">=</span> registry.list_sessions()</span>
-<span id="cb58-3"><a href="#cb58-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Sessions in registry: </span><span class="sc">{</span><span class="bu">len</span>(sessions)<span class="sc">}</span><span class="ss">"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Sessions in registry: 2</code></pre>
-</div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb60"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb60-1"><a href="#cb60-1" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> s <span class="kw">in</span> sessions:</span>
-<span id="cb60-2"><a href="#cb60-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f"  </span><span class="sc">{</span>s<span class="sc">.</span>session_id[:<span class="dv">8</span>]<span class="sc">}</span><span class="ss">... - </span><span class="sc">{</span>s<span class="sc">.</span>experiment_name<span class="sc">}</span><span class="ss"> (</span><span class="sc">{</span>s<span class="sc">.</span>status<span class="sc">}</span><span class="ss">)"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>  b27ecf42... - growth_rate_sweep (completed)
-  35e8b546... - growth_rate_sweep (pending)</code></pre>
-</div>
-</div>
-</section>
-<section id="exporting-full-registry" class="level3">
-<h3 class="anchored" data-anchor-id="exporting-full-registry">Exporting Full Registry</h3>
-<div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb62"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb62-1"><a href="#cb62-1" aria-hidden="true" tabindex="-1"></a><span class="co"># Export entire cell_data table to Parquet for external analysis</span></span>
-<span id="cb62-2"><a href="#cb62-2" aria-hidden="true" tabindex="-1"></a><span class="co"># registry.to_parquet("results.parquet")</span></span>
-<span id="cb62-3"><a href="#cb62-3" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb62-4"><a href="#cb62-4" aria-hidden="true" tabindex="-1"></a><span class="co"># Export to CSV</span></span>
-<span id="cb62-5"><a href="#cb62-5" aria-hidden="true" tabindex="-1"></a><span class="co"># registry.to_csv("results.csv")</span></span>
-<span id="cb62-6"><a href="#cb62-6" aria-hidden="true" tabindex="-1"></a></span>
-<span id="cb62-7"><a href="#cb62-7" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Use registry.to_parquet() or registry.to_csv() for bulk export"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Use registry.to_parquet() or registry.to_csv() for bulk export</code></pre>
 </div>
 </div>
 </section>
@@ -890,28 +1650,35 @@ Figure&nbsp;9: Faceted time series - one panel per maxGrowth value.
 <td>Direct DuckDB access</td>
 </tr>
 <tr class="odd">
-<td><strong>R/ggplot2</strong></td>
+<td><strong>R (CSV)</strong></td>
+<td><code>read.csv()</code></td>
+<td>Simple, always works</td>
+</tr>
+<tr class="even">
+<td><strong>R (DuckDB)</strong></td>
 <td><code>dbConnect(duckdb(), ...)</code></td>
-<td>Query DuckDB directly from R</td>
+<td>Custom SQL directly from R</td>
+</tr>
+<tr class="odd">
+<td><strong>R (reticulate)</strong></td>
+<td><code>py$df</code></td>
+<td>Zero-copy Python/R interop</td>
 </tr>
 </tbody>
 </table>
 <p><strong>Key Points:</strong></p>
 <ul>
 <li>Analysis is <strong>decoupled from orchestration</strong> - same workflow for any data source</li>
-<li>Export variables are <strong>typed columns</strong> (not JSON) for fast, natural queries</li>
-<li>R can query the registry directly via the <code>duckdb</code> package - no CSV export needed</li>
-<li>Direct DuckDB access via <code>registry.query()</code> or <code>registry.conn</code></li>
+<li>Export variables are typed columns in <code>cell_data</code></li>
+<li>Config parameters are typed columns in <code>config_parameters</code></li>
+<li>R can query DuckDB directly</li>
+<li>Three routes for R: CSV export, direct DuckDB, or <code>py$df</code> via reticulate</li>
 </ul>
 </section>
 <section id="cleanup" class="level2">
 <h2 class="anchored" data-anchor-id="cleanup">Cleanup</h2>
 <div class="cell">
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb64"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb64-1"><a href="#cb64-1" aria-hidden="true" tabindex="-1"></a>registry.close()</span>
-<span id="cb64-2"><a href="#cb64-2" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"Registry closed."</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<div class="cell-output cell-output-stdout">
-<pre><code>Registry closed.</code></pre>
-</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb40"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb40-1"><a href="#cb40-1" aria-hidden="true" tabindex="-1"></a>registry.close()</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 </div>
 </section>
 
