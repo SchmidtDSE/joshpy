@@ -43,6 +43,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from scipy import stats
+
 from joshpy.registry import _infer_type, _quote_identifier
 
 try:
@@ -556,6 +558,7 @@ class DiagnosticQueries:
         variable: str,
         run_hash: str,
         step: int | None = None,
+        confidence: float = 0.95,
     ) -> Any:
         """Get mean and confidence intervals across replicates.
 
@@ -563,11 +566,14 @@ class DiagnosticQueries:
             variable: Variable name to analyze (e.g., "treeCount", "avg.height").
             run_hash: Run hash to filter by.
             step: Optional timestep filter (if None, aggregates across all steps).
+            confidence: Confidence level for intervals (default 0.95 for 95% CI).
 
         Returns:
             DataFrame with: step, mean, std, ci_low, ci_high, n_replicates.
         """
         _check_pandas()
+
+        z_score = stats.norm.ppf((1 + confidence) / 2)
 
         quoted = _quote_identifier(variable)
         step_filter = "AND step = ?" if step else ""
@@ -586,8 +592,8 @@ class DiagnosticQueries:
                 step,
                 AVG(rep_mean) as mean,
                 STDDEV(rep_mean) as std,
-                AVG(rep_mean) - 1.96 * STDDEV(rep_mean) / SQRT(COUNT(*)) as ci_low,
-                AVG(rep_mean) + 1.96 * STDDEV(rep_mean) / SQRT(COUNT(*)) as ci_high,
+                AVG(rep_mean) - {z_score} * STDDEV(rep_mean) / SQRT(COUNT(*)) as ci_low,
+                AVG(rep_mean) + {z_score} * STDDEV(rep_mean) / SQRT(COUNT(*)) as ci_high,
                 COUNT(*) as n_replicates
             FROM replicate_means
             GROUP BY step

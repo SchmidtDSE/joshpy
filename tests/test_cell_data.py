@@ -346,6 +346,38 @@ class TestDiagnosticQueries:
         # Check that we have 2 replicates per step
         assert all(df["n_replicates"] == 2)
 
+    def test_get_replicate_uncertainty_confidence(self):
+        """Test that confidence parameter affects CI width."""
+        skip_if_no_pandas()
+        # Get 95% CI (default)
+        df_95 = self.queries.get_replicate_uncertainty(
+            variable="treeCount",
+            run_hash="abc123",
+            confidence=0.95,
+        )
+
+        # Get 99% CI (wider)
+        df_99 = self.queries.get_replicate_uncertainty(
+            variable="treeCount",
+            run_hash="abc123",
+            confidence=0.99,
+        )
+
+        # Get 90% CI (narrower)
+        df_90 = self.queries.get_replicate_uncertainty(
+            variable="treeCount",
+            run_hash="abc123",
+            confidence=0.90,
+        )
+
+        # 99% CI should be wider than 95% CI
+        ci_width_99 = (df_99["ci_high"] - df_99["ci_low"]).mean()
+        ci_width_95 = (df_95["ci_high"] - df_95["ci_low"]).mean()
+        ci_width_90 = (df_90["ci_high"] - df_90["ci_low"]).mean()
+
+        assert ci_width_99 > ci_width_95, "99% CI should be wider than 95% CI"
+        assert ci_width_95 > ci_width_90, "95% CI should be wider than 90% CI"
+
     def test_get_bbox_timeseries(self):
         """Test getting time series for a bounding box."""
         skip_if_no_pandas()
