@@ -143,7 +143,7 @@ class SimulationDiagnostics:
         run_hash: str | None,
         session_id: str | None,
         params: dict[str, Any],
-    ) -> tuple[str, list[Any]]:
+    ) -> tuple[str, list[Any], bool]:
         """Build SQL WHERE clause for filtering by config/session/params.
 
         Args:
@@ -152,10 +152,12 @@ class SimulationDiagnostics:
             params: Dict of parameter name -> value filters.
 
         Returns:
-            Tuple of (WHERE clause string, list of parameter values).
+            Tuple of (WHERE clause string, list of parameter values, needs_config_params_join).
+            The needs_config_params_join flag indicates if config_parameters table needs to be joined.
         """
         conditions = []
         values: list[Any] = []
+        needs_config_params = bool(params)  # Need join if filtering by params
 
         if run_hash:
             conditions.append("cd.run_hash = ?")
@@ -166,14 +168,14 @@ class SimulationDiagnostics:
             values.append(session_id)
 
         for param_name, param_value in params.items():
-            conditions.append(
-                f"json_extract_string(jc.parameters, '$.{param_name}') = ?"
-            )
-            values.append(str(param_value))
+            quoted_param = _quote_identifier(param_name)
+            # Compare values appropriately - DuckDB handles type coercion
+            conditions.append(f"cp.{quoted_param} = ?")
+            values.append(param_value)
 
         if conditions:
-            return " AND " + " AND ".join(conditions), values
-        return "", values
+            return " AND " + " AND ".join(conditions), values, needs_config_params
+        return "", values, needs_config_params
 
     def _get_matching_configs(
         self,
@@ -191,14 +193,17 @@ class SimulationDiagnostics:
         Returns:
             List of matching run hashes.
         """
-        where_clause, values = self._build_config_filter(run_hash, session_id, params)
+        where_clause, values, needs_config_params = self._build_config_filter(run_hash, session_id, params)
 
+        # Build the query with appropriate joins
         query = """
             SELECT DISTINCT cd.run_hash
             FROM cell_data cd
             JOIN job_configs jc ON cd.run_hash = jc.run_hash
-            WHERE 1=1
         """
+        if needs_config_params:
+            query += "JOIN config_parameters cp ON cd.run_hash = cp.run_hash\n"
+        query += "WHERE 1=1"
         query += where_clause
 
         result = self.registry.conn.execute(query, values).fetchall()
@@ -485,15 +490,15 @@ class SimulationDiagnostics:
         config_params = self.registry.list_config_parameters()
         export_vars = self.registry.list_export_variables()
 
+        needs_config_params = False  # Whether we need to join config_parameters
         if group_by in config_params:
             group_source = "config_parameter"
-            group_expr = f"json_extract_string(jc.parameters, '$.{group_by}')"
-            needs_join = True
+            group_expr = f"cp.{_quote_identifier(group_by)}"
+            needs_config_params = True
         elif group_by in export_vars:
             group_source = "export_variable"
-            # For export variables, use quoted column directly
+            # For export variables, use quoted column directly from cell_data
             group_expr = _quote_identifier(group_by)
-            needs_join = False
         else:
             raise ValueError(
                 f"'{group_by}' not found.\n"
@@ -512,17 +517,22 @@ class SimulationDiagnostics:
             param_values.append(session_id)
 
         for param_name, param_value in params.items():
-            param_conditions.append(
-                f"json_extract_string(jc.parameters, '$.{param_name}') = ?"
-            )
-            param_values.append(str(param_value))
+            quoted_param = _quote_identifier(param_name)
+            # Compare values appropriately - DuckDB handles type coercion
+            param_conditions.append(f"cp.{quoted_param} = ?")
+            param_values.append(param_value)
+            needs_config_params = True
 
         where_clause = ""
         if param_conditions:
             where_clause = " AND " + " AND ".join(param_conditions)
 
-        # Build join clause - always needed if we have param filters or grouping by config
-        join_clause = "JOIN job_configs jc ON cd.run_hash = jc.run_hash" if (needs_join or param_conditions) else ""
+        # Build join clauses
+        join_clause = ""
+        if session_id or param_conditions:
+            join_clause += "JOIN job_configs jc ON cd.run_hash = jc.run_hash\n"
+        if needs_config_params:
+            join_clause += "JOIN config_parameters cp ON cd.run_hash = cp.run_hash\n"
 
         if step is not None:
             # Bar chart at specific step

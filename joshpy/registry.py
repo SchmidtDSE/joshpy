@@ -95,6 +95,37 @@ def _quote_identifier(name: str) -> str:
     return f'"{escaped}"'
 
 
+def _infer_type(value: Any) -> str:
+    """Infer SQL type from a single value.
+    
+    Used for both export variables (cell_data) and config parameters
+    (config_parameters) to determine appropriate column types.
+    
+    Args:
+        value: A single value to infer type from.
+        
+    Returns:
+        'DOUBLE' if value is numeric (int, float, or numeric string),
+        'VARCHAR' otherwise.
+    """
+    if value is None:
+        return "VARCHAR"  # Can't infer from None, default to VARCHAR
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return "DOUBLE"
+    if isinstance(value, str):
+        if value == "":
+            return "VARCHAR"
+        try:
+            float(value)
+            return "DOUBLE"
+        except (ValueError, TypeError):
+            return "VARCHAR"
+    return "VARCHAR"
+
+
+# Core columns in config_parameters table (not parameter columns)
+CONFIG_PARAMS_CORE_COLUMNS = frozenset({"run_hash"})
+
 # SQL Schema
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sweep_sessions (
@@ -116,8 +147,11 @@ CREATE TABLE IF NOT EXISTS job_configs (
     josh_path       TEXT,
     config_content  TEXT,
     file_mappings   JSON,
-    parameters      JSON,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS config_parameters (
+    run_hash        VARCHAR(12) PRIMARY KEY REFERENCES job_configs(run_hash)
 );
 
 CREATE TABLE IF NOT EXISTS job_runs (
@@ -882,18 +916,85 @@ class RunRegistry:
             file_mappings: Dict mapping names to {"path": "...", "hash": "..."}.
             parameters: Parameter values used to generate this config.
         """
-        parameters_json = json.dumps(parameters)
         file_mappings_json = json.dumps(file_mappings) if file_mappings else None
 
         # Use INSERT OR IGNORE to handle duplicate run hashes
         self.conn.execute(
             """
             INSERT OR IGNORE INTO job_configs
-            (run_hash, session_id, josh_path, config_content, file_mappings, parameters)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (run_hash, session_id, josh_path, config_content, file_mappings)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            [run_hash, session_id, josh_path, config_content, file_mappings_json, parameters_json],
+            [run_hash, session_id, josh_path, config_content, file_mappings_json],
         )
+        
+        # Insert typed parameters into config_parameters table
+        if parameters:
+            # Infer types for each parameter and ensure columns exist
+            param_columns = {
+                name: _infer_type(value)
+                for name, value in parameters.items()
+            }
+            self._ensure_config_columns(param_columns)
+            
+            # Build dynamic INSERT with all parameter columns
+            param_names = list(parameters.keys())
+            quoted_cols = ", ".join(_quote_identifier(n) for n in param_names)
+            placeholders = ", ".join("?" for _ in param_names)
+            values = [parameters[n] for n in param_names]
+            
+            # INSERT OR IGNORE for idempotency (same run_hash)
+            self.conn.execute(
+                f"""
+                INSERT OR IGNORE INTO config_parameters
+                (run_hash, {quoted_cols})
+                VALUES (?, {placeholders})
+                """,
+                [run_hash] + values,
+            )
+        else:
+            # No parameters, just insert the run_hash
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO config_parameters (run_hash)
+                VALUES (?)
+                """,
+                [run_hash],
+            )
+
+    def _get_parameters_for_run_hash(self, run_hash: str) -> dict[str, Any]:
+        """Get parameters dict from config_parameters table for a run_hash.
+        
+        Args:
+            run_hash: The run hash to get parameters for.
+            
+        Returns:
+            Dict of parameter name -> value, or empty dict if not found.
+        """
+        param_cols = self.list_config_columns()
+        if not param_cols:
+            return {}
+        
+        # Build query to select all parameter columns
+        quoted_cols = ", ".join(_quote_identifier(c) for c in param_cols)
+        result = self.conn.execute(
+            f"""
+            SELECT {quoted_cols}
+            FROM config_parameters
+            WHERE run_hash = ?
+            """,
+            [run_hash],
+        ).fetchone()
+        
+        if result is None:
+            return {}
+        
+        # Build parameters dict, excluding NULL values
+        parameters = {}
+        for i, col_name in enumerate(param_cols):
+            if result[i] is not None:
+                parameters[col_name] = result[i]
+        return parameters
 
     def get_config_by_hash(self, run_hash: str) -> ConfigInfo | None:
         """Get config information by run hash.
@@ -906,7 +1007,7 @@ class RunRegistry:
         """
         result = self.conn.execute(
             """
-            SELECT run_hash, session_id, josh_path, config_content, file_mappings, parameters, created_at
+            SELECT run_hash, session_id, josh_path, config_content, file_mappings, created_at
             FROM job_configs
             WHERE run_hash = ?
             """,
@@ -916,14 +1017,17 @@ class RunRegistry:
         if result is None:
             return None
 
+        # Get parameters from typed columns
+        parameters = self._get_parameters_for_run_hash(run_hash)
+
         return ConfigInfo(
             run_hash=result[0],
             session_id=result[1],
             josh_path=result[2],
             config_content=result[3],
             file_mappings=json.loads(result[4]) if result[4] else None,
-            parameters=json.loads(result[5]) if result[5] else {},
-            created_at=result[6],
+            parameters=parameters,
+            created_at=result[5],
         )
 
     def get_configs_for_session(self, session_id: str) -> list[ConfigInfo]:
@@ -935,9 +1039,10 @@ class RunRegistry:
         Returns:
             List of ConfigInfo objects.
         """
+        # First get the run_hashes and basic config info
         result = self.conn.execute(
             """
-            SELECT run_hash, session_id, josh_path, config_content, file_mappings, parameters, created_at
+            SELECT run_hash, session_id, josh_path, config_content, file_mappings, created_at
             FROM job_configs
             WHERE session_id = ?
             ORDER BY created_at
@@ -945,18 +1050,20 @@ class RunRegistry:
             [session_id],
         ).fetchall()
 
-        return [
-            ConfigInfo(
-                run_hash=row[0],
+        configs = []
+        for row in result:
+            run_hash = row[0]
+            parameters = self._get_parameters_for_run_hash(run_hash)
+            configs.append(ConfigInfo(
+                run_hash=run_hash,
                 session_id=row[1],
                 josh_path=row[2],
                 config_content=row[3],
                 file_mappings=json.loads(row[4]) if row[4] else None,
-                parameters=json.loads(row[5]) if row[5] else {},
-                created_at=row[6],
-            )
-            for row in result
-        ]
+                parameters=parameters,
+                created_at=row[5],
+            ))
+        return configs
 
     # ========== Run Tracking ==========
 
@@ -1127,53 +1234,58 @@ class RunRegistry:
         Returns:
             List of dicts containing run info and parameters.
         """
+        # Get run info first
         if not params:
-            # No filters - return all runs with their configs
+            # No filters - return all runs
             result = self.conn.execute(
                 """
                 SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
-                       r.exit_code, r.output_path, r.error_message, c.parameters
+                       r.exit_code, r.output_path, r.error_message
                 FROM job_runs r
-                JOIN job_configs c ON r.run_hash = c.run_hash
                 ORDER BY r.started_at DESC
                 """
             ).fetchall()
         else:
-            # Build filter conditions using JSON extraction
+            # Build filter conditions using typed config_parameters columns
             conditions = []
             values = []
             for key, value in params.items():
-                # Use DuckDB JSON extraction with type-appropriate comparison
-                conditions.append(f"json_extract_string(c.parameters, '$.{key}') = ?")
-                values.append(str(value))
+                quoted_key = _quote_identifier(key)
+                # Compare values appropriately - use the raw value for comparison
+                # DuckDB handles type coercion for = comparisons
+                conditions.append(f"cp.{quoted_key} = ?")
+                values.append(value)
 
             where_clause = " AND ".join(conditions)
             result = self.conn.execute(
                 f"""
                 SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
-                       r.exit_code, r.output_path, r.error_message, c.parameters
+                       r.exit_code, r.output_path, r.error_message
                 FROM job_runs r
-                JOIN job_configs c ON r.run_hash = c.run_hash
+                JOIN config_parameters cp ON r.run_hash = cp.run_hash
                 WHERE {where_clause}
                 ORDER BY r.started_at DESC
                 """,
                 values,
             ).fetchall()
 
-        return [
-            {
+        # Build result with parameters from typed columns
+        runs = []
+        for row in result:
+            run_hash = row[1]
+            parameters = self._get_parameters_for_run_hash(run_hash)
+            runs.append({
                 "run_id": row[0],
-                "run_hash": row[1],
+                "run_hash": run_hash,
                 "replicate": row[2],
                 "started_at": row[3],
                 "completed_at": row[4],
                 "exit_code": row[5],
                 "output_path": row[6],
                 "error_message": row[7],
-                "parameters": json.loads(row[8]) if row[8] else {},
-            }
-            for row in result
-        ]
+                "parameters": parameters,
+            })
+        return runs
 
     def get_session_summary(self, session_id: str) -> SessionSummary | None:
         """Get aggregated statistics for a session.
@@ -1248,11 +1360,11 @@ class RunRegistry:
                 "pandas is required for export_results_df. Install with: pip install pandas"
             ) from err
 
-        # Query all runs for this session with their parameters
+        # Query all runs for this session
         result = self.conn.execute(
             """
             SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
-                   r.exit_code, r.output_path, r.error_message, c.parameters
+                   r.exit_code, r.output_path, r.error_message
             FROM job_runs r
             JOIN job_configs c ON r.run_hash = c.run_hash
             WHERE c.session_id = ?
@@ -1263,10 +1375,11 @@ class RunRegistry:
 
         rows = []
         for row in result:
-            params = json.loads(row[8]) if row[8] else {}
+            run_hash = row[1]
+            params = self._get_parameters_for_run_hash(run_hash)
             row_dict = {
                 "run_id": row[0],
-                "run_hash": row[1],
+                "run_hash": run_hash,
                 "replicate": row[2],
                 "started_at": row[3],
                 "completed_at": row[4],
@@ -1473,11 +1586,89 @@ class RunRegistry:
             threshold_percent=SPARSITY_WARN_COLUMN_NULL_PERCENT,
         )
 
+    def list_config_columns(self) -> list[str]:
+        """List all parameter column names in config_parameters.
+        
+        Returns the dynamically-added parameter columns. Column names preserve
+        original names with special characters (e.g., 'soil.moisture').
+        
+        Returns:
+            Sorted list of parameter column names.
+            
+        Example:
+            >>> registry.list_config_columns()
+            ['maxGrowth', 'scenario', 'soil.moisture']
+        """
+        result = self.conn.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'config_parameters'
+            ORDER BY column_name
+            """
+        ).fetchall()
+        
+        # Filter out core columns, return only parameter columns
+        all_cols = [row[0] for row in result]
+        return sorted([c for c in all_cols if c not in CONFIG_PARAMS_CORE_COLUMNS])
+
+    def _ensure_config_columns(self, columns: dict[str, str]) -> None:
+        """Ensure parameter columns exist in config_parameters table.
+        
+        Adds missing columns with the specified types. This is called by
+        register_run() when registering configs with parameters.
+        
+        Column names are preserved exactly as provided (with quotes for SQL).
+        For example, 'soil.moisture' becomes column "soil.moisture".
+        
+        Args:
+            columns: Dict mapping column name (original) to SQL type
+                     (either 'DOUBLE' or 'VARCHAR').
+                     
+        Raises:
+            ValueError: If trying to add a column that exists with a different type.
+        """
+        existing = self.list_config_columns()
+        
+        for col_name, col_type in columns.items():
+            if col_name in existing:
+                # Verify type matches
+                type_result = self.conn.execute(
+                    """
+                    SELECT data_type
+                    FROM information_schema.columns
+                    WHERE table_name = 'config_parameters' AND column_name = ?
+                    """,
+                    [col_name],
+                ).fetchone()
+                
+                if type_result:
+                    existing_type = type_result[0].upper()
+                    requested_type = col_type.upper()
+                    # Normalize type names for comparison
+                    if existing_type in ('DOUBLE', 'FLOAT', 'REAL'):
+                        existing_type = 'DOUBLE'
+                    if requested_type in ('DOUBLE', 'FLOAT', 'REAL'):
+                        requested_type = 'DOUBLE'
+                    
+                    if existing_type != requested_type:
+                        raise ValueError(
+                            f"Config parameter '{col_name}' exists as {existing_type} but "
+                            f"new data has {requested_type}. This may indicate "
+                            f"mixed sweep configurations. Use a separate registry."
+                        )
+            else:
+                # Add new column with quoted identifier
+                quoted = _quote_identifier(col_name)
+                self.conn.execute(
+                    f"ALTER TABLE config_parameters ADD COLUMN {quoted} {col_type}"
+                )
+
     def list_config_parameters(self, session_id: str | None = None) -> list[str]:
         """List all config parameter names from sweep configurations.
 
         These are the parameters you defined in your JobConfig sweep,
-        stored in the job_configs table's parameters JSON column.
+        stored as typed columns in the config_parameters table.
 
         Args:
             session_id: Optional session ID to filter by.
@@ -1489,26 +1680,29 @@ class RunRegistry:
             >>> registry.list_config_parameters()
             ['maxGrowth', 'scenario', 'survivalProb']
         """
-        if session_id:
+        all_params = self.list_config_columns()
+        
+        if not session_id or not all_params:
+            return all_params
+        
+        # Filter to parameters that have non-NULL values in this session
+        params_with_data = []
+        for param_name in all_params:
+            quoted = _quote_identifier(param_name)
             result = self.conn.execute(
-                """
-                SELECT DISTINCT unnest(json_keys(parameters)) as param_name
-                FROM job_configs
-                WHERE session_id = ?
-                ORDER BY param_name
+                f"""
+                SELECT 1
+                FROM config_parameters cp
+                JOIN job_configs jc ON cp.run_hash = jc.run_hash
+                WHERE jc.session_id = ? AND {quoted} IS NOT NULL
+                LIMIT 1
                 """,
                 [session_id],
-            ).fetchall()
-        else:
-            result = self.conn.execute(
-                """
-                SELECT DISTINCT unnest(json_keys(parameters)) as param_name
-                FROM job_configs
-                ORDER BY param_name
-                """
-            ).fetchall()
-
-        return [row[0] for row in result]
+            ).fetchone()
+            if result:
+                params_with_data.append(param_name)
+        
+        return sorted(params_with_data)
 
     # Alias for backward compatibility
     def list_parameters(self, session_id: str | None = None) -> list[str]:

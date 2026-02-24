@@ -43,7 +43,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from joshpy.registry import _quote_identifier
+from joshpy.registry import _infer_type, _quote_identifier
 
 try:
     from pydantic import BaseModel, Field
@@ -316,6 +316,9 @@ class CellDataLoader:
     def _infer_column_type(self, values: Iterable[Any]) -> str:
         """Infer SQL type from values.
 
+        Uses the shared _infer_type() helper for each value. If any non-null
+        value is non-numeric, returns VARCHAR.
+
         Args:
             values: Iterable of values from a column.
 
@@ -325,9 +328,7 @@ class CellDataLoader:
         for val in values:
             if val is None or (isinstance(val, str) and val == ""):
                 continue
-            try:
-                float(val)
-            except (ValueError, TypeError):
+            if _infer_type(val) == "VARCHAR":
                 return "VARCHAR"
         return "DOUBLE"
 
@@ -524,21 +525,22 @@ class DiagnosticQueries:
         """
         _check_pandas()
 
-        quoted = _quote_identifier(variable)
+        quoted_var = _quote_identifier(variable)
+        quoted_param = _quote_identifier(param_name)
         step_filter = "AND cd.step = ?" if step else ""
         step_group = "" if step else ", cd.step"
 
         query = f"""
             SELECT
-                json_extract_string(jc.parameters, '$.{param_name}') as param_value,
+                cp.{quoted_param} as param_value,
                 cd.step,
-                {aggregation}({quoted}) as mean_value,
-                STDDEV({quoted}) as std_value,
+                {aggregation}({quoted_var}) as mean_value,
+                STDDEV({quoted_var}) as std_value,
                 COUNT(*) as n_cells
             FROM cell_data cd
-            JOIN job_configs jc ON cd.run_hash = jc.run_hash
+            JOIN config_parameters cp ON cd.run_hash = cp.run_hash
             WHERE 1=1 {step_filter}
-            GROUP BY json_extract_string(jc.parameters, '$.{param_name}'){step_group}
+            GROUP BY cp.{quoted_param}{step_group}
             ORDER BY param_value, cd.step
         """
 

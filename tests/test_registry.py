@@ -1144,5 +1144,239 @@ class TestQuoteIdentifier(unittest.TestCase):
         self.assertEqual(_quote_identifier('a"b'), '"a""b"')
 
 
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestInferType(unittest.TestCase):
+    """Tests for _infer_type helper function."""
+
+    def test_infer_type_int(self):
+        """Should return DOUBLE for integers."""
+        from joshpy.registry import _infer_type
+        
+        self.assertEqual(_infer_type(42), "DOUBLE")
+        self.assertEqual(_infer_type(0), "DOUBLE")
+        self.assertEqual(_infer_type(-10), "DOUBLE")
+
+    def test_infer_type_float(self):
+        """Should return DOUBLE for floats."""
+        from joshpy.registry import _infer_type
+        
+        self.assertEqual(_infer_type(3.14), "DOUBLE")
+        self.assertEqual(_infer_type(0.0), "DOUBLE")
+        self.assertEqual(_infer_type(-2.5), "DOUBLE")
+
+    def test_infer_type_numeric_string(self):
+        """Should return DOUBLE for numeric strings."""
+        from joshpy.registry import _infer_type
+        
+        self.assertEqual(_infer_type("42"), "DOUBLE")
+        self.assertEqual(_infer_type("3.14"), "DOUBLE")
+        self.assertEqual(_infer_type("-10.5"), "DOUBLE")
+
+    def test_infer_type_non_numeric_string(self):
+        """Should return VARCHAR for non-numeric strings."""
+        from joshpy.registry import _infer_type
+        
+        self.assertEqual(_infer_type("hello"), "VARCHAR")
+        self.assertEqual(_infer_type("baseline"), "VARCHAR")
+        self.assertEqual(_infer_type("10abc"), "VARCHAR")
+
+    def test_infer_type_empty_string(self):
+        """Should return VARCHAR for empty strings."""
+        from joshpy.registry import _infer_type
+        
+        self.assertEqual(_infer_type(""), "VARCHAR")
+
+    def test_infer_type_none(self):
+        """Should return VARCHAR for None."""
+        from joshpy.registry import _infer_type
+        
+        self.assertEqual(_infer_type(None), "VARCHAR")
+
+    def test_infer_type_bool(self):
+        """Should return VARCHAR for booleans (not numeric in this context)."""
+        from joshpy.registry import _infer_type
+        
+        self.assertEqual(_infer_type(True), "VARCHAR")
+        self.assertEqual(_infer_type(False), "VARCHAR")
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestTypedConfigParameters(unittest.TestCase):
+    """Tests for typed config parameters feature."""
+
+    def setUp(self):
+        """Create a registry for each test."""
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(experiment_name="test")
+
+    def tearDown(self):
+        """Close registry after each test."""
+        self.registry.close()
+
+    def test_config_parameters_table_exists(self):
+        """config_parameters table should be created in schema."""
+        tables = self.registry.conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchall()
+        table_names = {t[0] for t in tables}
+        self.assertIn("config_parameters", table_names)
+
+    def test_list_config_columns_empty(self):
+        """list_config_columns should return empty list when no data."""
+        result = self.registry.list_config_columns()
+        self.assertEqual(result, [])
+
+    def test_ensure_config_columns_creates_double(self):
+        """_ensure_config_columns should create DOUBLE columns for numeric params."""
+        self.registry._ensure_config_columns({"maxGrowth": "DOUBLE"})
+        
+        columns = self.registry.list_config_columns()
+        self.assertIn("maxGrowth", columns)
+
+    def test_ensure_config_columns_creates_varchar(self):
+        """_ensure_config_columns should create VARCHAR columns for string params."""
+        self.registry._ensure_config_columns({"scenario": "VARCHAR"})
+        
+        columns = self.registry.list_config_columns()
+        self.assertIn("scenario", columns)
+
+    def test_ensure_config_columns_with_special_chars(self):
+        """_ensure_config_columns should handle names with dots."""
+        self.registry._ensure_config_columns({"soil.moisture": "DOUBLE"})
+        
+        columns = self.registry.list_config_columns()
+        self.assertIn("soil.moisture", columns)
+
+    def test_ensure_config_columns_rejects_type_mismatch(self):
+        """_ensure_config_columns should reject type mismatches."""
+        self.registry._ensure_config_columns({"testParam": "DOUBLE"})
+        
+        with self.assertRaises(ValueError) as ctx:
+            self.registry._ensure_config_columns({"testParam": "VARCHAR"})
+        
+        self.assertIn("exists as", str(ctx.exception))
+
+    def test_register_run_stores_typed_parameters(self):
+        """register_run should store parameters as typed columns."""
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash123",
+            josh_path="/path/to/sim.josh",
+            config_content="test content",
+            file_mappings=None,
+            parameters={"maxGrowth": 50, "scenario": "baseline"},
+        )
+        
+        # Check columns were created
+        columns = self.registry.list_config_columns()
+        self.assertIn("maxGrowth", columns)
+        self.assertIn("scenario", columns)
+        
+        # Check values were stored
+        result = self.registry.conn.execute(
+            'SELECT "maxGrowth", scenario FROM config_parameters WHERE run_hash = ?',
+            ["hash123"],
+        ).fetchone()
+        self.assertEqual(result[0], 50)
+        self.assertEqual(result[1], "baseline")
+
+    def test_register_run_with_mixed_types(self):
+        """register_run should handle mixed numeric and string parameters."""
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash456",
+            josh_path="/path/to/sim.josh",
+            config_content="test content",
+            file_mappings=None,
+            parameters={"numericParam": 3.14, "stringParam": "hello", "intParam": 42},
+        )
+        
+        columns = self.registry.list_config_columns()
+        self.assertIn("numericParam", columns)
+        self.assertIn("stringParam", columns)
+        self.assertIn("intParam", columns)
+
+    def test_get_config_by_hash_returns_typed_parameters(self):
+        """get_config_by_hash should return parameters from typed columns."""
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash789",
+            josh_path="/path/to/sim.josh",
+            config_content="test content",
+            file_mappings=None,
+            parameters={"x": 10, "y": "test"},
+        )
+        
+        config = self.registry.get_config_by_hash("hash789")
+        self.assertIsNotNone(config)
+        self.assertEqual(config.parameters["x"], 10)
+        self.assertEqual(config.parameters["y"], "test")
+
+    def test_get_configs_for_session_returns_typed_parameters(self):
+        """get_configs_for_session should return parameters from typed columns."""
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hashA",
+            josh_path="/path/to/sim.josh",
+            config_content="content A",
+            file_mappings=None,
+            parameters={"param": 100},
+        )
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hashB",
+            josh_path="/path/to/sim.josh",
+            config_content="content B",
+            file_mappings=None,
+            parameters={"param": 200},
+        )
+        
+        configs = self.registry.get_configs_for_session(self.session_id)
+        self.assertEqual(len(configs), 2)
+        params = {c.run_hash: c.parameters["param"] for c in configs}
+        self.assertEqual(params["hashA"], 100)
+        self.assertEqual(params["hashB"], 200)
+
+    def test_list_config_parameters_from_typed_columns(self):
+        """list_config_parameters should list parameter names from typed columns."""
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash1",
+            josh_path="/path/to/sim.josh",
+            config_content="test",
+            file_mappings=None,
+            parameters={"alpha": 1, "beta": 2},
+        )
+        
+        params = self.registry.list_config_parameters()
+        self.assertIn("alpha", params)
+        self.assertIn("beta", params)
+
+    def test_sql_query_typed_parameters_directly(self):
+        """Verify typed parameters enable clean SQL queries without JSON extraction."""
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash1",
+            josh_path="/path/to/sim.josh",
+            config_content="test",
+            file_mappings=None,
+            parameters={"maxGrowth": 50},
+        )
+        
+        # This is the key benefit: clean SQL without json_extract
+        result = self.registry.conn.execute(
+            '''
+            SELECT cp."maxGrowth"
+            FROM config_parameters cp
+            WHERE cp."maxGrowth" > 25
+            '''
+        ).fetchone()
+        
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0], 50)
+
+
 if __name__ == "__main__":
     unittest.main()
