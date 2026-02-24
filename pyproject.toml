@@ -43,12 +43,14 @@ numpy = [
 ]
 registry = [
   "duckdb>=0.9",
+  "scipy>=1.10",
 ]
 all = [
   "jinja2>=3.0",
   "pyyaml>=6.0",
   "numpy>=1.24",
   "duckdb>=0.9",
+  "scipy>=1.10",
 ]
 dev = [
   "build",

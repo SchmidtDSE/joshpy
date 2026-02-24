@@ -39,9 +39,9 @@ default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
 
 [tasks]
-install = "pip install -e '.[all]'"
-install-dev = "pip install -e '.[all,dev]'"
-test = "pytest joshpy/test_*.py -v"
+install = "pip install -e '.[all]' --quiet"
+install-dev = "pip install -e '.[all,dev]' --quiet"
+test = { cmd = "pytest tests/ -v", depends-on = ["install-dev"] }
 lint = "ruff check joshpy/"
 typecheck = "mypy joshpy/"
 format = "ruff format joshpy/"
