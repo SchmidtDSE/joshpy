@@ -34,4 +34,7 @@ quarto render docs/tutorials/analysis.qmd
 echo "=== Rendering full site ==="
 quarto render docs
 
+# Ensure .nojekyll exists for GitHub Pages (prevents ignoring _ prefixed dirs)
+touch docs/_site/.nojekyll
+
 echo "=== Done ==="
