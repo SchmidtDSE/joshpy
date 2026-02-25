@@ -290,13 +290,13 @@ class ExportPaths:
         Returns:
             Resolved Path object.
 
-        Example:
-            path = export_paths.resolve_path(
-                "/tmp/output_{maxGrowth}_{replicate}.csv",
-                maxGrowth=50,
-                replicate=0,
-            )
-            # Returns: Path("/tmp/output_50_0.csv")
+        Examples:
+            >>> path = export_paths.resolve_path(
+            ...     "/tmp/output_{maxGrowth}_{replicate}.csv",
+            ...     maxGrowth=50,
+            ...     replicate=0,
+            ... )
+            >>> # Returns: Path("/tmp/output_50_0.csv")
         """
         resolved = path_template.format(**kwargs)
         return Path(resolved)
@@ -326,25 +326,25 @@ class JoshCLI:
         auto_download: If True, download jars automatically if needed.
         working_dir: Working directory for command execution.
 
-    Example:
-        cli = JoshCLI(josh_jar=Path("joshsim-fat.jar"))
+    Examples:
+        >>> cli = JoshCLI(josh_jar=Path("joshsim-fat.jar"))
 
-        # Run a simulation
-        result = cli.run(RunConfig(
-            script=Path("sim.josh"),
-            simulation="Main",
-            replicates=5,
-        ))
+        >>> # Run a simulation
+        >>> result = cli.run(RunConfig(
+        ...     script=Path("sim.josh"),
+        ...     simulation="Main",
+        ...     replicates=5,
+        ... ))
 
-        # Preprocess data
-        result = cli.preprocess(PreprocessConfig(
-            script=Path("sim.josh"),
-            simulation="Main",
-            data_file=Path("temp.nc"),
-            variable="temperature",
-            units="K",
-            output=Path("temp.jshd"),
-        ))
+        >>> # Preprocess data
+        >>> result = cli.preprocess(PreprocessConfig(
+        ...     script=Path("sim.josh"),
+        ...     simulation="Main",
+        ...     data_file=Path("temp.nc"),
+        ...     variable="temperature",
+        ...     units="K",
+        ...     output=Path("temp.jshd"),
+        ... ))
     """
 
     josh_jar: Path | JarMode | None = None
@@ -610,9 +610,6 @@ class JoshCLI:
         Raises:
             RuntimeError: If command fails (includes exit code context).
 
-        Note:
-            Currently only available in local jar (joshsim-fat.jar),
-            not yet in prod/dev jars.
         """
         args = ["inspect-exports", str(config.script.resolve()), config.simulation]
 

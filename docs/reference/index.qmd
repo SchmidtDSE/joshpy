@@ -74,6 +74,6 @@ Josh JAR file management
 
 | | |
 | --- | --- |
-| [jar.JarMode](jar.JarMode.qmd#joshpy.jar.JarMode) | JAR selection mode. |
+| [jar.JarMode](jar.JarMode.qmd#joshpy.jar.JarMode) | JAR selection mode. Select one of JarMode.PROD, JarMode.DEV, or JarMode.LOCAL. |
 | [jar.JarManager](jar.JarManager.qmd#joshpy.jar.JarManager) | Manages Josh JAR files. |
 | [jar.get_jar](jar.get_jar.qmd#joshpy.jar.get_jar) | Get path to a jar, downloading if necessary. |

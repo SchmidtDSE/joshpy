@@ -181,11 +181,11 @@ class SessionInfo:
         Returns:
             JobConfig if metadata contains 'job_config' key, None otherwise.
 
-        Example:
-            session = registry.get_session(session_id)
-            if session.job_config:
-                # Re-expand jobs for execution
-                job_set = JobExpander().expand(session.job_config)
+        Examples:
+            >>> session = registry.get_session(session_id)
+            >>> if session.job_config:
+            ...     # Re-expand jobs for execution
+            ...     job_set = JobExpander().expand(session.job_config)
         """
         if self.metadata and "job_config" in self.metadata:
             from joshpy.jobs import JobConfig
@@ -422,19 +422,19 @@ class RunRegistry:
         enable_spatial: If True, load spatial extension and create geometry column.
         _conn: DuckDB connection (created automatically).
 
-    Example:
-        # File-based (persistent)
-        registry = RunRegistry("experiment.duckdb")
+    Examples:
+        >>> # File-based (persistent)
+        >>> registry = RunRegistry("experiment.duckdb")
 
-        # In-memory (for testing)
-        registry = RunRegistry(":memory:")
+        >>> # In-memory (for testing)
+        >>> registry = RunRegistry(":memory:")
 
-        # With spatial support enabled (default)
-        registry = RunRegistry("experiment.duckdb", enable_spatial=True)
+        >>> # With spatial support enabled (default)
+        >>> registry = RunRegistry("experiment.duckdb", enable_spatial=True)
 
-        # Context manager
-        with RunRegistry("experiment.duckdb") as registry:
-            session_id = registry.create_session(...)
+        >>> # Context manager
+        >>> with RunRegistry("experiment.duckdb") as registry:
+        ...     session_id = registry.create_session(...)
     """
 
     db_path: Path | str = "josh_runs.duckdb"
@@ -463,8 +463,8 @@ class RunRegistry:
         Returns:
             DuckDB connection object.
 
-        Example:
-            df = registry.conn.execute("SELECT * FROM cell_data LIMIT 10").df()
+        Examples:
+            >>> df = registry.conn.execute("SELECT * FROM cell_data LIMIT 10").df()
         """
         return self._conn
 
@@ -519,18 +519,18 @@ class RunRegistry:
         Returns:
             DuckDB relation (call .df() for DataFrame, .fetchall() for tuples).
 
-        Example:
-            # Get DataFrame
-            df = registry.query(
-                "SELECT * FROM cell_data WHERE step BETWEEN ? AND ?",
-                [0, 10]
-            ).df()
+        Examples:
+            >>> # Get DataFrame
+            >>> df = registry.query(
+            ...     "SELECT * FROM cell_data WHERE step BETWEEN ? AND ?",
+            ...     [0, 10]
+            ... ).df()
 
-            # Get raw results
-            rows = registry.query(
-                "SELECT COUNT(*) FROM cell_data WHERE run_hash = ?",
-                ["abc123"]
-            ).fetchone()
+            >>> # Get raw results
+            >>> rows = registry.query(
+            ...     "SELECT COUNT(*) FROM cell_data WHERE run_hash = ?",
+            ...     ["abc123"]
+            ... ).fetchone()
         """
         return self._conn.execute(sql, params or [])
 
@@ -544,15 +544,17 @@ class RunRegistry:
             path: Output file path.
             table: Table name to export (default: cell_data).
 
-        Example:
-            registry.to_parquet("results.parquet")
+        Examples:
+            >>> registry.to_parquet("results.parquet")
 
-            # In R:
-            # df <- arrow::read_parquet("results.parquet")
+            In R:
 
-            # In Python:
-            # import pandas as pd
-            # df = pd.read_parquet("results.parquet")
+            >>> # df <- arrow::read_parquet("results.parquet")
+
+            In Python:
+
+            >>> import pandas as pd
+            >>> df = pd.read_parquet("results.parquet")
         """
         path_str = str(path)
         self._conn.execute(f"COPY {table} TO '{path_str}' (FORMAT PARQUET)")
@@ -564,11 +566,12 @@ class RunRegistry:
             path: Output file path.
             table: Table name to export (default: cell_data).
 
-        Example:
-            registry.to_csv("results.csv")
+        Examples:
+            >>> registry.to_csv("results.csv")
 
-            # In R:
-            # df <- readr::read_csv("results.csv")
+            In R:
+
+            >>> # df <- readr::read_csv("results.csv")
         """
         path_str = str(path)
         self._conn.execute(f"COPY {table} TO '{path_str}' (FORMAT CSV, HEADER)")
@@ -593,14 +596,14 @@ class RunRegistry:
         Raises:
             ValueError: If both bbox and geojson are provided.
 
-        Example:
-            with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
-                df = queries.get_timeseries("height", run_hash="abc123")
+        Examples:
+            >>> with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
+            ...     df = queries.get_timeseries("height", run_hash="abc123")
 
-            # Nested with time filter
-            with registry.spatial_filter(geojson=park_boundary):
-                with registry.time_filter(step_range=(0, 50)):
-                    df = queries.get_timeseries("height", run_hash="abc123")
+            >>> # Nested with time filter
+            >>> with registry.spatial_filter(geojson=park_boundary):
+            ...     with registry.time_filter(step_range=(0, 50)):
+            ...         df = queries.get_timeseries("height", run_hash="abc123")
         """
         if bbox and geojson:
             raise ValueError("Specify either bbox or geojson, not both")
@@ -630,14 +633,14 @@ class RunRegistry:
         Args:
             step_range: Tuple of (min_step, max_step) inclusive.
 
-        Example:
-            with registry.time_filter(step_range=(0, 50)):
-                df = queries.get_timeseries("height", run_hash="abc123")
+        Examples:
+            >>> with registry.time_filter(step_range=(0, 50)):
+            ...     df = queries.get_timeseries("height", run_hash="abc123")
 
-            # Nested with spatial filter
-            with registry.time_filter(step_range=(10, 20)):
-                with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
-                    df = queries.get_comparison("height", group_by="maxGrowth")
+            >>> # Nested with spatial filter
+            >>> with registry.time_filter(step_range=(10, 20)):
+            ...     with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
+            ...         df = queries.get_comparison("height", group_by="maxGrowth")
         """
         prev_range = self._time_filter_range
         self._time_filter_range = step_range
@@ -1363,7 +1366,7 @@ class RunRegistry:
         Returns:
             Sorted list of variable column names.
 
-        Example:
+        Examples:
             >>> registry.list_variable_columns()
             ['averageAge', 'avg.height', 'treeCount']
         """
@@ -1397,7 +1400,7 @@ class RunRegistry:
         Returns:
             Sorted list of variable column names.
 
-        Example:
+        Examples:
             >>> registry.list_export_variables()
             ['averageAge', 'avg.height', 'treeCount']
 
@@ -1494,7 +1497,7 @@ class RunRegistry:
         Returns:
             SparsityReport with statistics for each variable column.
 
-        Example:
+        Examples:
             >>> report = registry.check_sparsity()
             >>> if report.should_warn:
             ...     print(report)
@@ -1553,7 +1556,7 @@ class RunRegistry:
         Returns:
             Sorted list of parameter column names.
 
-        Example:
+        Examples:
             >>> registry.list_config_columns()
             ['maxGrowth', 'scenario', 'soil.moisture']
         """
@@ -1632,7 +1635,7 @@ class RunRegistry:
         Returns:
             Sorted list of parameter names.
 
-        Example:
+        Examples:
             >>> registry.list_config_parameters()
             ['maxGrowth', 'scenario', 'survivalProb']
         """
@@ -1817,20 +1820,17 @@ class RegistryCallback:
         registry: The RunRegistry to record runs in.
         session_id: The session ID for the current sweep.
 
-    Example:
-        from joshpy.cli import JoshCLI
-        from joshpy.jobs import JobExpander, to_run_config
-
-        registry = RunRegistry("experiment.duckdb")
-        session_id = registry.create_session(...)
-
-        callback = RegistryCallback(registry, session_id)
-        cli = JoshCLI()
-
-        for job in job_set:
-            run_config = to_run_config(job)
-            result = cli.run(run_config)
-            callback.record(job, result)
+    Examples:
+        >>> from joshpy.cli import JoshCLI
+        >>> from joshpy.jobs import JobExpander, to_run_config
+        >>> registry = RunRegistry("experiment.duckdb")
+        >>> session_id = registry.create_session(...)
+        >>> callback = RegistryCallback(registry, session_id)
+        >>> cli = JoshCLI()
+        >>> for job in job_set:
+        ...     run_config = to_run_config(job)
+        ...     result = cli.run(run_config)
+        ...     callback.record(job, result)
     """
 
     registry: RunRegistry

@@ -131,12 +131,12 @@ def _compute_run_hash(
     Raises:
         FileNotFoundError: If josh_path or any file in file_mappings doesn't exist.
 
-    Example:
-        run_hash = _compute_run_hash(
-            josh_path=Path("simulation.josh"),
-            config_content=rendered_jshc,
-            file_mappings={"climate": Path("data/rcp85.jshd")},
-        )
+    Examples:
+        >>> run_hash = _compute_run_hash(
+        ...     josh_path=Path("simulation.josh"),
+        ...     config_content=rendered_jshc,
+        ...     file_mappings={"climate": Path("data/rcp85.jshd")},
+        ... )
     """
     hasher = hashlib.md5()
 
@@ -286,9 +286,8 @@ class SweepConfig:
     def expand(self) -> list[dict[str, Any]]:
         """Generate cartesian product of all parameter values.
 
-        Returns:
-            List of dicts, each representing one parameter combination.
-            For example, with parameters A=[1,2] and B=[x,y], returns:
+        Returns a List of dicts, each representing one parameter combination.
+        For example, with parameters A=[1,2] and B=[x,y], returns:
             [{"A": 1, "B": "x"}, {"A": 1, "B": "y"},
              {"A": 2, "B": "x"}, {"A": 2, "B": "y"}]
         """
@@ -534,9 +533,9 @@ class JobSet:
     def total_jobs(self) -> int:
         """Total number of job configurations.
 
-        Example:
-            job_set = expander.expand(config)
-            print(f"Will run {job_set.total_jobs} jobs")
+        Examples:
+            >>> job_set = expander.expand(config)
+            >>> print(f"Will run {job_set.total_jobs} jobs")
         """
         return len(self.jobs)
 
@@ -544,9 +543,9 @@ class JobSet:
     def total_replicates(self) -> int:
         """Total number of replicates across all jobs.
 
-        Example:
-            job_set = expander.expand(config)
-            print(f"Total replicates: {job_set.total_replicates}")
+        Examples:
+            >>> job_set = expander.expand(config)
+            >>> print(f"Total replicates: {job_set.total_replicates}")
         """
         return sum(job.replicates for job in self.jobs)
 
@@ -693,17 +692,15 @@ def to_run_config(job: ExpandedJob) -> RunConfig:
     Raises:
         ValueError: If job.source_path is None.
 
-    Example:
-        from joshpy.jobs import JobExpander, to_run_config
-        from joshpy.cli import JoshCLI
-
-        expander = JobExpander()
-        job_set = expander.expand(config)
-
-        cli = JoshCLI()
-        for job in job_set:
-            run_config = to_run_config(job)
-            result = cli.run(run_config)
+    Examples:
+        >>> from joshpy.jobs import JobExpander, to_run_config
+        >>> from joshpy.cli import JoshCLI
+        >>> expander = JobExpander()
+        >>> job_set = expander.expand(config)
+        >>> cli = JoshCLI()
+        >>> for job in job_set:
+        ...     run_config = to_run_config(job)
+        ...     result = cli.run(run_config)
     """
     from joshpy.cli import RunConfig
 
@@ -748,20 +745,18 @@ def to_run_remote_config(
     Raises:
         ValueError: If job.source_path is None.
 
-    Example:
-        from joshpy.jobs import JobExpander, to_run_remote_config
-        from joshpy.cli import JoshCLI
-
-        expander = JobExpander()
-        job_set = expander.expand(config)
-
-        cli = JoshCLI()
-        for job in job_set:
-            # With Josh Cloud (requires API key)
-            run_config = to_run_remote_config(job, api_key="your-api-key")
-            # Or with local server (no API key needed)
-            run_config = to_run_remote_config(job, endpoint="http://localhost:8080")
-            result = cli.run_remote(run_config)
+    Examples:
+        >>> from joshpy.jobs import JobExpander, to_run_remote_config
+        >>> from joshpy.cli import JoshCLI
+        >>> expander = JobExpander()
+        >>> job_set = expander.expand(config)
+        >>> cli = JoshCLI()
+        >>> for job in job_set:
+        ...     # With Josh Cloud (requires API key)
+        ...     run_config = to_run_remote_config(job, api_key="your-api-key")
+        ...     # Or with local server (no API key needed)
+        ...     run_config = to_run_remote_config(job, endpoint="http://localhost:8080")
+        ...     result = cli.run_remote(run_config)
     """
     from joshpy.cli import RunRemoteConfig
 
@@ -792,13 +787,12 @@ class SweepResult:
         succeeded: Number of successful jobs.
         failed: Number of failed jobs.
 
-    Example:
-        results = run_sweep(cli, job_set)
-        print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
-
-        for job, result in results:
-            if not result.success:
-                print(f"Failed: {job.parameters}")
+    Examples:
+        >>> results = run_sweep(cli, job_set)
+        >>> print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+        >>> for job, result in results:
+        ...     if not result.success:
+        ...         print(f"Failed: {job.parameters}")
     """
 
     job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
@@ -863,44 +857,42 @@ def run_sweep(
         ValueError: If remote=True but api_key is not provided.
         ValueError: If registry provided but session_id is not.
 
-    Example:
-        from joshpy.jobs import run_sweep, JobExpander, JobConfig
-        from joshpy.cli import JoshCLI
-        from joshpy.registry import RunRegistry
+    Examples:
+        >>> from joshpy.jobs import run_sweep, JobExpander, JobConfig
+        >>> from joshpy.cli import JoshCLI
+        >>> from joshpy.registry import RunRegistry
+        >>> cli = JoshCLI()
+        >>> config = JobConfig(...)
+        >>> job_set = JobExpander().expand(config)
+        >>> registry = RunRegistry("experiment.duckdb")
+        >>> session_id = registry.create_session(config=config)
 
-        cli = JoshCLI()
-        config = JobConfig(...)
-        job_set = JobExpander().expand(config)
+        >>> # Register job configs
+        >>> for job in job_set:
+        ...     registry.register_run(
+        ...         session_id=session_id,
+        ...         run_hash=job.run_hash,
+        ...         josh_path=str(job.source_path),
+        ...         config_content=job.config_content,
+        ...         file_mappings=job.file_mappings,
+        ...         parameters=job.parameters,
+        ...     )
 
-        registry = RunRegistry("experiment.duckdb")
-        session_id = registry.create_session(config=config)
+        >>> # Run with automatic tracking (status managed automatically)
+        >>> results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
+        >>> print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
 
-        # Register job configs
-        for job in job_set:
-            registry.register_run(
-                session_id=session_id,
-                run_hash=job.run_hash,
-                josh_path=str(job.source_path),
-                config_content=job.config_content,
-                file_mappings=job.file_mappings,
-                parameters=job.parameters,
-            )
+        >>> # Or run remotely on Josh Cloud:
+        >>> results = run_sweep(
+        ...     cli, job_set,
+        ...     registry=registry,
+        ...     session_id=session_id,
+        ...     remote=True,
+        ...     api_key="your-api-key",
+        ... )
 
-        # Run with automatic tracking (status managed automatically)
-        results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
-        print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
-
-        # Or run remotely on Josh Cloud:
-        results = run_sweep(
-            cli, job_set,
-            registry=registry,
-            session_id=session_id,
-            remote=True,
-            api_key="your-api-key",
-        )
-
-        # Or without registry (just execute, no tracking):
-        results = run_sweep(cli, job_set)
+        >>> # Or without registry (just execute, no tracking):
+        >>> results = run_sweep(cli, job_set)
     """
     # Import here to avoid circular dependency
     from joshpy.registry import RegistryCallback
