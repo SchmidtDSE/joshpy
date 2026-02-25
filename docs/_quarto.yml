@@ -127,7 +127,7 @@ format:
     code-overflow: wrap
 
 execute:
-  freeze: auto
+  freeze: true
 
 # Quartodoc API reference generation
 quartodoc:
