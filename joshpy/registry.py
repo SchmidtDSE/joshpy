@@ -46,7 +46,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from schema import SCHEMA_SQL
+from joshpy.schema import SCHEMA_SQL
 
 try:
     import duckdb
@@ -705,18 +705,17 @@ class RunRegistry:
         Returns:
             The session ID (generated or provided).
 
-        Example:
-            from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
-
-            config = JobConfig(
-                template_path=Path("template.jshc.j2"),
-                source_path=Path("simulation.josh"),
-                simulation="Main",
-                sweep=SweepConfig(
-                    parameters=[SweepParameter(name="maxGrowth", values=[10, 20, 30])]
-                ),
-            )
-            session_id = registry.create_session(config=config)
+        Examples:
+            >>> from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+            >>> config = JobConfig(
+            ...     template_path=Path("template.jshc.j2"),
+            ...     source_path=Path("simulation.josh"),
+            ...     simulation="Main",
+            ...     sweep=SweepConfig(
+            ...         parameters=[SweepParameter(name="maxGrowth", values=[10, 20, 30])]
+            ...     ),
+            ... )
+            >>> session_id = registry.create_session(config=config)
 
         Note:
             total_jobs and total_replicates are computed from the JobSet

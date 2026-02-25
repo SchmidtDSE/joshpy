@@ -1,0 +1,79 @@
+# API Reference {.doc .doc-index}
+
+## CLI Module
+
+Josh command-line interface wrapper
+
+| | |
+| --- | --- |
+| [cli.JoshCLI](cli.JoshCLI.qmd#joshpy.cli.JoshCLI) | Executes Josh CLI commands via subprocess. |
+| [cli.CLIResult](cli.CLIResult.qmd#joshpy.cli.CLIResult) | Result of any CLI command execution. |
+| [cli.RunConfig](cli.RunConfig.qmd#joshpy.cli.RunConfig) | Arguments for 'java -jar joshsim.jar run' command. |
+| [cli.RunRemoteConfig](cli.RunRemoteConfig.qmd#joshpy.cli.RunRemoteConfig) | Arguments for 'java -jar joshsim.jar runRemote' command. |
+| [cli.PreprocessConfig](cli.PreprocessConfig.qmd#joshpy.cli.PreprocessConfig) | Arguments for 'java -jar joshsim.jar preprocess' command. |
+| [cli.ValidateConfig](cli.ValidateConfig.qmd#joshpy.cli.ValidateConfig) | Arguments for 'java -jar joshsim.jar validate' command. |
+
+## Jobs Module
+
+Job configuration and parameter sweep execution
+
+| | |
+| --- | --- |
+| [jobs.JobConfig](jobs.JobConfig.qmd#joshpy.jobs.JobConfig) | Configuration for a job (may be template for expansion). |
+| [jobs.SweepConfig](jobs.SweepConfig.qmd#joshpy.jobs.SweepConfig) | Configuration for parameter sweep expansion. |
+| [jobs.SweepParameter](jobs.SweepParameter.qmd#joshpy.jobs.SweepParameter) | A parameter to sweep over in the job expansion. |
+| [jobs.JobExpander](jobs.JobExpander.qmd#joshpy.jobs.JobExpander) | Expands JobConfig with sweeps into concrete ExpandedJobs. |
+| [jobs.JobSet](jobs.JobSet.qmd#joshpy.jobs.JobSet) | A collection of jobs to execute (from expanding a JobConfig). |
+| [jobs.ExpandedJob](jobs.ExpandedJob.qmd#joshpy.jobs.ExpandedJob) | A fully-expanded job with concrete parameter values. |
+| [jobs.run_sweep](jobs.run_sweep.qmd#joshpy.jobs.run_sweep) | Execute all jobs in a JobSet. |
+| [jobs.SweepResult](jobs.SweepResult.qmd#joshpy.jobs.SweepResult) | Results from running a parameter sweep. |
+
+## Registry Module
+
+DuckDB-backed experiment tracking
+
+| | |
+| --- | --- |
+| [registry.RunRegistry](registry.RunRegistry.qmd#joshpy.registry.RunRegistry) | DuckDB-backed registry for tracking parameter sweeps and job runs. |
+| [registry.RegistryCallback](registry.RegistryCallback.qmd#joshpy.registry.RegistryCallback) | Helper for recording CLI results in the registry. |
+| [registry.SessionInfo](registry.SessionInfo.qmd#joshpy.registry.SessionInfo) | Information about a sweep session. |
+| [registry.ConfigInfo](registry.ConfigInfo.qmd#joshpy.registry.ConfigInfo) | Information about a job configuration. |
+| [registry.RunInfo](registry.RunInfo.qmd#joshpy.registry.RunInfo) | Information about a job run. |
+| [registry.DataSummary](registry.DataSummary.qmd#joshpy.registry.DataSummary) | Summary of data loaded in the registry. |
+
+## Cell Data Module
+
+Data loading and diagnostic queries
+
+| | |
+| --- | --- |
+| [cell_data.CellDataLoader](cell_data.CellDataLoader.qmd#joshpy.cell_data.CellDataLoader) | Load Josh export CSVs into the cell_data table. |
+| [cell_data.DiagnosticQueries](cell_data.DiagnosticQueries.qmd#joshpy.cell_data.DiagnosticQueries) | Pre-built queries for common diagnostic plots and analysis. |
+
+## Diagnostics Module
+
+Quick visualization for simulation sanity checks
+
+| | |
+| --- | --- |
+| [diagnostics.SimulationDiagnostics](diagnostics.SimulationDiagnostics.qmd#joshpy.diagnostics.SimulationDiagnostics) | Diagnostic plotting backed by a RunRegistry. |
+
+## Sweep Module
+
+High-level sweep orchestration
+
+| | |
+| --- | --- |
+| [sweep.SweepManager](sweep.SweepManager.qmd#joshpy.sweep.SweepManager) | Convenience orchestrator for parameter sweeps. |
+| [sweep.SweepManagerBuilder](sweep.SweepManagerBuilder.qmd#joshpy.sweep.SweepManagerBuilder) | Builder for SweepManager with flexible configuration. |
+| [sweep.recover_sweep_results](sweep.recover_sweep_results.qmd#joshpy.sweep.recover_sweep_results) | Load CSV results from completed sweep jobs into the registry. |
+
+## JAR Module
+
+Josh JAR file management
+
+| | |
+| --- | --- |
+| [jar.JarMode](jar.JarMode.qmd#joshpy.jar.JarMode) | JAR selection mode. |
+| [jar.JarManager](jar.JarManager.qmd#joshpy.jar.JarManager) | Manages Josh JAR files. |
+| [jar.get_jar](jar.get_jar.qmd#joshpy.jar.get_jar) | Get path to a jar, downloading if necessary. |

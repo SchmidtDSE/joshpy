@@ -1,0 +1,271 @@
+---
+title: "SweepManager Workflow"
+description: "Simplified parameter sweep using SweepManager"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+[Josh](https://joshsim.org) is an ecological simulation runtime for agent-based
+modeling developed by the [Eric and Wendy Schmidt Center for Data Science and Environment](https://github.com/SchmidtDSE/josh).
+This demo assumes familiarity with Josh's simulation language and runtime.
+
+**joshpy** is a Python client that enables:
+
+- **Orchestration**: Define parameter sweeps, expand job configurations, and
+  execute simulations programmatically
+- **Tracking**: Register runs in a DuckDB-backed registry with session and
+  config tracking
+- **Data Loading**: Import cell-level CSV exports into queryable tables
+- **Analysis**: Query results across parameter values and replicates
+- **Diagnostics**: Quick matplotlib visualizations for simulation sanity checks
+- **Visualization**: Create publication-quality plots with R/ggplot2 integration
+
+This demo walks through a complete parameter sweep workflow **using `SweepManager`**,
+which encapsulates the common workflow of expanding, running, and collecting
+sweep results. For a more detailed walkthrough using each component directly,
+see [Manual Workflow](manual-workflow.qmd).
+
+We vary the `maxGrowth` parameter from 10 to 100 meters/step across 10 experiments,
+each with 3 replicates, then load, query, and visualize the results.
+
+## Prerequisites
+
+Ensure the Josh JAR is available at `jar/joshsim-fat.jar` and joshpy is installed:
+
+```bash
+pip install -e '.[all]'
+```
+
+For visualization, ensure R is installed with the following packages:
+
+```r
+install.packages(c("reticulate", "ggplot2", "dplyr"))
+```
+
+## Step 1: Define Parameter Sweep
+
+The first step is to define our experiment configuration. joshpy uses three key
+abstractions:
+
+- **`JobConfig`**: The top-level configuration specifying source files, templates,
+  and sweep parameters
+- **`SweepConfig`**: Defines which parameters to sweep and their values
+- **`SweepParameter`**: A single parameter with a name and list of values
+
+```{python}
+from pathlib import Path
+
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+
+# Paths to source files (optimized for fast tutorial builds)
+SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
+TEMPLATE_PATH = Path("../../examples/templates/sweep_config.jshc.j2")
+
+# Parameter sweep: maxGrowth from 10 to 100 in steps of 10
+MAX_GROWTH_VALUES = list(range(10, 101, 10))
+
+config = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        parameters=[
+            # maxGrowth is swept - creates one job per value
+            SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
+            # Note: daysPerYear is a static value in the template (not swept)
+        ]
+    ),
+)
+```
+
+The sweep creates one job per `maxGrowth` value (10, 20, ..., 100). Static values 
+like `daysPerYear` are defined directly in the template, not as sweep parameters.
+
+Let's examine the source files. The `.josh` file defines the simulation, and
+the `.jshc.j2` template provides parameterized configuration:
+
+#### Josh Source
+
+```{python}
+print(SOURCE_PATH.read_text())
+```
+
+#### Template Configuration
+
+```{python}
+print(TEMPLATE_PATH.read_text())
+```
+
+Notice how the configuration template has two types of values:
+
+- **Static values** (e.g., `daysPerYear = 365 count`): Fixed values that don't use Jinja 
+  templating. These are the same for all runs in the sweep.
+- **Swept values** (e.g., `maxGrowth = {{ maxGrowth }} meters`): Values that use Jinja
+  variables. These vary across sweep runs based on the `SweepParameter` definitions.
+
+The `.josh` file references both via `config sweep_config.variableName`. At runtime,
+each config variable pulls its value from the generated `.jshc` file.
+
+## Step 2: Create SweepManager
+
+The `SweepManager` encapsulates the entire sweep workflow. It uses a builder
+pattern for flexible configuration:
+
+- **`with_registry()`**: Configure DuckDB registry (path or existing instance)
+- **`with_cli()`**: Configure JoshCLI (JAR path or existing instance)
+- **`build()`**: Expand jobs, create session, and register configurations
+
+```{python}
+from joshpy.sweep import SweepManager
+
+# Registry path - saved to disk for use in analysis tutorial
+REGISTRY_PATH = "demo_registry.duckdb"
+
+# Create manager with builder pattern
+manager = (
+    SweepManager.builder(config)
+    .with_registry(REGISTRY_PATH, experiment_name="growth_rate_sweep")
+    .with_cli(jar_path=Path("../../jar/joshsim-fat.jar"))
+    .build()
+)
+```
+
+## Step 3: Run Simulations
+
+The `run()` method executes all jobs with automatic registry tracking:
+
+```{python}
+# Run all jobs
+results = manager.run()
+```
+
+## Step 4: Load Results
+
+The `load_results()` method automatically discovers export paths from the Josh
+file, resolves template variables for each job, and loads CSV results:
+
+```{python}
+manager.load_results()
+```
+
+## Step 5: Verify Data Loaded
+
+Let's verify the data is in the registry and ready for analysis:
+
+```{python}
+# Get summary of loaded data
+summary = manager.registry.get_data_summary()
+print(summary)
+```
+
+```{python}
+manager.registry.list_export_variables()
+```
+
+```{python}
+manager.registry.list_config_parameters()
+```
+
+## Next Steps: Analysis
+
+Now that data is loaded, see **[Analysis & Visualization Tutorial](analysis.qmd)** for comprehensive coverage of:
+
+- **Diagnostic Plots** (`SimulationDiagnostics`) - quick matplotlib visualizations
+- **Custom Queries** (`DiagnosticQueries`) - get pandas DataFrames
+- **Direct SQL** - full DuckDB access for advanced analysis
+- **R/ggplot2** - publication-quality figures
+
+Quick example using `manager.query()`:
+
+```{python}
+# Query with parameter grouping
+df = manager.query("averageHeight", group_by="maxGrowth")
+df.head(10)
+```
+
+```{python}
+#| label: fig-quick-comparison
+#| fig-cap: "Tree height trajectories across maxGrowth values."
+
+from joshpy.diagnostics import SimulationDiagnostics
+
+diag = SimulationDiagnostics(manager.registry)
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    title="Tree Height by Growth Rate Parameter",
+)
+```
+
+## Summary
+
+This demo illustrated the `SweepManager` workflow:
+
+1. **Define** a parameter sweep using `JobConfig` and `SweepConfig`
+2. **Build** a `SweepManager` with builder pattern (handles expansion and registration)
+3. **Execute** with `manager.run()` - single method replaces manual loops
+4. **Load** outputs with `manager.load_results()` - automatic path discovery
+5. **Analyze** - see [Analysis Tutorial](analysis.qmd) for visualization and queries
+
+**SweepManager Benefits:**
+
+- **Encapsulation**: One object manages registry, CLI, and job set
+- **Context manager**: Automatic cleanup with `with` statement
+- **Builder pattern**: Flexible configuration with sensible defaults
+- **Convenience methods**: `run()`, `load_results()`, `query()` for common operations
+
+**Alternative Creation Methods:**
+
+```python
+# From dictionary
+manager = SweepManager.from_dict(config.to_dict(), registry=":memory:")
+
+# From YAML file
+manager = SweepManager.from_yaml(Path("experiment.yaml"))
+
+# With existing components
+manager = (
+    SweepManager.builder(config)
+    .with_registry(existing_registry, session_id="existing-session")
+    .with_cli(existing_cli)
+    .build()
+)
+```
+
+**Related Tutorials:**
+
+- [Manual Workflow](manual-workflow.qmd) - Step-by-step control using individual components
+- [Analysis & Visualization](analysis.qmd) - Analysis and visualization (decoupled from orchestration)
+
+## Cleanup
+
+```{python}
+# SweepManager cleanup (also works as context manager)
+manager.cleanup()  # Remove temporary config files
+manager.close()    # Close registry connection
+```
+
+The registry has been saved to `demo_registry.duckdb`. Run the [Analysis Tutorial](analysis.qmd) to 
+explore the results.
+
+**Alternative: Context Manager**
+
+```python
+# Automatic cleanup with context manager
+with SweepManager.from_dict(config.to_dict()) as manager:
+    manager.run()
+    manager.load_results()
+    df = manager.query("averageHeight", group_by="maxGrowth")
+# Resources automatically cleaned up here
+```

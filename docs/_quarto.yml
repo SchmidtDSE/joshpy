@@ -1,0 +1,195 @@
+project:
+  type: website
+  output-dir: _site
+
+website:
+  title: "joshpy"
+  description: "Python client for Josh ecological simulations"
+  
+  navbar:
+    left:
+      - text: "Getting Started"
+        href: getting-started/index.qmd
+      - text: "Tutorials"
+        menu:
+          - text: "---"
+          - text: "Orchestration"
+          - text: "Manual Workflow"
+            href: tutorials/manual-workflow.qmd
+          - text: "SweepManager"
+            href: tutorials/sweep-manager.qmd
+          - text: "---"
+          - text: "Analysis"
+          - text: "Analysis & Visualization"
+            href: tutorials/analysis.qmd
+      - text: "How-To"
+        href: how-to/index.qmd
+      - text: "Reference"
+        href: reference/index.qmd
+      - text: "Concepts"
+        href: explanation/index.qmd
+    right:
+      - icon: github
+        href: https://github.com/SchmidtDSE/joshpy
+      - icon: box-arrow-up-right
+        href: https://joshsim.org
+        text: Josh
+
+  sidebar:
+    - title: "Getting Started"
+      contents:
+        - getting-started/index.qmd
+        - getting-started/installation.qmd
+        - getting-started/quickstart.qmd
+    
+    - title: "Tutorials"
+      contents:
+        - tutorials/index.qmd
+        - section: "Orchestration"
+          contents:
+            - tutorials/manual-workflow.qmd
+            - tutorials/sweep-manager.qmd
+        - section: "Analysis"
+          contents:
+            - tutorials/analysis.qmd
+    
+    - title: "How-To Guides"
+      contents:
+        - how-to/index.qmd
+    
+    - title: "API Reference"
+      contents:
+        - reference/index.qmd
+        - section: "CLI"
+          contents:
+            - reference/cli.JoshCLI.qmd
+            - reference/cli.CLIResult.qmd
+            - reference/cli.RunConfig.qmd
+            - reference/cli.RunRemoteConfig.qmd
+            - reference/cli.PreprocessConfig.qmd
+            - reference/cli.ValidateConfig.qmd
+        - section: "Jobs"
+          contents:
+            - reference/jobs.JobConfig.qmd
+            - reference/jobs.SweepConfig.qmd
+            - reference/jobs.SweepParameter.qmd
+            - reference/jobs.JobExpander.qmd
+            - reference/jobs.JobSet.qmd
+            - reference/jobs.ExpandedJob.qmd
+            - reference/jobs.run_sweep.qmd
+            - reference/jobs.SweepResult.qmd
+        - section: "Registry"
+          contents:
+            - reference/registry.RunRegistry.qmd
+            - reference/registry.RegistryCallback.qmd
+            - reference/registry.SessionInfo.qmd
+            - reference/registry.ConfigInfo.qmd
+            - reference/registry.RunInfo.qmd
+            - reference/registry.DataSummary.qmd
+        - section: "Data & Diagnostics"
+          contents:
+            - reference/cell_data.CellDataLoader.qmd
+            - reference/cell_data.DiagnosticQueries.qmd
+            - reference/diagnostics.SimulationDiagnostics.qmd
+        - section: "Sweep Management"
+          contents:
+            - reference/sweep.SweepManager.qmd
+            - reference/sweep.SweepManagerBuilder.qmd
+            - reference/sweep.recover_sweep_results.qmd
+        - section: "JAR Management"
+          contents:
+            - reference/jar.JarMode.qmd
+            - reference/jar.JarManager.qmd
+            - reference/jar.get_jar.qmd
+    
+    - title: "Concepts"
+      contents:
+        - explanation/index.qmd
+
+  page-footer:
+    center: |
+      Built with [Quarto](https://quarto.org) |
+      [joshpy](https://github.com/SchmidtDSE/joshpy) is part of the
+      [DSE Disturbance Toolbox](https://dse.berkeley.edu)
+
+  search:
+    location: navbar
+    type: overlay
+
+format:
+  html:
+    theme:
+      light: flatly
+      dark: darkly
+    toc: true
+    toc-depth: 3
+    code-copy: true
+    code-overflow: wrap
+
+execute:
+  freeze: auto
+
+# Quartodoc API reference generation
+quartodoc:
+  package: joshpy
+  title: "API Reference"
+  dir: reference
+  parser: google
+  
+  sections:
+    - title: CLI Module
+      desc: Josh command-line interface wrapper
+      contents:
+        - cli.JoshCLI
+        - cli.CLIResult
+        - cli.RunConfig
+        - cli.RunRemoteConfig
+        - cli.PreprocessConfig
+        - cli.ValidateConfig
+    
+    - title: Jobs Module
+      desc: Job configuration and parameter sweep execution
+      contents:
+        - jobs.JobConfig
+        - jobs.SweepConfig
+        - jobs.SweepParameter
+        - jobs.JobExpander
+        - jobs.JobSet
+        - jobs.ExpandedJob
+        - jobs.run_sweep
+        - jobs.SweepResult
+    
+    - title: Registry Module
+      desc: DuckDB-backed experiment tracking
+      contents:
+        - registry.RunRegistry
+        - registry.RegistryCallback
+        - registry.SessionInfo
+        - registry.ConfigInfo
+        - registry.RunInfo
+        - registry.DataSummary
+    
+    - title: Cell Data Module
+      desc: Data loading and diagnostic queries
+      contents:
+        - cell_data.CellDataLoader
+        - cell_data.DiagnosticQueries
+    
+    - title: Diagnostics Module
+      desc: Quick visualization for simulation sanity checks
+      contents:
+        - diagnostics.SimulationDiagnostics
+    
+    - title: Sweep Module
+      desc: High-level sweep orchestration
+      contents:
+        - sweep.SweepManager
+        - sweep.SweepManagerBuilder
+        - sweep.recover_sweep_results
+    
+    - title: JAR Module
+      desc: Josh JAR file management
+      contents:
+        - jar.JarMode
+        - jar.JarManager
+        - jar.get_jar

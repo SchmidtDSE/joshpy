@@ -1,0 +1,60 @@
+---
+title: "Tutorials"
+---
+
+Step-by-step guides for learning joshpy.
+
+## Orchestration
+
+Tutorials for running parameter sweeps and managing simulations.
+
+### [Manual Workflow](manual-workflow.qmd)
+
+Learn each component of joshpy by using them directly:
+
+- `JobConfig`, `SweepConfig`, `SweepParameter` for configuration
+- `JobExpander` for expanding parameter combinations
+- `RunRegistry` for experiment tracking
+- `run_sweep()` for execution
+
+Best for: Understanding how joshpy works under the hood.
+
+### [SweepManager Workflow](sweep-manager.qmd)
+
+Use the high-level `SweepManager` class that handles:
+
+- Expansion, execution, and result collection
+- Automatic registry management
+- Context manager for cleanup
+
+Best for: Production workflows where you want simplicity.
+
+## Analysis
+
+Tutorials for exploring and visualizing results.
+
+### [Analysis & Visualization](analysis.qmd)
+
+Explore and visualize simulation results:
+
+- Data discovery with `registry.get_data_summary()`
+- Diagnostic plots with `SimulationDiagnostics`
+- Custom queries with `DiagnosticQueries`
+- Direct SQL access to DuckDB
+- R/ggplot2 integration for publication-quality figures
+
+Best for: Understanding the analysis layer (works with any registry).
+
+## Prerequisites
+
+All tutorials assume:
+
+1. joshpy is installed with all dependencies: `pip install joshpy[all]`
+2. Josh JAR is available (auto-downloaded if needed)
+3. Java 17+ is installed
+
+## Recommended Order
+
+1. **First**: [Manual Workflow](manual-workflow.qmd) - understand the components
+2. **Then**: [SweepManager](sweep-manager.qmd) - see the simplified workflow
+3. **Finally**: [Analysis](analysis.qmd) - learn visualization patterns

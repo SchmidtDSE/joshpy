@@ -1,0 +1,102 @@
+---
+title: "Quickstart"
+execute:
+  warning: false
+---
+
+Run your first Josh simulation with joshpy in under 5 minutes.
+
+## 1. Install joshpy
+
+```bash
+pip install joshpy[all]
+```
+
+## 2. Run a Simulation
+
+joshpy wraps the Josh CLI to run simulations. Here's a minimal example:
+
+```{python}
+from pathlib import Path
+from joshpy.cli import JoshCLI, RunConfig
+
+# Create CLI (auto-downloads Josh JAR if needed)
+cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+
+# Run the quickstart simulation
+# Note: The .josh file defines the output path as /tmp/quickstart_output.csv
+result = cli.run(RunConfig(
+    script=Path("../../examples/quickstart.josh"),
+    simulation="Main",
+    replicates=1,
+))
+
+print(f"Success: {result.success}")
+print(f"Exit code: {result.exit_code}")
+if not result.success:
+    print(f"Error: {result.stderr}")
+```
+
+## 3. Load and Plot Results
+
+Load the simulation output into pandas and create a simple visualization:
+
+```{python}
+#| label: fig-quickstart
+#| fig-cap: "Tree growth over 10 timesteps"
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Load results (path defined in quickstart.josh as exportFiles.patch)
+df = pd.read_csv("/tmp/quickstart_output.csv")
+print(f"Loaded {len(df)} rows")
+df.head()
+```
+
+```{python}
+#| label: fig-timeseries
+#| fig-cap: "Average tree height increases over time"
+# Plot tree height over time (aggregated across patches)
+summary = df.groupby("step")["averageHeight"].mean().reset_index()
+
+plt.figure(figsize=(8, 4))
+plt.plot(summary["step"], summary["averageHeight"], marker="o")
+plt.xlabel("Timestep")
+plt.ylabel("Average Height (m)")
+plt.title("Tree Growth Over Time")
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+## What Just Happened?
+
+The `quickstart.josh` simulation:
+
+1. Creates a **grid** spanning ~30km x 100km in the Mojave Desert
+2. Places **10 trees** in each patch (grid cell)
+3. Each tree **grows randomly** 0-1 meters per timestep
+4. Exports **average height** and **tree count** at each step
+
+View the simulation source:
+
+```{python}
+print(Path("../../examples/quickstart.josh").read_text())
+```
+
+## What's Next?
+
+joshpy can do much more:
+
+| Feature | Description |
+|---------|-------------|
+| **Parameter Sweeps** | Run multiple configurations automatically |
+| **Experiment Registry** | Track runs, configs, and results in DuckDB |
+| **Result Analysis** | Query and visualize across parameter values |
+| **Diagnostic Plots** | Quick sanity-check visualizations |
+
+### Next Steps
+
+- [Manual Workflow Tutorial](../tutorials/manual-workflow.qmd) - Learn each joshpy component
+- [SweepManager Tutorial](../tutorials/sweep-manager.qmd) - High-level sweep orchestration  
+- [Analysis Tutorial](../tutorials/analysis.qmd) - Advanced visualization and queries

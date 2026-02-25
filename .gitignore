@@ -74,6 +74,15 @@ temp/
 # Demo output files
 docs/demo_registry.duckdb
 docs/*.csv
+docs/tutorials/demo_registry.duckdb
+
+# Quarto build output
+docs/_site/
+docs/.quarto/
+
+# Quartodoc generated API reference files
+docs/reference/*.qmd
+!docs/reference/index.qmd
 
 # AI context
 .claude

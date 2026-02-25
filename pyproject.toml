@@ -45,12 +45,16 @@ registry = [
   "duckdb>=0.9",
   "scipy>=1.10",
 ]
+docs = [
+  "quartodoc>=0.7",
+]
 all = [
   "jinja2>=3.0",
   "pyyaml>=6.0",
   "numpy>=1.24",
   "duckdb>=0.9",
   "scipy>=1.10",
+  "quartodoc>=0.7",
 ]
 dev = [
   "build",
@@ -66,6 +70,7 @@ dev = [
   "numpy>=1.24",
   "types-pyyaml",
   "duckdb>=0.9",
+  "quartodoc>=0.7",
 ]
 
 [build-system]

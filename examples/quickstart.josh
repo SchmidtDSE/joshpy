@@ -1,0 +1,44 @@
+# Quickstart simulation - a minimal Josh example
+# Simulates tree growth over 10 timesteps on a small grid
+
+start simulation Main
+
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 count
+  steps.high = 10 count
+
+  exportFiles.patch = "file:///tmp/quickstart_output.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create 10 count of ForeverTree
+
+  export.treeCount.step = count(ForeverTree)
+  export.averageAge.step = mean(ForeverTree.age)
+  export.averageHeight.step = mean(ForeverTree.height)
+
+end patch
+
+start organism ForeverTree
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 meters
+  height.step = prior.height + sample uniform from 0 meters to 1 meters
+
+end organism
+
+start unit year
+
+  alias years
+  alias yr
+  alias yrs
+
+end unit

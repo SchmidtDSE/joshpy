@@ -32,7 +32,7 @@ import requests
 
 
 class JarMode(Enum):
-    """JAR selection mode."""
+    """JAR selection mode. Select one of JarMode.PROD, JarMode.DEV, or JarMode.LOCAL."""
 
     PROD = "prod"
     DEV = "dev"

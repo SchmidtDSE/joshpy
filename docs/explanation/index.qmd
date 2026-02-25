@@ -1,0 +1,45 @@
+---
+title: "Concepts"
+---
+
+Understanding-oriented documentation explaining how joshpy works.
+
+## Architecture / Design Patterns
+
+*Coming soon:*
+
+- How joshpy interacts with the Josh runtime
+- The relationship between CLI wrapper and JAR execution
+- Data flow from simulation to registry
+
+## Registry Schema
+
+*Coming soon:*
+
+- DuckDB table structure
+- Sessions, configs, runs, and cell_data
+- Query patterns and optimization
+
+## Run Hashing / Unique Run Identification
+
+*Coming soon:*
+
+- How `run_hash` uniquely identifies configurations
+- Content-based hashing for reproducibility
+- Deduplication and caching
+
+## Data Lifecycle
+
+*Coming soon:*
+
+- **Registry-per-experiment pattern**: Why one DuckDB file per sweep/experiment
+- **CSV archival strategy**: Raw exports for archival/reproducibility, registry for analysis
+- **Workflow**: Run sweep → Load CSVs → Analyze in registry → Archive CSVs → Share registry
+
+**Recommended approach:**
+
+1. Create one DuckDB registry per experiment/sweep
+2. Run simulations and export to CSV files
+3. Load CSVs into registry for analysis
+4. Archive CSV files for reproducibility
+5. Share registry file for collaborative analysis

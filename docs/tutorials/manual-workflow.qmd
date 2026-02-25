@@ -1,0 +1,276 @@
+---
+title: "Manual Workflow"
+description: "Step-by-step parameter sweep using individual joshpy components"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+[Josh](https://joshsim.org) is an ecological simulation runtime for agent-based
+modeling developed by the [Eric and Wendy Schmidt Center for Data Science and Environment](https://github.com/SchmidtDSE/josh).
+This demo assumes familiarity with Josh's simulation language and runtime.
+
+**joshpy** is a Python client that enables:
+
+- **Orchestration**: Define parameter sweeps, expand job configurations, and
+  execute simulations programmatically
+- **Tracking**: Register runs in a DuckDB-backed registry with session and
+  config tracking
+- **Data Loading**: Import cell-level CSV exports into queryable tables
+- **Analysis**: Query results across parameter values and replicates
+- **Diagnostics**: Quick matplotlib visualizations for simulation sanity checks
+- **Visualization**: Create publication-quality plots with R/ggplot2 integration
+
+This demo walks through a complete parameter sweep workflow **using each component
+directly**. This approach provides maximum control and visibility into each step.
+For a simplified workflow using `SweepManager`, see [SweepManager Workflow](sweep-manager.qmd).
+
+We vary the `maxGrowth` parameter from 10 to 100 meters/step across 10 experiments,
+each with 3 replicates, then load, query, and visualize the results.
+
+## Prerequisites
+
+Ensure the Josh JAR is available at `jar/joshsim-fat.jar` and joshpy is installed:
+
+```bash
+pip install -e '.[all]'
+```
+
+For visualization, ensure R is installed with the following packages:
+
+```r
+install.packages(c("reticulate", "ggplot2", "dplyr"))
+```
+
+## Step 1: Setup - Define Parameter Sweep
+
+The first step is to define our experiment configuration. joshpy uses three key
+abstractions:
+
+- **`JobConfig`**: The top-level configuration specifying source files, templates,
+  and sweep parameters
+- **`SweepConfig`**: Defines which parameters to sweep and their values
+- **`SweepParameter`**: A single parameter with a name and list of values
+
+The `JobExpander` will later compute the cartesian product of all parameters,
+generating one job per combination.
+
+```{python}
+from pathlib import Path
+
+from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+
+# Paths to source files (optimized for fast tutorial builds)
+SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
+TEMPLATE_PATH = Path("../../examples/templates/sweep_config.jshc.j2")
+
+# Parameter sweep: maxGrowth from 10 to 100 in steps of 10
+MAX_GROWTH_VALUES = list(range(10, 101, 10))
+
+config = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        parameters=[
+            # maxGrowth is swept - creates one job per value
+            SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
+            # Note: daysPerYear is a static value in the template (not swept)
+        ]
+    ),
+)
+```
+
+The sweep creates one job per `maxGrowth` value (10, 20, ..., 100). Static values 
+like `daysPerYear` are defined directly in the template, not as sweep parameters.
+
+Let's examine the source files. The `.josh` file defines the simulation, and
+the `.jshc.j2` template provides parameterized configuration:
+
+#### Josh Source
+
+```{python}
+print(SOURCE_PATH.read_text())
+```
+
+#### Template Configuration
+
+```{python}
+print(TEMPLATE_PATH.read_text())
+```
+
+Notice how the configuration template has two types of values:
+
+- **Static values** (e.g., `daysPerYear = 365 count`): Fixed values that don't use Jinja 
+  templating. These are the same for all runs in the sweep.
+- **Swept values** (e.g., `maxGrowth = {{ maxGrowth }} meters`): Values that use Jinja
+  variables. These vary across sweep runs based on the `SweepParameter` definitions.
+
+The `.josh` file references both via `config sweep_config.variableName`. At runtime,
+each config variable pulls its value from the generated `.jshc` file.
+
+## Step 2: Initialize Registry and Expand Jobs
+
+The `RunRegistry` provides experiment tracking backed by DuckDB. It stores:
+
+- **Sessions**: High-level experiment metadata
+- **Configs**: Rendered configuration files with parameter values and input file hashes
+- **Runs**: Individual execution records with timing and exit codes
+
+The `JobExpander` takes our `JobConfig` and generates concrete jobs - one per
+parameter combination, each with a unique **run hash** for tracking. The run hash
+includes the `.josh` file content, rendered `.jshc` content, and hashes of any
+input data files.
+
+```{python}
+from joshpy.jobs import JobExpander
+from joshpy.registry import RunRegistry
+
+# Registry path - saved to disk for use in analysis tutorial
+REGISTRY_PATH = "demo_registry.duckdb"
+
+# Create registry (overwrites if exists)
+registry = RunRegistry(REGISTRY_PATH)
+
+# Expand config into individual jobs
+expander = JobExpander()
+job_set = expander.expand(config)
+
+# Create a session to track this experiment
+# Note: create_session() takes a JobConfig directly and auto-stores it in metadata
+session_id = registry.create_session(
+    config=config,
+    experiment_name="growth_rate_sweep",
+)
+
+# Register each job's configuration in the registry
+for job in job_set.jobs:
+    registry.register_run(
+        session_id=session_id,
+        run_hash=job.run_hash,
+        josh_path=str(job.source_path),
+        config_content=job.config_content,
+        file_mappings=job.file_mappings,
+        parameters=job.parameters,
+    )
+```
+
+## Step 3: Run the Simulations
+
+The `JoshCLI` executes jobs via the Josh command-line interface. The `run_sweep()`
+function handles execution and automatically records runs in the registry when
+`registry` and `session_id` are provided.
+
+```{python}
+from joshpy.cli import JoshCLI
+from joshpy.jobs import run_sweep
+
+# Create CLI targeting the local fat JAR
+cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+
+# Run all jobs with automatic tracking
+# Note: run_sweep() now automatically manages session status:
+#   - Sets status to "running" at start
+#   - Sets status to "completed" if all jobs succeed
+#   - Sets status to "failed" if any job fails
+results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
+```
+
+## Step 4: Load Cell Data from CSVs
+
+Josh exports simulation data to CSV files. The `recover_sweep_results()` function
+automatically discovers export paths from the Josh file (using `inspect_exports`),
+resolves template variables for each job, and loads results into the registry.
+
+```{python}
+from joshpy.sweep import recover_sweep_results
+
+# Automatically discover and load CSV results
+recover_sweep_results(cli, job_set, registry)
+```
+
+## Step 5: Verify Data Loaded
+
+Let's verify the data is in the registry and ready for analysis:
+
+```{python}
+# Get summary of loaded data
+summary = registry.get_data_summary()
+print(summary)
+```
+
+```{python}
+registry.list_export_variables()
+```
+
+```{python}
+registry.list_config_parameters()
+```
+
+## Next Steps: Analysis
+
+Now that data is loaded, see **[Analysis & Visualization Tutorial](analysis.qmd)** for comprehensive coverage of:
+
+- **Diagnostic Plots** (`SimulationDiagnostics`) - quick matplotlib visualizations
+- **Custom Queries** (`DiagnosticQueries`) - get pandas DataFrames
+- **Direct SQL** - full DuckDB access for advanced analysis
+- **R/ggplot2** - publication-quality figures
+
+Quick example:
+
+```{python}
+#| label: fig-quick-comparison
+#| fig-cap: "Tree height trajectories across maxGrowth values."
+
+from joshpy.diagnostics import SimulationDiagnostics
+
+diag = SimulationDiagnostics(registry)
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    title="Tree Height by Growth Rate Parameter",
+)
+```
+
+## Summary
+
+This demo illustrated the manual joshpy workflow using each component directly:
+
+1. **Define** a parameter sweep using `JobConfig` and `SweepConfig`
+2. **Expand** jobs with `JobExpander` to get concrete job specifications
+3. **Register** jobs with `registry.register_run()` for tracking
+4. **Execute** with `run_sweep()` for automatic recording
+5. **Load** outputs with `recover_sweep_results()` for automatic path discovery
+6. **Analyze** - see [Analysis Tutorial](analysis.qmd) for visualization and queries
+
+**Key Design Principles:**
+
+- **Thin CLI wrapper**: `JoshCLI` maps 1:1 to CLI commands
+- **Thin DuckDB wrapper**: Direct `registry.conn` access for custom SQL
+- **Convenience helpers**: `run_sweep()` and `recover_sweep_results()` for common patterns
+- **Full control**: Each step is explicit and visible
+
+**Related Tutorials:**
+
+- [SweepManager Workflow](sweep-manager.qmd) - Simplified orchestration with `SweepManager`
+- [Analysis & Visualization](analysis.qmd) - Analysis and visualization (decoupled from orchestration)
+
+## Cleanup
+
+```{python}
+job_set.cleanup()  # Remove temporary config files
+registry.close()
+```
+
+The registry has been saved to `demo_registry.duckdb`. Run the [Analysis Tutorial](analysis.qmd) to 
+explore the results.

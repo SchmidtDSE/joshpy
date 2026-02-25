@@ -1,0 +1,545 @@
+---
+title: "Analysis & Visualization"
+description: "Explore and visualize simulation results with joshpy"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+This demo focuses on **exploring and visualizing simulation results** after they've
+been collected. The analysis layer in joshpy is **decoupled from orchestration** -
+it only needs a `RunRegistry` containing data. Whether the data came from
+`SweepManager`, manual workflow, or someone else's experiment doesn't matter.
+
+**Prerequisites**: Run either [Manual Workflow](manual-workflow.qmd) or 
+[SweepManager Workflow](sweep-manager.qmd) first to generate `demo_registry.duckdb`.
+
+For orchestration workflows, see:
+
+- [Manual Workflow](manual-workflow.qmd) - Step-by-step control using individual components
+- [SweepManager Workflow](sweep-manager.qmd) - Simplified workflow with `SweepManager`
+
+This demo covers:
+
+1. **Data Discovery** - What's in the registry?
+2. **Diagnostic Plots** - Quick matplotlib visualizations
+3. **Custom Queries** - `DiagnosticQueries` for common patterns
+4. **Direct SQL** - Full access to DuckDB for advanced analysis
+5. **R/ggplot2** - Publication-quality figures
+
+## Setup: Load Registry
+
+Load the registry saved by a previous orchestration demo:
+
+```{python}
+from joshpy.registry import RunRegistry
+
+# Load registry from disk (created by manual-workflow.qmd or sweep-manager.qmd)
+REGISTRY_PATH = "demo_registry.duckdb"
+registry = RunRegistry(REGISTRY_PATH)
+```
+
+## Part 1: Data Discovery
+
+Before plotting, discover what data is available in the registry.
+
+### Full Summary
+
+```{python}
+summary = registry.get_data_summary()
+print(summary)
+```
+
+### Specific Queries
+
+```{python}
+# What variables were exported from the simulation?
+registry.list_export_variables()
+```
+
+```{python}
+# What parameters were swept?
+registry.list_config_parameters()
+```
+
+```{python}
+# What entity types are in the data?
+registry.list_entity_types()
+```
+
+### Variable Columns
+
+```{python}
+# List all variable columns in the cell_data table
+registry.list_variable_columns()
+```
+
+## Part 2: Diagnostic Plots (SimulationDiagnostics)
+
+The `SimulationDiagnostics` class provides quick matplotlib-based visualizations
+for simulation sanity checks. These are designed for rapid exploration, not
+publication.
+
+```{python}
+from joshpy.diagnostics import SimulationDiagnostics
+
+diag = SimulationDiagnostics(registry)
+```
+
+### Time Series
+
+Plot how a variable evolves over simulation steps. By default, spatially
+aggregates across patches and shows uncertainty bands across replicates.
+
+```{python}
+#| label: fig-timeseries-single
+#| fig-cap: "Tree height over time for maxGrowth=50, with replicate uncertainty."
+
+# Filter by parameter value
+diag.plot_timeseries(
+    "averageHeight",
+    maxGrowth=50,
+    title="Average Tree Height Over Time (maxGrowth=50)",
+)
+```
+
+#### Aggregation Options
+
+```{python}
+#| label: fig-timeseries-aggregates
+#| fig-cap: "Different spatial aggregation methods."
+#| layout-ncol: 2
+#| fig-height: 4
+
+# Sum across patches
+diag.plot_timeseries("averageHeight", maxGrowth=50, aggregate="sum", title="Sum")
+
+# Min across patches
+diag.plot_timeseries("averageHeight", maxGrowth=50, aggregate="min", title="Min")
+```
+
+### Parameter Comparison
+
+Compare a variable across different parameter values - ideal for sweep results.
+
+```{python}
+#| label: fig-comparison-lines
+#| fig-cap: "Tree height trajectories across all maxGrowth values."
+
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    title="Tree Height by Growth Rate Parameter",
+)
+```
+
+#### Bar Chart at Specific Step
+
+```{python}
+#| label: fig-comparison-bar
+#| fig-cap: "Final tree height (step 10) for each maxGrowth value."
+
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    step=10,
+    title="Final Tree Height vs Growth Rate",
+)
+```
+
+### Spatial Snapshot
+
+Scatter plot colored by value at a specific timestep:
+
+```{python}
+#| label: fig-spatial
+#| fig-cap: "Spatial distribution of tree height at step 10 for maxGrowth=50."
+
+# Get a run hash for maxGrowth=50
+run_hash_50 = registry.get_runs_by_parameters(maxGrowth=50)[0]["run_hash"]
+
+diag.plot_spatial(
+    "averageHeight",
+    step=10,
+    run_hash=run_hash_50,
+    title="Spatial Distribution (maxGrowth=50, step=10)",
+)
+```
+
+### Saving Figures
+
+All plot methods return a matplotlib Figure that can be saved:
+
+```{python}
+fig = diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    show=False,  # Don't display inline
+)
+fig.savefig("/tmp/comparison_plot.png", dpi=150, bbox_inches="tight")
+```
+
+## Part 3: Custom Queries (DiagnosticQueries)
+
+For more control than `SimulationDiagnostics`, use `DiagnosticQueries` directly.
+These return pandas DataFrames for further processing.
+
+```{python}
+from joshpy.cell_data import DiagnosticQueries
+
+queries = DiagnosticQueries(registry)
+```
+
+### Parameter Comparison
+
+```{python}
+df = queries.get_parameter_comparison(
+    variable="averageHeight",
+    param_name="maxGrowth",
+)
+df.head(15)
+```
+
+### Replicate Uncertainty
+
+Get statistics across replicates for a specific run:
+
+```{python}
+df = queries.get_replicate_uncertainty(
+    variable="averageHeight",
+    run_hash=run_hash_50,
+)
+df.head(10)
+```
+
+### Spatial Snapshot
+
+Get all spatial data for a given timestep:
+
+```{python}
+df = queries.get_spatial_snapshot(
+    step=10,
+    variable="averageHeight",
+    run_hash=run_hash_50,
+)
+df.head(10)
+```
+
+### Get All Variables at Once
+
+Retrieve all exported variables for a specific step:
+
+```{python}
+df = queries.get_all_variables_at_step(
+    step=10,
+    run_hash=run_hash_50,
+)
+df.head(5)
+```
+
+## Part 4: Direct SQL Queries
+
+For full flexibility, query DuckDB directly.
+
+### Simple Aggregations
+
+```{python}
+# Mean, min, max across all cells per step
+result = registry.query("""
+    SELECT 
+        step,
+        AVG(averageHeight) as mean_height,
+        MIN(averageHeight) as min_height,
+        MAX(averageHeight) as max_height,
+        STDDEV(averageHeight) as std_height,
+        COUNT(*) as n_cells
+    FROM cell_data
+    GROUP BY step
+    ORDER BY step
+""")
+result.df()
+```
+
+### Filtering on Variable Values
+
+```{python}
+# Find cells where trees grew above a threshold
+result = registry.query("""
+    SELECT 
+        step,
+        COUNT(*) as n_cells_above_50,
+        AVG(averageHeight) as mean_height_of_those
+    FROM cell_data
+    WHERE averageHeight > 50
+    GROUP BY step
+    ORDER BY step
+""")
+result.df()
+```
+
+### Percentile Analysis
+
+```{python}
+# Get distribution statistics per step
+result = registry.query("""
+    SELECT 
+        step,
+        APPROX_QUANTILE(averageHeight, 0.25) as p25,
+        APPROX_QUANTILE(averageHeight, 0.50) as median,
+        APPROX_QUANTILE(averageHeight, 0.75) as p75,
+        APPROX_QUANTILE(averageHeight, 0.95) as p95
+    FROM cell_data
+    GROUP BY step
+    ORDER BY step
+""")
+result.df()
+```
+
+### Joining with Config Parameters
+
+Config parameters are stored as typed columns in the `config_parameters` table:
+
+```{python}
+# Compare results across different parameter values
+result = registry.query("""
+    SELECT 
+        cp.maxGrowth,
+        cd.step,
+        AVG(cd.averageHeight) as mean_height,
+        STDDEV(cd.averageHeight) as std_height
+    FROM cell_data cd
+    JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+    GROUP BY cp.maxGrowth, cd.step
+    ORDER BY cp.maxGrowth, cd.step
+""")
+result.df().head(15)
+```
+
+```{python}
+# Filter by parameter value (maxGrowth > 50)
+result = registry.query("""
+    SELECT 
+        cd.step,
+        AVG(cd.averageHeight) as mean_height
+    FROM cell_data cd
+    JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+    WHERE cp.maxGrowth > 50
+    GROUP BY cd.step
+    ORDER BY cd.step
+""")
+result.df()
+```
+
+### Export to File
+
+```{python}
+# Export query results to CSV
+registry.query("""
+    SELECT step, AVG(averageHeight) as mean_height
+    FROM cell_data
+    GROUP BY step
+    ORDER BY step
+""").df().to_csv("/tmp/height_by_step.csv", index=False)
+```
+
+## Part 5: R/ggplot2 Visualization
+
+For publication-quality figures, there are **three routes** to get data from 
+joshpy into R:
+
+1. **CSV Export** - Simple, always works
+2. **Direct DuckDB** - Custom SQL queries from R, no Python needed
+3. **`py$df` via reticulate** - Zero-copy Python/R interop
+
+### Route 1: Export to CSV (Simple, Always Works)
+
+```{python}
+# Python exports to CSV
+csv_df = queries.get_parameter_comparison(
+    variable="averageHeight",
+    param_name="maxGrowth",
+)
+csv_df.to_csv("/tmp/sweep_results.csv", index=False)
+```
+
+```{r}
+# R reads CSV
+df_csv <- read.csv("/tmp/sweep_results.csv")
+df_csv$param_value <- as.numeric(df_csv$param_value)
+head(df_csv, 5)
+```
+
+**Pros**: Always works, simple, portable  
+**Cons**: File I/O overhead, temp file management
+
+### Route 2: Direct DuckDB from R (Custom Queries)
+
+R can query DuckDB directly with full SQL flexibility:
+
+```{r}
+#| label: r-duckdb-query
+library(DBI)
+library(duckdb)
+
+con <- dbConnect(duckdb(), "demo_registry.duckdb", read_only = TRUE)
+
+df_duckdb <- dbGetQuery(con, "
+    SELECT 
+        cp.maxGrowth as param_value,
+        cd.step,
+        AVG(cd.averageHeight) as mean_value,
+        STDDEV(cd.averageHeight) as std_value
+    FROM cell_data cd
+    JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+    GROUP BY cp.maxGrowth, cd.step
+    ORDER BY cp.maxGrowth, cd.step
+")
+
+dbDisconnect(con, shutdown = TRUE)
+head(df_duckdb, 10)
+```
+
+**Pros**: Full SQL flexibility, no Python needed for custom queries  
+**Cons**: Requires `r-duckdb` package (linux-64 only in pixi)
+
+### Route 3: `py$df` via reticulate (Zero-Copy)
+
+In theory, you can access Python DataFrames directly via `py$df`:
+
+```r
+# This should work:
+# df <- reticulate::py_to_r(py$sweep_df)
+```
+
+We're working on this - for now, Routes 1 and 2 are recommended.
+
+### Plotting with ggplot2
+
+The following examples use `df_duckdb` from Route 2 (direct DuckDB query).
+We assign it to `df` for cleaner ggplot code:
+
+```{r}
+# Use the DuckDB query result for plotting
+df <- df_duckdb
+```
+
+### Time Series with Uncertainty Ribbon
+
+```{r}
+#| label: fig-r-timeseries
+#| fig-cap: "Tree height trajectories with uncertainty ribbons (ggplot2)."
+#| fig-width: 10
+#| fig-height: 6
+
+ggplot(df, aes(x = step, y = mean_value, 
+                     color = factor(param_value), 
+                     fill = factor(param_value))) +
+  geom_ribbon(aes(ymin = mean_value - std_value, 
+                  ymax = mean_value + std_value), 
+              alpha = 0.2, color = NA) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  labs(
+    x = "Simulation Step",
+    y = "Average Tree Height (meters)",
+    title = "Tree Growth Over Time by maxGrowth Parameter",
+    color = "maxGrowth",
+    fill = "maxGrowth"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+```
+
+### Bar Chart with Error Bars
+
+```{r}
+#| label: fig-r-barchart
+#| fig-cap: "Final tree height vs growth rate parameter with error bars."
+#| fig-width: 10
+#| fig-height: 6
+
+final_df <- df |>
+  dplyr::filter(step == max(step))
+
+ggplot(final_df, aes(x = param_value, y = mean_value)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  geom_errorbar(
+    aes(ymin = mean_value - std_value, ymax = mean_value + std_value),
+    width = 3,
+    linewidth = 0.6
+  ) +
+  labs(
+    x = "maxGrowth (meters/step)",
+    y = "Final Average Height (meters)",
+    title = "Final Tree Height vs Growth Rate"
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+```
+
+### Faceted Plot
+
+```{r}
+#| label: fig-r-faceted
+#| fig-cap: "Faceted time series - one panel per maxGrowth value."
+#| fig-width: 12
+#| fig-height: 8
+
+ggplot(df, aes(x = step, y = mean_value)) +
+  geom_ribbon(aes(ymin = mean_value - std_value, 
+                  ymax = mean_value + std_value), 
+              alpha = 0.3, fill = "steelblue") +
+  geom_line(color = "steelblue", linewidth = 0.8) +
+  geom_point(color = "steelblue", size = 1.5) +
+  facet_wrap(~param_value, ncol = 5, labeller = label_both) +
+  labs(
+    x = "Simulation Step",
+    y = "Average Tree Height (meters)",
+    title = "Tree Growth Trajectories by maxGrowth Parameter"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.background = element_rect(fill = "gray90", color = NA)
+  )
+```
+
+## Summary
+
+This demo covered the joshpy analysis workflow:
+
+| Task | Tool | Notes |
+|------|------|-------|
+| **Discovery** | `registry.get_data_summary()` | What's in the registry? |
+| **Quick plots** | `SimulationDiagnostics` | matplotlib-based, fast iteration |
+| **DataFrames** | `DiagnosticQueries` | Returns pandas for further processing |
+| **Full SQL** | `registry.query()` | Direct DuckDB access |
+| **R (CSV)** | `read.csv()` | Simple, always works |
+| **R (DuckDB)** | `dbConnect(duckdb(), ...)` | Custom SQL directly from R |
+| **R (reticulate)** | `py$df` | Zero-copy Python/R interop |
+
+**Key Points:**
+
+- Analysis is **decoupled from orchestration** - same workflow for any data source
+- Export variables are typed columns in `cell_data`
+- Config parameters are typed columns in `config_parameters`
+- R can query DuckDB directly
+- Three routes for R: CSV export, direct DuckDB, or `py$df` via reticulate
+
+## Cleanup
+
+```{python}
+registry.close()
+```

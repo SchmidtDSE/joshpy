@@ -1,0 +1,114 @@
+---
+title: "Installation"
+---
+
+## For End Users
+
+Install joshpy from PyPI:
+
+```bash
+pip install joshpy
+```
+
+### Optional Dependencies
+
+joshpy has several optional dependency groups for different use cases:
+
+| Extra | Command | Includes |
+|-------|---------|----------|
+| Parameter Sweeps | `pip install joshpy[jobs]` | `jinja2`, `pyyaml` |
+| Experiment Registry | `pip install joshpy[registry]` | `duckdb`, `scipy` |
+| NumPy Ranges | `pip install joshpy[numpy]` | `numpy` |
+| All | `pip install joshpy[all]` | All of the above |
+
+### Prerequisites
+
+#### Josh Runtime
+
+joshpy wraps the Josh simulation runtime. You need either:
+
+1. **Auto-download** (recommended): joshpy downloads the JAR automatically
+2. **Local JAR**: Place `joshsim-fat.jar` in your project's `jar/` directory
+
+```python
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+# Auto-download production JAR (recommended)
+cli = JoshCLI(josh_jar=JarMode.PROD, auto_download=True)
+
+# Or use local JAR
+cli = JoshCLI(josh_jar=Path("jar/joshsim-fat.jar"))
+```
+
+#### Java
+
+Josh requires Java 17+. Verify your installation:
+
+```bash
+java -version
+```
+
+## For Contributors
+
+### Using DevContainer (Recommended)
+
+The DevContainer provides a pre-configured development environment with all dependencies installed. No manual setup required.
+
+**Option 1: VS Code**
+
+1. Install the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+2. Open the joshpy folder in VS Code
+3. Click "Reopen in Container" when prompted
+
+**Option 2: GitHub Codespaces**
+
+1. Go to [github.com/SchmidtDSE/joshpy](https://github.com/SchmidtDSE/joshpy)
+2. Click "Code" → "Codespaces" → "Create codespace"
+
+The DevContainer includes:
+
+- Python with all joshpy dependencies
+- Java 17+ for Josh runtime
+- R with ggplot2 for visualizations
+- Quarto for documentation
+- The Josh JAR (auto-downloaded on first use)
+
+Once inside the container, run tests to verify:
+
+```bash
+pixi run test
+```
+
+### Manual Setup
+
+If you prefer not to use DevContainer:
+
+```bash
+# Clone the repository
+git clone https://github.com/SchmidtDSE/joshpy.git
+cd joshpy
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Install with all dependencies
+pip install -e ".[all,dev]"
+
+# Run tests
+pytest joshpy/test_*.py -v
+```
+
+### Pixi Tasks
+
+The project uses [Pixi](https://pixi.sh/) for task automation:
+
+```bash
+pixi run install-dev   # Install dev dependencies
+pixi run test          # Run tests
+pixi run typecheck     # Type checking with mypy
+pixi run lint          # Linting with ruff
+pixi run docs-build    # Build documentation
+pixi run docs-preview  # Preview documentation locally
+```

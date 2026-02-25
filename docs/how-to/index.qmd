@@ -1,0 +1,37 @@
+---
+title: "How-To Guides"
+---
+ 
+Task-oriented recipes for common use cases.
+
+## Available Guides
+
+*Coming soon - these guides are planned:*
+
+### Parameter Sweeps
+
+- Defining complex multi-parameter sweeps
+- Using YAML configuration files
+- Range specifications with NumPy
+
+### Remote Execution
+
+- Running simulations on Josh Cloud
+- API key configuration
+- Remote vs local execution
+
+### Advanced Queries
+
+- Custom SQL patterns for analysis
+- Spatial and temporal filtering
+- Aggregation strategies
+
+### R Integration
+
+- Using ggplot2 with joshpy results
+- Reticulate configuration
+- Publication-quality figures
+
+## Contributing
+
+Have a how-to guide to contribute? Open a PR on [GitHub](https://github.com/SchmidtDSE/joshpy)!

@@ -1,5 +1,20 @@
-# Auto-generated configuration for hello_cli_configurable.josh
+# Auto-generated configuration for tutorial_sweep.josh
 # Parameter sweep: maxGrowth={{ maxGrowth }}
 
-# Maximum growth per timestep (meters)
+# =============================================================================
+# STATIC CONFIG VALUES
+# These values are the same for all runs in the sweep.
+# Use static values for constants that don't need to vary across experiments.
+# =============================================================================
+
+# Initial tree count per organism (constant across all sweep runs)
+initialTreeCount = 10 count
+
+# =============================================================================
+# SWEPT CONFIG VALUES
+# These values vary across sweep runs. Each unique combination creates a job.
+# Use swept values for parameters you want to explore or optimize.
+# =============================================================================
+
+# Maximum growth per timestep (meters) - SWEPT via Jinja template
 maxGrowth = {{ maxGrowth }} meters

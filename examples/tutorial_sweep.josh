@@ -1,0 +1,50 @@
+# Tutorial sweep simulation - optimized for fast documentation builds
+# Uses larger grid cells (5000m) for faster execution with same extent
+
+start simulation Main
+
+  grid.size = 5000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 count
+  steps.high = 10 count
+
+  exportFiles.patch = "file:///tmp/tutorial_sweep_{maxGrowth}_{replicate}.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create 10 count of ForeverTree
+
+  export.averageAge.step = mean(ForeverTree.age)
+  export.averageHeight.step = mean(ForeverTree.height)
+
+end patch
+
+start organism ForeverTree
+
+  # Static config value - same for all sweep runs (initial tree count)
+  initialTreeCount.init = config sweep_config.initialTreeCount
+
+  # Swept config value - varies across sweep runs
+  maxGrowth.init = config sweep_config.maxGrowth
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 meters
+  # maxGrowth is swept via sweep_config.jshc
+  height.step = prior.height + sample uniform from 0 meters to maxGrowth
+
+end organism
+
+start unit year
+
+  alias years
+  alias yr
+  alias yrs
+
+end unit

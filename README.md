@@ -1,5 +1,7 @@
 # joshpy
 
+[![Documentation](https://img.shields.io/badge/docs-latest-blue)](https://schmidtdse.github.io/joshpy)
+
 Python client for [Josh](https://joshsim.org) ecological simulation runtime.
 
 ## Installation
@@ -240,6 +242,7 @@ BSD-3-Clause. See [LICENSE](LICENSE) for details.
 
 ## Links
 
+- [Documentation](https://schmidtdse.github.io/joshpy)
 - [Josh Language Documentation](https://joshsim.org)
 - [Josh GitHub Repository](https://github.com/SchmidtDSE/josh)
 - [Issue Tracker](https://github.com/SchmidtDSE/joshpy/issues)

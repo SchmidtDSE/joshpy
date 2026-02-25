@@ -1,0 +1,24 @@
+---
+title: "Getting Started"
+---
+
+Welcome to joshpy! This section will help you get up and running quickly.
+
+## Installation
+
+See [Installation](installation.qmd) for detailed instructions on installing joshpy
+and its optional dependencies.
+
+## Quickstart
+
+The [Quickstart](quickstart.qmd) guide walks through running your first parameter
+sweep in under 5 minutes.
+
+## Next Steps
+
+After completing the quickstart, explore the [Tutorials](../tutorials/index.qmd)
+for more in-depth workflows:
+
+- [Manual Workflow](../tutorials/manual-workflow.qmd) - Full control over each step
+- [SweepManager](../tutorials/sweep-manager.qmd) - Simplified high-level interface
+- [Analysis & Visualization](../tutorials/analysis.qmd) - Explore and visualize results
