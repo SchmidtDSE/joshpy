@@ -655,9 +655,8 @@ class SweepManagerBuilder:
             self._verify_hashes(job_set, session_id)
         else:
             session_id = self._registry.create_session(
-                experiment_name=self._experiment_name or self._config.simulation,
-                simulation=self._config.simulation,
-                metadata={"job_config": self._config.to_dict()},
+                config=self._config,
+                experiment_name=self._experiment_name,
             )
             # Register runs
             for job in job_set:

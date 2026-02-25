@@ -212,7 +212,8 @@ class TestRecoverSweepResults(unittest.TestCase):
             # Create a real registry
             from joshpy.registry import RunRegistry
             registry = RunRegistry(":memory:")
-            session_id = registry.create_session(experiment_name="test")
+            config = JobConfig(simulation="TestSim")
+            session_id = registry.create_session(config, experiment_name="test")
 
             # Register the config and run
             registry.register_run(
@@ -281,7 +282,8 @@ class TestRecoverSweepResults(unittest.TestCase):
             # Create a real registry
             from joshpy.registry import RunRegistry
             registry = RunRegistry(":memory:")
-            session_id = registry.create_session(experiment_name="test")
+            config = JobConfig(simulation="TestSim")
+            session_id = registry.create_session(config, experiment_name="test")
 
             # Register the config and run
             registry.register_run(

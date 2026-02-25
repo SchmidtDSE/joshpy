@@ -953,5 +953,158 @@ class TestRunSweep(unittest.TestCase):
         self.assertEqual(result.failed, 1)
 
 
+class TestRunSweepStatusManagement(unittest.TestCase):
+    """Tests for run_sweep() automatic session status management."""
+
+    def _make_test_job_set(self, num_jobs=1):
+        """Create a test JobSet."""
+        return JobSet(jobs=[
+            ExpandedJob(
+                config_content=f"test{i}",
+                config_path=Path(f"/tmp/test{i}.jshc"),
+                config_name="test",
+                run_hash=f"hash{i:04d}",
+                parameters={"i": i},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+            for i in range(num_jobs)
+        ])
+
+    def _make_cli_result(self, success=True, exit_code=0):
+        """Create a CLIResult for testing."""
+        from joshpy.cli import CLIResult
+        return CLIResult(
+            exit_code=exit_code,
+            stdout="",
+            stderr="" if success else "Error occurred",
+            command=["java", "-jar", "test.jar"],
+        )
+
+    def test_sets_running_status_at_start(self):
+        """run_sweep should set status to 'running' at start when manage_status=True."""
+        from unittest.mock import MagicMock, call
+        
+        cli = MagicMock()
+        cli.run.return_value = self._make_cli_result(success=True)
+        
+        registry = MagicMock()
+        job_set = self._make_test_job_set()
+        
+        run_sweep(cli, job_set, registry=registry, session_id="test-session", quiet=True)
+        
+        # Check that update_session_status was called with "running"
+        calls = registry.update_session_status.call_args_list
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertEqual(calls[0], call("test-session", "running"))
+
+    def test_sets_completed_status_on_success(self):
+        """run_sweep should set status to 'completed' when all jobs succeed."""
+        from unittest.mock import MagicMock, call
+        
+        cli = MagicMock()
+        cli.run.return_value = self._make_cli_result(success=True)
+        
+        registry = MagicMock()
+        job_set = self._make_test_job_set(num_jobs=2)
+        
+        run_sweep(cli, job_set, registry=registry, session_id="test-session", quiet=True)
+        
+        # Check final status is "completed"
+        calls = registry.update_session_status.call_args_list
+        self.assertEqual(calls[-1], call("test-session", "completed"))
+
+    def test_sets_failed_status_on_job_failure(self):
+        """run_sweep should set status to 'failed' when any job fails."""
+        from unittest.mock import MagicMock, call
+        
+        cli = MagicMock()
+        # First job succeeds, second job fails
+        cli.run.side_effect = [
+            self._make_cli_result(success=True, exit_code=0),
+            self._make_cli_result(success=False, exit_code=1),
+        ]
+        
+        registry = MagicMock()
+        job_set = self._make_test_job_set(num_jobs=2)
+        
+        run_sweep(cli, job_set, registry=registry, session_id="test-session", quiet=True)
+        
+        # Check final status is "failed"
+        calls = registry.update_session_status.call_args_list
+        self.assertEqual(calls[-1], call("test-session", "failed"))
+
+    def test_sets_failed_status_on_exception(self):
+        """run_sweep should set status to 'failed' on exception."""
+        from unittest.mock import MagicMock, call
+        
+        cli = MagicMock()
+        cli.run.side_effect = RuntimeError("Simulation crashed")
+        
+        registry = MagicMock()
+        job_set = self._make_test_job_set()
+        
+        with self.assertRaises(RuntimeError):
+            run_sweep(cli, job_set, registry=registry, session_id="test-session", quiet=True)
+        
+        # Check that status was set to "failed"
+        calls = registry.update_session_status.call_args_list
+        self.assertEqual(len(calls), 2)  # "running" then "failed"
+        self.assertEqual(calls[-1], call("test-session", "failed"))
+
+    def test_manage_status_false_skips_updates(self):
+        """run_sweep should not update status when manage_status=False."""
+        from unittest.mock import MagicMock
+        
+        cli = MagicMock()
+        cli.run.return_value = self._make_cli_result(success=True)
+        
+        registry = MagicMock()
+        job_set = self._make_test_job_set()
+        
+        run_sweep(
+            cli, job_set,
+            registry=registry,
+            session_id="test-session",
+            manage_status=False,
+            quiet=True,
+        )
+        
+        # update_session_status should NOT be called
+        registry.update_session_status.assert_not_called()
+
+    def test_manage_status_default_is_true(self):
+        """manage_status should default to True."""
+        from unittest.mock import MagicMock
+        
+        cli = MagicMock()
+        cli.run.return_value = self._make_cli_result(success=True)
+        
+        registry = MagicMock()
+        job_set = self._make_test_job_set()
+        
+        # Don't pass manage_status explicitly
+        run_sweep(cli, job_set, registry=registry, session_id="test-session", quiet=True)
+        
+        # update_session_status should be called (default manage_status=True)
+        self.assertGreaterEqual(registry.update_session_status.call_count, 2)
+
+    def test_no_status_update_without_registry(self):
+        """run_sweep should not call update_session_status without registry."""
+        from unittest.mock import MagicMock
+        
+        cli = MagicMock()
+        cli.run.return_value = self._make_cli_result(success=True)
+        
+        job_set = self._make_test_job_set()
+        
+        # Should not raise even without registry
+        result = run_sweep(cli, job_set, quiet=True)
+        
+        self.assertEqual(result.succeeded, 1)
+        # No registry means no status updates (no error)
+
+
 if __name__ == '__main__':
     unittest.main()

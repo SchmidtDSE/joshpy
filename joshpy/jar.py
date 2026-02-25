@@ -23,10 +23,10 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Callable
 
 import requests
 

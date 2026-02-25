@@ -140,11 +140,10 @@ expander = JobExpander()
 job_set = expander.expand(config)
 
 # Create a session to track this experiment
+# Note: create_session() takes a JobConfig directly and auto-stores it in metadata
 session_id = registry.create_session(
+    config=config,
     experiment_name="growth_rate_sweep",
-    simulation="Main",
-    template_path=str(TEMPLATE_PATH),
-    metadata={"job_config": config.to_dict()},  # Store for reconstruction
 )
 
 # Register each job's configuration in the registry
@@ -169,18 +168,15 @@ function handles execution and automatically records runs in the registry when
 from joshpy.cli import JoshCLI
 from joshpy.jobs import run_sweep
 
-# Update session status
-registry.update_session_status(session_id, "running")
-
 # Create CLI targeting the local fat JAR
 cli = JoshCLI(josh_jar=Path("../jar/joshsim-fat.jar"))
 
 # Run all jobs with automatic tracking
+# Note: run_sweep() now automatically manages session status:
+#   - Sets status to "running" at start
+#   - Sets status to "completed" if all jobs succeed
+#   - Sets status to "failed" if any job fails
 results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
-
-# Update final session status
-final_status = "completed" if results.failed == 0 else "failed"
-registry.update_session_status(session_id, final_status)
 ```
 
 ## Step 4: Load Cell Data from CSVs

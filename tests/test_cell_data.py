@@ -17,7 +17,13 @@ except ImportError:
     pytest = None  # type: ignore
 
 from joshpy.cell_data import CellDataLoader, DiagnosticQueries
+from joshpy.jobs import JobConfig
 from joshpy.registry import RunRegistry
+
+
+def _make_config(simulation: str = "TestSim") -> JobConfig:
+    """Create a minimal JobConfig for testing."""
+    return JobConfig(simulation=simulation)
 
 
 def skip_if_no_pandas():
@@ -49,7 +55,7 @@ class TestCellDataLoader:
         loader = CellDataLoader(registry)
 
         # Create session and config
-        session_id = registry.create_session(experiment_name="test", simulation="TestSim")
+        session_id = registry.create_session(_make_config(), experiment_name="test")
         registry.register_run(session_id, "abc123", "test.josh", "test", None, {})
         # Create run record (required for foreign key)
         registry.start_run("abc123")
@@ -138,7 +144,7 @@ class TestCellDataLoader:
         loader = CellDataLoader(registry)
 
         # Create session, config, and run
-        session_id = registry.create_session(experiment_name="test", simulation="TestSim")
+        session_id = registry.create_session(_make_config(), experiment_name="test")
         registry.register_run(session_id, "abc", "test.josh", "test", None, {})
         run_id = registry.start_run("abc")
 
@@ -170,7 +176,7 @@ class TestCellDataLoader:
         loader = CellDataLoader(registry)
 
         # Create session, configs, and runs
-        session_id = registry.create_session(experiment_name="test", simulation="TestSim")
+        session_id = registry.create_session(_make_config(), experiment_name="test")
         files = []
         for i in range(2):
             run_hash = f"hash_{i}"
@@ -207,8 +213,8 @@ class TestDiagnosticQueries:
 
         # Create a session and config
         session_id = self.registry.create_session(
+            _make_config(),
             experiment_name="test",
-            simulation="TestSim",
         )
         self.registry.register_run(
             session_id=session_id,
@@ -302,7 +308,7 @@ class TestDiagnosticQueries:
         """Test comparing variables across parameter values."""
         skip_if_no_pandas()
         # Add another config with different parameter
-        session2 = self.registry.create_session(experiment_name="test2", simulation="TestSim")
+        session2 = self.registry.create_session(_make_config(), experiment_name="test2")
         self.registry.register_run(
             session_id=session2,
             run_hash="def456",

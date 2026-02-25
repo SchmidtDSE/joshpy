@@ -16,7 +16,13 @@ except ImportError:
 
 from joshpy.cell_data import CellDataLoader
 from joshpy.diagnostics import SimulationDiagnostics
+from joshpy.jobs import JobConfig
 from joshpy.registry import DataSummary, RunRegistry
+
+
+def _make_config(simulation: str = "TestSim") -> JobConfig:
+    """Create a minimal JobConfig for testing."""
+    return JobConfig(simulation=simulation)
 
 
 class TestDataSummary:
@@ -88,8 +94,8 @@ class TestDiscoveryMethods:
 
         # Create session and config
         session_id = self.registry.create_session(
+            _make_config(),
             experiment_name="test_experiment",
-            simulation="TestSim",
         )
         self.session_id = session_id
 
@@ -230,8 +236,8 @@ class TestSimulationDiagnostics:
 
         # Create session and configs
         session_id = self.registry.create_session(
+            _make_config(),
             experiment_name="test_experiment",
-            simulation="TestSim",
         )
         self.session_id = session_id
 

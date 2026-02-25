@@ -40,11 +40,11 @@ from joshpy.registry import RunRegistry, _quote_identifier
 
 def _sort_key_numeric_then_string(value: str) -> tuple[int, float | str]:
     """Sort key that orders numeric values numerically, then strings alphabetically.
-    
+
     Returns a tuple of (type_order, value) where:
     - type_order=0 for numeric values (sorted by numeric value)
     - type_order=1 for string values (sorted alphabetically)
-    
+
     This ensures: 1, 2, 10, 20, 100 instead of "1", "10", "100", "2", "20"
     """
     try:
@@ -103,9 +103,7 @@ class SimulationDiagnostics:
         available = self.registry.list_export_variables()
         if variable not in available:
             available_str = ", ".join(available) if available else "(none)"
-            raise ValueError(
-                f"Export variable '{variable}' not found. Available: {available_str}"
-            )
+            raise ValueError(f"Export variable '{variable}' not found. Available: {available_str}")
 
     def _validate_parameter(self, param_name: str) -> None:
         """Validate that a parameter exists in the registry.
@@ -193,7 +191,9 @@ class SimulationDiagnostics:
         Returns:
             List of matching run hashes.
         """
-        where_clause, values, needs_config_params = self._build_config_filter(run_hash, session_id, params)
+        where_clause, values, needs_config_params = self._build_config_filter(
+            run_hash, session_id, params
+        )
 
         # Build the query with appropriate joins
         query = """
@@ -259,8 +259,7 @@ class SimulationDiagnostics:
 
         if not matching_configs:
             raise ValueError(
-                "No data found matching filters. "
-                "Check session_id/run_hash/parameters."
+                "No data found matching filters. Check session_id/run_hash/parameters."
             )
 
         if len(matching_configs) > 1:
@@ -290,9 +289,7 @@ class SimulationDiagnostics:
 
             if aggregate == "none":
                 # Per-patch time series
-                self._plot_per_patch(
-                    ax, variable, cfg_hash, step_filter, step_values, color, label
-                )
+                self._plot_per_patch(ax, variable, cfg_hash, step_filter, step_values, color, label)
             else:
                 # Aggregated time series
                 self._plot_aggregated(
@@ -355,8 +352,8 @@ class SimulationDiagnostics:
         # Group by (position_x, position_y, replicate)
         from collections import defaultdict
 
-        series: dict[tuple[float, float, int], tuple[list[int], list[float]]] = (
-            defaultdict(lambda: ([], []))
+        series: dict[tuple[float, float, int], tuple[list[int], list[float]]] = defaultdict(
+            lambda: ([], [])
         )
         for row in result:
             step, replicate, pos_x, pos_y, value = row
@@ -557,9 +554,7 @@ class SimulationDiagnostics:
             result = self.registry.conn.execute(query, values).fetchall()
 
             if not result:
-                raise ValueError(
-                    f"No data found at step {step} matching filters."
-                )
+                raise ValueError(f"No data found at step {step} matching filters.")
 
             fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -604,9 +599,7 @@ class SimulationDiagnostics:
             # Group by parameter value
             from collections import defaultdict
 
-            group_data: dict[str, tuple[list[int], list[float]]] = defaultdict(
-                lambda: ([], [])
-            )
+            group_data: dict[str, tuple[list[int], list[float]]] = defaultdict(lambda: ([], []))
             for row in result:
                 group_val, step_val, value = row
                 group_data[str(group_val)][0].append(step_val)
@@ -680,9 +673,7 @@ class SimulationDiagnostics:
               AND replicate = ?
               AND longitude IS NOT NULL
         """
-        result = self.registry.conn.execute(
-            query, [run_hash, step, replicate]
-        ).fetchall()
+        result = self.registry.conn.execute(query, [run_hash, step, replicate]).fetchall()
 
         if not result:
             raise ValueError(

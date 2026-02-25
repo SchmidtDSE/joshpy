@@ -43,8 +43,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from scipy import stats
-
 from joshpy.registry import _infer_type, _quote_identifier
 
 try:
@@ -572,6 +570,7 @@ class DiagnosticQueries:
             DataFrame with: step, mean, std, ci_low, ci_high, n_replicates.
         """
         _check_pandas()
+        from scipy import stats
 
         z_score = stats.norm.ppf((1 + confidence) / 2)
 

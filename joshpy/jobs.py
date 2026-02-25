@@ -820,6 +820,7 @@ def run_sweep(
     *,
     registry: RunRegistry | None = None,
     session_id: str | None = None,
+    manage_status: bool = True,
     remote: bool = False,
     api_key: str | None = None,
     endpoint: str | None = None,
@@ -839,6 +840,12 @@ def run_sweep(
         registry: Optional RunRegistry for automatic run tracking. If provided
             along with session_id, runs are automatically recorded.
         session_id: Session ID for registry tracking (required if registry provided).
+        manage_status: If True (default) and registry/session_id provided,
+            automatically manage session status lifecycle:
+            - Set status to "running" at start
+            - Set status to "completed" if all jobs succeed
+            - Set status to "failed" if any job fails or on exception
+            Set to False for manual status control (e.g., API use cases).
         remote: If True, use run_remote() for cloud execution.
         api_key: Josh Cloud API key (required if remote=True).
         endpoint: Custom Josh Cloud endpoint URL.
@@ -857,13 +864,16 @@ def run_sweep(
         ValueError: If registry provided but session_id is not.
 
     Example:
-        from joshpy.jobs import run_sweep, JobExpander
+        from joshpy.jobs import run_sweep, JobExpander, JobConfig
         from joshpy.cli import JoshCLI
         from joshpy.registry import RunRegistry
 
         cli = JoshCLI()
+        config = JobConfig(...)
+        job_set = JobExpander().expand(config)
+
         registry = RunRegistry("experiment.duckdb")
-        session_id = registry.create_session(experiment_name="my_sweep")
+        session_id = registry.create_session(config=config)
 
         # Register job configs
         for job in job_set:
@@ -876,7 +886,7 @@ def run_sweep(
                 parameters=job.parameters,
             )
 
-        # Run with automatic tracking
+        # Run with automatic tracking (status managed automatically)
         results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
         print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
 
@@ -916,51 +926,66 @@ def run_sweep(
                 print(f"  [{i + 1}/{total_jobs}] {job.parameters}")
         return SweepResult()
 
+    # Set status to "running" if managing status
+    if manage_status and registry is not None and session_id is not None:
+        registry.update_session_status(session_id, "running")
+
     job_results: list[tuple[ExpandedJob, Any]] = []
     succeeded = 0
     failed = 0
 
-    for i, job in enumerate(job_set):
+    try:
+        for i, job in enumerate(job_set):
+            if not quiet:
+                mode = "remote" if remote else "local"
+                print(f"[{i + 1}/{total_jobs}] Running ({mode}): {job.parameters}")
+
+            if remote:
+                run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
+                result = cli.run_remote(run_config)
+            else:
+                run_config = to_run_config(job)
+                result = cli.run(run_config)
+
+            job_results.append((job, result))
+
+            if result.success:
+                succeeded += 1
+                if not quiet:
+                    print("  [OK] Completed successfully")
+            else:
+                failed += 1
+                if not quiet:
+                    print(f"  [FAIL] Exit code: {result.exit_code}")
+
+            # Record to registry if configured
+            if registry_callback is not None:
+                registry_callback.record(job, result)
+
+            # Call user's callback if provided
+            if on_complete is not None:
+                on_complete(job, result)
+
+            if stop_on_failure and not result.success:
+                if not quiet:
+                    print("Stopping due to failure (stop_on_failure=True)")
+                break
+
         if not quiet:
-            mode = "remote" if remote else "local"
-            print(f"[{i + 1}/{total_jobs}] Running ({mode}): {job.parameters}")
+            print(f"Completed: {succeeded} succeeded, {failed} failed")
 
-        if remote:
-            run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-            result = cli.run_remote(run_config)
-        else:
-            run_config = to_run_config(job)
-            result = cli.run(run_config)
+        # Set final status if managing status
+        if manage_status and registry is not None and session_id is not None:
+            final_status = "completed" if failed == 0 else "failed"
+            registry.update_session_status(session_id, final_status)
 
-        job_results.append((job, result))
-
-        if result.success:
-            succeeded += 1
-            if not quiet:
-                print("  [OK] Completed successfully")
-        else:
-            failed += 1
-            if not quiet:
-                print(f"  [FAIL] Exit code: {result.exit_code}")
-
-        # Record to registry if configured
-        if registry_callback is not None:
-            registry_callback.record(job, result)
-
-        # Call user's callback if provided
-        if on_complete is not None:
-            on_complete(job, result)
-
-        if stop_on_failure and not result.success:
-            if not quiet:
-                print("Stopping due to failure (stop_on_failure=True)")
-            break
-
-    if not quiet:
-        print(f"Completed: {succeeded} succeeded, {failed} failed")
-
-    return SweepResult(
-        job_results=job_results,
-        succeeded=succeeded,
-        failed=failed,
-    )
+        return SweepResult(
+            job_results=job_results,
+            succeeded=succeeded,
+            failed=failed,
+        )
+    except Exception:
+        # Set status to "failed" on exception if managing status
+        if manage_status and registry is not None and session_id is not None:
+            registry.update_session_status(session_id, "failed")
+        raise

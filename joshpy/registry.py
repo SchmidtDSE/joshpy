@@ -8,27 +8,31 @@ enabling users to:
 - Get session summaries with success/failure counts
 
 Example usage:
-    from joshpy.jobs import JobExpander, JobRunner
-    from joshpy.registry import RunRegistry, RegistryCallback
+    from joshpy.jobs import JobConfig, JobExpander, run_sweep
+    from joshpy.registry import RunRegistry
 
     # Setup
+    config = JobConfig(
+        template_path=Path("template.jshc.j2"),
+        source_path=Path("simulation.josh"),
+        simulation="JoshuaTreeSim",
+        sweep=SweepConfig(parameters=[...]),
+    )
+    job_set = JobExpander().expand(config)
+
     registry = RunRegistry("experiment.duckdb")
     session_id = registry.create_session(
+        config=config,
         experiment_name="jotr_sensitivity",
-        simulation="JoshuaTreeSim",
-        total_jobs=len(job_set.jobs),
-        total_replicates=sum(j.replicates for j in job_set.jobs),
     )
 
     # Register configs
     for job in job_set.jobs:
         registry.register_run(session_id, job.run_hash, str(job.source_path), job.config_content, None, job.parameters)
 
-    # Run with tracking
-    callback = RegistryCallback(registry, session_id)
-    results = runner.run_all(job_set, on_complete=callback)
-
-    registry.update_session_status(session_id, "completed")
+    # Run with tracking (status management is automatic)
+    cli = JoshCLI()
+    results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
 """
 
 from __future__ import annotations
@@ -41,6 +45,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from schema import SCHEMA_SQL
 
 try:
     import duckdb
@@ -67,26 +73,36 @@ def _check_duckdb() -> None:
 
 # Sparsity warning thresholds (configurable module globals)
 SPARSITY_WARN_COLUMN_NULL_PERCENT = 50  # Warn if column >50% NULL
-SPARSITY_WARN_MIN_SPARSE_COLUMNS = 2    # Only warn if >=2 columns are sparse
-SPARSITY_WARN_MIN_ROWS = 1000           # Don't warn for tiny datasets
+SPARSITY_WARN_MIN_SPARSE_COLUMNS = 2  # Only warn if >=2 columns are sparse
+SPARSITY_WARN_MIN_ROWS = 1000  # Don't warn for tiny datasets
 
 # Core columns that exist in cell_data schema (not variable columns)
-CELL_DATA_CORE_COLUMNS = frozenset({
-    "cell_id", "run_id", "run_hash", "step", "replicate",
-    "position_x", "position_y", "longitude", "latitude",
-    "entity_type", "geom",
-})
+CELL_DATA_CORE_COLUMNS = frozenset(
+    {
+        "cell_id",
+        "run_id",
+        "run_hash",
+        "step",
+        "replicate",
+        "position_x",
+        "position_y",
+        "longitude",
+        "latitude",
+        "entity_type",
+        "geom",
+    }
+)
 
 
 def _quote_identifier(name: str) -> str:
     """Quote an identifier for use in SQL.
-    
+
     Uses double quotes to preserve original names with special characters
     like dots (e.g., "avg.height").
-    
+
     Args:
         name: Original variable name.
-        
+
     Returns:
         Quoted identifier safe for SQL (e.g., '"avg.height"').
     """
@@ -97,13 +113,13 @@ def _quote_identifier(name: str) -> str:
 
 def _infer_type(value: Any) -> str:
     """Infer SQL type from a single value.
-    
+
     Used for both export variables (cell_data) and config parameters
     (config_parameters) to determine appropriate column types.
-    
+
     Args:
         value: A single value to infer type from.
-        
+
     Returns:
         'DOUBLE' if value is numeric (int, float, or numeric string),
         'VARCHAR' otherwise.
@@ -125,79 +141,6 @@ def _infer_type(value: Any) -> str:
 
 # Core columns in config_parameters table (not parameter columns)
 CONFIG_PARAMS_CORE_COLUMNS = frozenset({"run_hash"})
-
-# SQL Schema
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS sweep_sessions (
-    session_id      VARCHAR PRIMARY KEY,
-    experiment_name VARCHAR,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    template_path   VARCHAR,
-    template_hash   VARCHAR(12),
-    simulation      VARCHAR,
-    total_jobs      INTEGER,
-    total_replicates INTEGER,
-    status          VARCHAR DEFAULT 'pending',
-    metadata        JSON
-);
-
-CREATE TABLE IF NOT EXISTS job_configs (
-    run_hash        VARCHAR(12) PRIMARY KEY,
-    session_id      VARCHAR REFERENCES sweep_sessions(session_id),
-    josh_path       TEXT,
-    config_content  TEXT,
-    file_mappings   JSON,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS config_parameters (
-    run_hash        VARCHAR(12) PRIMARY KEY REFERENCES job_configs(run_hash)
-);
-
-CREATE TABLE IF NOT EXISTS job_runs (
-    run_id          VARCHAR PRIMARY KEY,
-    run_hash        VARCHAR(12) REFERENCES job_configs(run_hash),
-    replicate       INTEGER,
-    started_at      TIMESTAMP,
-    completed_at    TIMESTAMP,
-    exit_code       INTEGER,
-    output_path     VARCHAR,
-    error_message   TEXT,
-    metadata        JSON
-);
-
-CREATE TABLE IF NOT EXISTS run_outputs (
-    output_id       VARCHAR PRIMARY KEY,
-    run_id          VARCHAR REFERENCES job_runs(run_id),
-    output_type     VARCHAR,
-    file_path       VARCHAR,
-    file_size       BIGINT,
-    row_count       INTEGER,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE SEQUENCE IF NOT EXISTS cell_id_seq START 1;
-
-CREATE TABLE IF NOT EXISTS cell_data (
-    cell_id         BIGINT PRIMARY KEY DEFAULT nextval('cell_id_seq'),
-    run_id          VARCHAR REFERENCES job_runs(run_id),
-    run_hash        VARCHAR(12),
-    step            INTEGER NOT NULL,
-    replicate       INTEGER NOT NULL,
-    position_x      DOUBLE,
-    position_y      DOUBLE,
-    longitude       DOUBLE,
-    latitude        DOUBLE,
-    entity_type     VARCHAR
-);
-
-CREATE INDEX IF NOT EXISTS idx_cell_run ON cell_data(run_id);
-CREATE INDEX IF NOT EXISTS idx_cell_run_hash ON cell_data(run_hash);
-CREATE INDEX IF NOT EXISTS idx_cell_step ON cell_data(step);
-CREATE INDEX IF NOT EXISTS idx_cell_replicate ON cell_data(replicate);
-CREATE INDEX IF NOT EXISTS idx_cell_spatial ON cell_data(longitude, latitude);
-CREATE INDEX IF NOT EXISTS idx_cell_step_replicate ON cell_data(step, replicate);
-"""
 
 
 @dataclass
@@ -304,19 +247,19 @@ class RunInfo:
 @dataclass
 class ColumnStats:
     """Statistics for a single column in cell_data.
-    
+
     Attributes:
         name: Column name (sanitized).
         dtype: SQL data type (DOUBLE or VARCHAR).
         total_rows: Total number of rows in the table.
         null_count: Number of NULL values in this column.
     """
-    
+
     name: str
     dtype: str
     total_rows: int
     null_count: int
-    
+
     @property
     def null_percent(self) -> float:
         """Percentage of NULL values (0-100)."""
@@ -328,25 +271,25 @@ class ColumnStats:
 @dataclass
 class SparsityReport:
     """Report on column sparsity in cell_data.
-    
+
     Used to detect when different simulation types are being mixed,
     which creates sparse columns that hurt query performance.
-    
+
     Attributes:
         total_rows: Total rows in cell_data.
         column_stats: List of ColumnStats for each variable column.
         threshold_percent: NULL percentage threshold used for warnings.
     """
-    
+
     total_rows: int
     column_stats: list[ColumnStats]
     threshold_percent: float = SPARSITY_WARN_COLUMN_NULL_PERCENT
-    
+
     @property
     def sparse_columns(self) -> list[ColumnStats]:
         """Columns exceeding the sparsity threshold."""
         return [c for c in self.column_stats if c.null_percent > self.threshold_percent]
-    
+
     @property
     def should_warn(self) -> bool:
         """True if enough sparse columns to warrant a warning."""
@@ -354,12 +297,12 @@ class SparsityReport:
             self.total_rows >= SPARSITY_WARN_MIN_ROWS
             and len(self.sparse_columns) >= SPARSITY_WARN_MIN_SPARSE_COLUMNS
         )
-    
+
     def __str__(self) -> str:
         """Human-readable sparsity report."""
         if not self.sparse_columns:
             return f"No sparse columns (threshold: {self.threshold_percent}% NULL)"
-        
+
         lines = [
             f"SparsityWarning: {len(self.sparse_columns)} columns are "
             f">{self.threshold_percent}% NULL:"
@@ -499,9 +442,7 @@ class RunRegistry:
     _conn: Any = field(default=None, repr=False)
 
     # Filter state for context managers
-    _spatial_filter_bbox: tuple[float, float, float, float] | None = field(
-        default=None, repr=False
-    )
+    _spatial_filter_bbox: tuple[float, float, float, float] | None = field(default=None, repr=False)
     _spatial_filter_geojson: str | dict | None = field(default=None, repr=False)
     _time_filter_range: tuple[int, int] | None = field(default=None, repr=False)
 
@@ -542,9 +483,7 @@ class RunRegistry:
                 "WHERE table_name = 'cell_data' AND column_name = 'geom'"
             ).fetchall()
             if not columns:
-                self._conn.execute(
-                    "ALTER TABLE cell_data ADD COLUMN geom GEOMETRY;"
-                )
+                self._conn.execute("ALTER TABLE cell_data ADD COLUMN geom GEOMETRY;")
         except Exception:
             # Spatial extension may not be available in all DuckDB builds
             # Silently continue without spatial support
@@ -748,21 +687,17 @@ class RunRegistry:
 
     def create_session(
         self,
+        config: Any,
         experiment_name: str | None = None,
-        simulation: str | None = None,
-        template_path: str | None = None,
-        template_hash: str | None = None,
-        metadata: dict[str, Any] | None = None,
         session_id: str | None = None,
     ) -> str:
         """Create a new sweep session.
 
         Args:
-            experiment_name: Name for the experiment (used in path templates).
-            simulation: Name of the simulation being run.
-            template_path: Path to the Jinja template file.
-            template_hash: Hash of the template content.
-            metadata: Additional metadata dictionary.
+            config: Job configuration containing simulation, template, and sweep info.
+                Must have `simulation`, `template_path`, and `to_dict()` attributes
+                (typically a JobConfig from joshpy.jobs).
+            experiment_name: Name for the experiment. Defaults to config.simulation.
             session_id: Optional externally-provided session ID.
                         If None, generates a UUID. This allows the frontend/API
                         layer to manage session IDs (e.g., using project IDs).
@@ -770,13 +705,38 @@ class RunRegistry:
         Returns:
             The session ID (generated or provided).
 
+        Example:
+            from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+
+            config = JobConfig(
+                template_path=Path("template.jshc.j2"),
+                source_path=Path("simulation.josh"),
+                simulation="Main",
+                sweep=SweepConfig(
+                    parameters=[SweepParameter(name="maxGrowth", values=[10, 20, 30])]
+                ),
+            )
+            session_id = registry.create_session(config=config)
+
         Note:
             total_jobs and total_replicates are computed from the JobSet
             after job expansion. Use job_set.total_jobs and job_set.total_replicates.
         """
         if session_id is None:
             session_id = _generate_id()
-        metadata_json = json.dumps(metadata) if metadata else None
+
+        # Extract fields from config
+        simulation = getattr(config, "simulation", None)
+        template_path = getattr(config, "template_path", None)
+        template_path_str = str(template_path) if template_path else None
+
+        # Use experiment_name if provided, otherwise default to simulation
+        if experiment_name is None:
+            experiment_name = simulation
+
+        # Auto-compute metadata from config
+        metadata = {"job_config": config.to_dict()}
+        metadata_json = json.dumps(metadata)
 
         self.conn.execute(
             """
@@ -789,8 +749,8 @@ class RunRegistry:
                 session_id,
                 experiment_name,
                 simulation,
-                template_path,
-                template_hash,
+                template_path_str,
+                None,  # template_hash is no longer used
                 metadata_json,
             ],
         )
@@ -927,22 +887,19 @@ class RunRegistry:
             """,
             [run_hash, session_id, josh_path, config_content, file_mappings_json],
         )
-        
+
         # Insert typed parameters into config_parameters table
         if parameters:
             # Infer types for each parameter and ensure columns exist
-            param_columns = {
-                name: _infer_type(value)
-                for name, value in parameters.items()
-            }
+            param_columns = {name: _infer_type(value) for name, value in parameters.items()}
             self._ensure_config_columns(param_columns)
-            
+
             # Build dynamic INSERT with all parameter columns
             param_names = list(parameters.keys())
             quoted_cols = ", ".join(_quote_identifier(n) for n in param_names)
             placeholders = ", ".join("?" for _ in param_names)
             values = [parameters[n] for n in param_names]
-            
+
             # INSERT OR IGNORE for idempotency (same run_hash)
             self.conn.execute(
                 f"""
@@ -964,17 +921,17 @@ class RunRegistry:
 
     def _get_parameters_for_run_hash(self, run_hash: str) -> dict[str, Any]:
         """Get parameters dict from config_parameters table for a run_hash.
-        
+
         Args:
             run_hash: The run hash to get parameters for.
-            
+
         Returns:
             Dict of parameter name -> value, or empty dict if not found.
         """
         param_cols = self.list_config_columns()
         if not param_cols:
             return {}
-        
+
         # Build query to select all parameter columns
         quoted_cols = ", ".join(_quote_identifier(c) for c in param_cols)
         result = self.conn.execute(
@@ -985,10 +942,10 @@ class RunRegistry:
             """,
             [run_hash],
         ).fetchone()
-        
+
         if result is None:
             return {}
-        
+
         # Build parameters dict, excluding NULL values
         parameters = {}
         for i, col_name in enumerate(param_cols):
@@ -1054,15 +1011,17 @@ class RunRegistry:
         for row in result:
             run_hash = row[0]
             parameters = self._get_parameters_for_run_hash(run_hash)
-            configs.append(ConfigInfo(
-                run_hash=run_hash,
-                session_id=row[1],
-                josh_path=row[2],
-                config_content=row[3],
-                file_mappings=json.loads(row[4]) if row[4] else None,
-                parameters=parameters,
-                created_at=row[5],
-            ))
+            configs.append(
+                ConfigInfo(
+                    run_hash=run_hash,
+                    session_id=row[1],
+                    josh_path=row[2],
+                    config_content=row[3],
+                    file_mappings=json.loads(row[4]) if row[4] else None,
+                    parameters=parameters,
+                    created_at=row[5],
+                )
+            )
         return configs
 
     # ========== Run Tracking ==========
@@ -1274,17 +1233,19 @@ class RunRegistry:
         for row in result:
             run_hash = row[1]
             parameters = self._get_parameters_for_run_hash(run_hash)
-            runs.append({
-                "run_id": row[0],
-                "run_hash": run_hash,
-                "replicate": row[2],
-                "started_at": row[3],
-                "completed_at": row[4],
-                "exit_code": row[5],
-                "output_path": row[6],
-                "error_message": row[7],
-                "parameters": parameters,
-            })
+            runs.append(
+                {
+                    "run_id": row[0],
+                    "run_hash": run_hash,
+                    "replicate": row[2],
+                    "started_at": row[3],
+                    "completed_at": row[4],
+                    "exit_code": row[5],
+                    "output_path": row[6],
+                    "error_message": row[7],
+                    "parameters": parameters,
+                }
+            )
         return runs
 
     def get_session_summary(self, session_id: str) -> SessionSummary | None:
@@ -1396,13 +1357,13 @@ class RunRegistry:
 
     def list_variable_columns(self) -> list[str]:
         """List all variable column names in cell_data.
-        
+
         Returns the dynamically-added variable columns. Column names preserve
         original names with special characters (e.g., 'avg.height').
-        
+
         Returns:
             Sorted list of variable column names.
-            
+
         Example:
             >>> registry.list_variable_columns()
             ['averageAge', 'avg.height', 'treeCount']
@@ -1415,7 +1376,7 @@ class RunRegistry:
             ORDER BY column_name
             """
         ).fetchall()
-        
+
         # Filter out core columns, return only variable columns
         all_cols = [row[0] for row in result]
         return sorted([c for c in all_cols if c not in CELL_DATA_CORE_COLUMNS])
@@ -1426,7 +1387,7 @@ class RunRegistry:
         These are the variables exported by Josh simulations,
         stored as typed columns in the cell_data table. Variable names
         preserve original .josh names (e.g., 'avg.height').
-        
+
         When session_id is provided, only returns variables that have at least
         one non-NULL value for runs in that session.
 
@@ -1440,15 +1401,15 @@ class RunRegistry:
         Example:
             >>> registry.list_export_variables()
             ['averageAge', 'avg.height', 'treeCount']
-            
+
             >>> registry.list_export_variables(session_id="abc123")
             ['treeCount']  # Only variables with data in this session
         """
         all_vars = self.list_variable_columns()
-        
+
         if not session_id or not all_vars:
             return all_vars
-        
+
         # Filter to variables that have non-NULL values in this session
         # Build a query that checks each column for non-NULL values
         vars_with_data = []
@@ -1466,32 +1427,32 @@ class RunRegistry:
             ).fetchone()
             if result:
                 vars_with_data.append(var_name)
-        
+
         return sorted(vars_with_data)
 
     # Alias for backward compatibility
     def list_variables(self, session_id: str | None = None) -> list[str]:
         """Alias for list_export_variables(). Deprecated, use list_export_variables()."""
         return self.list_export_variables(session_id)
-    
+
     def _ensure_variable_columns(self, columns: dict[str, str]) -> None:
         """Ensure variable columns exist in cell_data table.
-        
+
         Adds missing columns with the specified types. This is called by
         CellDataLoader when loading CSVs with new variables.
-        
+
         Column names are preserved exactly as provided (with quotes for SQL).
         For example, 'avg.height' becomes column "avg.height".
-        
+
         Args:
             columns: Dict mapping column name (original) to SQL type
                      (either 'DOUBLE' or 'VARCHAR').
-                     
+
         Raises:
             ValueError: If trying to add a column that exists with a different type.
         """
         existing = self.list_variable_columns()
-        
+
         for col_name, col_type in columns.items():
             if col_name in existing:
                 # Verify type matches
@@ -1503,16 +1464,16 @@ class RunRegistry:
                     """,
                     [col_name],
                 ).fetchone()
-                
+
                 if type_result:
                     existing_type = type_result[0].upper()
                     requested_type = col_type.upper()
                     # Normalize type names for comparison
-                    if existing_type in ('DOUBLE', 'FLOAT', 'REAL'):
-                        existing_type = 'DOUBLE'
-                    if requested_type in ('DOUBLE', 'FLOAT', 'REAL'):
-                        requested_type = 'DOUBLE'
-                    
+                    if existing_type in ("DOUBLE", "FLOAT", "REAL"):
+                        existing_type = "DOUBLE"
+                    if requested_type in ("DOUBLE", "FLOAT", "REAL"):
+                        requested_type = "DOUBLE"
+
                     if existing_type != requested_type:
                         raise ValueError(
                             f"Column '{col_name}' exists as {existing_type} but "
@@ -1522,38 +1483,34 @@ class RunRegistry:
             else:
                 # Add new column with quoted identifier
                 quoted = _quote_identifier(col_name)
-                self.conn.execute(
-                    f"ALTER TABLE cell_data ADD COLUMN {quoted} {col_type}"
-                )
-    
+                self.conn.execute(f"ALTER TABLE cell_data ADD COLUMN {quoted} {col_type}")
+
     def check_sparsity(self) -> SparsityReport:
         """Check for sparse columns in cell_data.
-        
+
         Sparse columns (>50% NULL by default) often indicate that different
         simulation types are being mixed in the same registry, which hurts
         query performance.
-        
+
         Returns:
             SparsityReport with statistics for each variable column.
-            
+
         Example:
             >>> report = registry.check_sparsity()
             >>> if report.should_warn:
             ...     print(report)
         """
         # Get total row count
-        total_result = self.conn.execute(
-            "SELECT COUNT(*) FROM cell_data"
-        ).fetchone()
+        total_result = self.conn.execute("SELECT COUNT(*) FROM cell_data").fetchone()
         total_rows = total_result[0] if total_result else 0
-        
+
         if total_rows == 0:
             return SparsityReport(total_rows=0, column_stats=[])
-        
+
         # Get stats for each variable column
         variable_cols = self.list_variable_columns()
         column_stats = []
-        
+
         for col_name in variable_cols:
             # Get column type
             type_result = self.conn.execute(
@@ -1564,22 +1521,24 @@ class RunRegistry:
                 """,
                 [col_name],
             ).fetchone()
-            
-            dtype = type_result[0] if type_result else 'UNKNOWN'
-            
+
+            dtype = type_result[0] if type_result else "UNKNOWN"
+
             # Count NULLs
             null_result = self.conn.execute(
-                f"SELECT COUNT(*) FROM cell_data WHERE \"{col_name}\" IS NULL"
+                f'SELECT COUNT(*) FROM cell_data WHERE "{col_name}" IS NULL'
             ).fetchone()
             null_count = null_result[0] if null_result else 0
-            
-            column_stats.append(ColumnStats(
-                name=col_name,
-                dtype=dtype,
-                total_rows=total_rows,
-                null_count=null_count,
-            ))
-        
+
+            column_stats.append(
+                ColumnStats(
+                    name=col_name,
+                    dtype=dtype,
+                    total_rows=total_rows,
+                    null_count=null_count,
+                )
+            )
+
         return SparsityReport(
             total_rows=total_rows,
             column_stats=column_stats,
@@ -1588,13 +1547,13 @@ class RunRegistry:
 
     def list_config_columns(self) -> list[str]:
         """List all parameter column names in config_parameters.
-        
+
         Returns the dynamically-added parameter columns. Column names preserve
         original names with special characters (e.g., 'soil.moisture').
-        
+
         Returns:
             Sorted list of parameter column names.
-            
+
         Example:
             >>> registry.list_config_columns()
             ['maxGrowth', 'scenario', 'soil.moisture']
@@ -1607,29 +1566,29 @@ class RunRegistry:
             ORDER BY column_name
             """
         ).fetchall()
-        
+
         # Filter out core columns, return only parameter columns
         all_cols = [row[0] for row in result]
         return sorted([c for c in all_cols if c not in CONFIG_PARAMS_CORE_COLUMNS])
 
     def _ensure_config_columns(self, columns: dict[str, str]) -> None:
         """Ensure parameter columns exist in config_parameters table.
-        
+
         Adds missing columns with the specified types. This is called by
         register_run() when registering configs with parameters.
-        
+
         Column names are preserved exactly as provided (with quotes for SQL).
         For example, 'soil.moisture' becomes column "soil.moisture".
-        
+
         Args:
             columns: Dict mapping column name (original) to SQL type
                      (either 'DOUBLE' or 'VARCHAR').
-                     
+
         Raises:
             ValueError: If trying to add a column that exists with a different type.
         """
         existing = self.list_config_columns()
-        
+
         for col_name, col_type in columns.items():
             if col_name in existing:
                 # Verify type matches
@@ -1641,16 +1600,16 @@ class RunRegistry:
                     """,
                     [col_name],
                 ).fetchone()
-                
+
                 if type_result:
                     existing_type = type_result[0].upper()
                     requested_type = col_type.upper()
                     # Normalize type names for comparison
-                    if existing_type in ('DOUBLE', 'FLOAT', 'REAL'):
-                        existing_type = 'DOUBLE'
-                    if requested_type in ('DOUBLE', 'FLOAT', 'REAL'):
-                        requested_type = 'DOUBLE'
-                    
+                    if existing_type in ("DOUBLE", "FLOAT", "REAL"):
+                        existing_type = "DOUBLE"
+                    if requested_type in ("DOUBLE", "FLOAT", "REAL"):
+                        requested_type = "DOUBLE"
+
                     if existing_type != requested_type:
                         raise ValueError(
                             f"Config parameter '{col_name}' exists as {existing_type} but "
@@ -1660,9 +1619,7 @@ class RunRegistry:
             else:
                 # Add new column with quoted identifier
                 quoted = _quote_identifier(col_name)
-                self.conn.execute(
-                    f"ALTER TABLE config_parameters ADD COLUMN {quoted} {col_type}"
-                )
+                self.conn.execute(f"ALTER TABLE config_parameters ADD COLUMN {quoted} {col_type}")
 
     def list_config_parameters(self, session_id: str | None = None) -> list[str]:
         """List all config parameter names from sweep configurations.
@@ -1681,10 +1638,10 @@ class RunRegistry:
             ['maxGrowth', 'scenario', 'survivalProb']
         """
         all_params = self.list_config_columns()
-        
+
         if not session_id or not all_params:
             return all_params
-        
+
         # Filter to parameters that have non-NULL values in this session
         params_with_data = []
         for param_name in all_params:
@@ -1701,7 +1658,7 @@ class RunRegistry:
             ).fetchone()
             if result:
                 params_with_data.append(param_name)
-        
+
         return sorted(params_with_data)
 
     # Alias for backward compatibility
@@ -1777,18 +1734,10 @@ class RunRegistry:
                 [session_id],
             ).fetchone()[0]
         else:
-            sessions_count = self.conn.execute(
-                "SELECT COUNT(*) FROM sweep_sessions"
-            ).fetchone()[0]
-            configs_count = self.conn.execute(
-                "SELECT COUNT(*) FROM job_configs"
-            ).fetchone()[0]
-            runs_count = self.conn.execute(
-                "SELECT COUNT(*) FROM job_runs"
-            ).fetchone()[0]
-            rows_count = self.conn.execute(
-                "SELECT COUNT(*) FROM cell_data"
-            ).fetchone()[0]
+            sessions_count = self.conn.execute("SELECT COUNT(*) FROM sweep_sessions").fetchone()[0]
+            configs_count = self.conn.execute("SELECT COUNT(*) FROM job_configs").fetchone()[0]
+            runs_count = self.conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
+            rows_count = self.conn.execute("SELECT COUNT(*) FROM cell_data").fetchone()[0]
 
         # Get variables, parameters, entity types
         variables = self.list_export_variables(session_id)
