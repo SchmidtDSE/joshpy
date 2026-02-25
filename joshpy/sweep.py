@@ -82,16 +82,15 @@ def recover_sweep_results(
         ValueError: If jobs have different source_paths or no source_path.
         RuntimeError: If no export path configured for export_type.
 
-    Example:
-        from joshpy.sweep import recover_sweep_results
-
-        rows = recover_sweep_results(
-            cli=cli,
-            job_set=job_set,
-            registry=registry,
-            export_type="patch",
-        )
-        print(f"Loaded {rows} rows from completed jobs")
+    Examples:
+        >>> from joshpy.sweep import recover_sweep_results
+        >>> rows = recover_sweep_results(
+        ...     cli=cli,
+        ...     job_set=job_set,
+        ...     registry=registry,
+        ...     export_type="patch",
+        ... )
+        >>> print(f"Loaded {rows} rows from completed jobs")
     """
     # Validate jobs have consistent source paths
     source_paths = {job.source_path for job in job_set if job.source_path}
@@ -231,20 +230,20 @@ class SweepManager:
         job_set: Expanded jobs.
         session_id: Session ID in registry.
 
-    Example:
-        # Simple usage with defaults
-        with SweepManager.from_config(config, registry=":memory:") as manager:
-            results = manager.run()
-            manager.load_results()
-            df = manager.query("averageHeight", group_by="maxGrowth")
+    Examples:
+        >>> # Simple usage with defaults
+        >>> with SweepManager.from_config(config, registry=":memory:") as manager:
+        ...     results = manager.run()
+        ...     manager.load_results()
+        ...     df = manager.query("averageHeight", group_by="maxGrowth")
 
-        # Builder pattern for more control
-        manager = (
-            SweepManager.builder(config)
-            .with_registry("experiment.duckdb", experiment_name="my_sweep")
-            .with_cli(jar_path=Path("josh.jar"))
-            .build()
-        )
+        >>> # Builder pattern for more control
+        >>> manager = (
+        ...     SweepManager.builder(config)
+        ...     .with_registry("experiment.duckdb", experiment_name="my_sweep")
+        ...     .with_cli(jar_path=Path("josh.jar"))
+        ...     .build()
+        ... )
     """
 
     config: JobConfig
@@ -266,13 +265,13 @@ class SweepManager:
         Returns:
             A SweepManagerBuilder for fluent configuration.
 
-        Example:
-            manager = (
-                SweepManager.builder(config)
-                .with_registry("experiment.duckdb")
-                .with_cli(jar_path=Path("josh.jar"))
-                .build()
-            )
+        Examples:
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_registry("experiment.duckdb")
+            ...     .with_cli(jar_path=Path("josh.jar"))
+            ...     .build()
+            ... )
         """
         return SweepManagerBuilder(config)
 
@@ -287,15 +286,15 @@ class SweepManager:
         Returns:
             Configured SweepManager ready for use.
 
-        Example:
-            config = JobConfig(
-                template_path=Path("template.jshc.j2"),
-                source_path=Path("simulation.josh"),
-                simulation="Main",
-                replicates=3,
-                sweep=SweepConfig(parameters=[...]),
-            )
-            manager = SweepManager.from_config(config, registry=":memory:")
+        Examples:
+            >>> config = JobConfig(
+            ...     template_path=Path("template.jshc.j2"),
+            ...     source_path=Path("simulation.josh"),
+            ...     simulation="Main",
+            ...     replicates=3,
+            ...     sweep=SweepConfig(parameters=[...]),
+            ... )
+            >>> manager = SweepManager.from_config(config, registry=":memory:")
         """
         return cls.builder(config).with_defaults(**kwargs).build()
 
@@ -310,8 +309,8 @@ class SweepManager:
         Returns:
             Configured SweepManager ready for use.
 
-        Example:
-            manager = SweepManager.from_yaml(Path("sweep.yaml"), registry=":memory:")
+        Examples:
+            >>> manager = SweepManager.from_yaml(Path("sweep.yaml"), registry=":memory:")
         """
         config = JobConfig.from_yaml_file(path)
         return cls.builder(config).with_defaults(**kwargs).build()
@@ -346,18 +345,18 @@ class SweepManager:
         Returns:
             SweepResult with all job outcomes.
 
-        Example:
-            # Local execution
-            results = manager.run()
+        Examples:
+            >>> # Local execution
+            >>> results = manager.run()
 
-            # Remote execution (Josh Cloud)
-            results = manager.run(remote=True, api_key="your-api-key")
+            >>> # Remote execution (Josh Cloud)
+            >>> results = manager.run(remote=True, api_key="your-api-key")
 
-            # Remote execution (local server, no API key)
-            results = manager.run(remote=True, endpoint="http://localhost:8080")
+            >>> # Remote execution (local server, no API key)
+            >>> results = manager.run(remote=True, endpoint="http://localhost:8080")
 
-            # Dry run to see what would be executed
-            results = manager.run(dry_run=True)
+            >>> # Dry run to see what would be executed
+            >>> results = manager.run(dry_run=True)
         """
         return run_sweep(
             cli=self.cli,
@@ -388,9 +387,9 @@ class SweepManager:
         Returns:
             Total number of rows loaded.
 
-        Example:
-            rows = manager.load_results()
-            print(f"Loaded {rows} rows")
+        Examples:
+            >>> rows = manager.load_results()
+            >>> print(f"Loaded {rows} rows")
         """
         return recover_sweep_results(
             cli=self.cli,
@@ -419,12 +418,12 @@ class SweepManager:
         Returns:
             DataFrame with query results.
 
-        Example:
-            # Get parameter comparison
-            df = manager.query("averageHeight", group_by="maxGrowth")
+        Examples:
+            >>> # Get parameter comparison
+            >>> df = manager.query("averageHeight", group_by="maxGrowth")
 
-            # Get comparison at specific step
-            df = manager.query("averageHeight", group_by="maxGrowth", step=50)
+            >>> # Get comparison at specific step
+            >>> df = manager.query("averageHeight", group_by="maxGrowth", step=50)
         """
         queries = DiagnosticQueries(self.registry)
         if group_by:
@@ -448,13 +447,13 @@ class SweepManager:
         Removes temporary config files created during job expansion.
         Should be called when you're done with the SweepManager.
 
-        Example:
-            manager = SweepManager.from_yaml(Path("sweep.yaml"))
-            try:
-                manager.run()
-                manager.load_results()
-            finally:
-                manager.cleanup()
+        Examples:
+            >>> manager = SweepManager.from_yaml(Path("sweep.yaml"))
+            >>> try:
+            ...     manager.run()
+            ...     manager.load_results()
+            ... finally:
+            ...     manager.cleanup()
         """
         if self.job_set:
             self.job_set.cleanup()
@@ -465,12 +464,12 @@ class SweepManager:
         Only closes the registry if it was created by the builder,
         not if an existing registry was passed in.
 
-        Example:
-            manager = SweepManager.from_yaml(Path("sweep.yaml"))
-            try:
-                manager.run()
-            finally:
-                manager.close()
+        Examples:
+            >>> manager = SweepManager.from_yaml(Path("sweep.yaml"))
+            >>> try:
+            ...     manager.run()
+            ... finally:
+            ...     manager.close()
         """
         if self._owns_registry and self.registry:
             self.registry.close()
@@ -496,13 +495,13 @@ class SweepManagerBuilder:
     The builder pattern allows for fluent configuration of SweepManager
     with sensible defaults and resource ownership tracking.
 
-    Example:
-        manager = (
-            SweepManagerBuilder(config)
-            .with_registry("experiment.duckdb", experiment_name="my_sweep")
-            .with_cli(jar_path=Path("josh.jar"))
-            .build()
-        )
+    Examples:
+        >>> manager = (
+        ...     SweepManagerBuilder(config)
+        ...     .with_registry("experiment.duckdb", experiment_name="my_sweep")
+        ...     .with_cli(jar_path=Path("josh.jar"))
+        ...     .build()
+        ... )
     """
 
     def __init__(self, config: JobConfig) -> None:
@@ -536,12 +535,12 @@ class SweepManagerBuilder:
         Returns:
             Self for chaining.
 
-        Example:
-            # Create new registry from path
-            builder.with_registry("experiment.duckdb", experiment_name="my_sweep")
+        Examples:
+            >>> # Create new registry from path
+            >>> builder.with_registry("experiment.duckdb", experiment_name="my_sweep")
 
-            # Use existing registry
-            builder.with_registry(existing_registry, session_id="abc-123")
+            >>> # Use existing registry
+            >>> builder.with_registry(existing_registry, session_id="abc-123")
         """
         if isinstance(registry_or_path, RunRegistry):
             self._registry = registry_or_path
@@ -571,12 +570,12 @@ class SweepManagerBuilder:
         Returns:
             Self for chaining.
 
-        Example:
-            # Use existing CLI
-            builder.with_cli(existing_cli)
+        Examples:
+            >>> # Use existing CLI
+            >>> builder.with_cli(existing_cli)
 
-            # Create new CLI with custom jar path
-            builder.with_cli(jar_path=Path("josh.jar"))
+            >>> # Create new CLI with custom jar path
+            >>> builder.with_cli(jar_path=Path("josh.jar"))
         """
         if cli is not None:
             self._cli = cli
@@ -605,12 +604,12 @@ class SweepManagerBuilder:
         Returns:
             Self for chaining.
 
-        Example:
-            manager = (
-                SweepManager.builder(config)
-                .with_defaults(registry=":memory:")
-                .build()
-            )
+        Examples:
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_defaults(registry=":memory:")
+            ...     .build()
+            ... )
         """
         self.with_registry(registry, experiment_name=experiment_name)
         self.with_cli(jar_path=jar_path)
@@ -627,13 +626,13 @@ class SweepManagerBuilder:
         Raises:
             ValueError: If session_id provided but hashes don't match registered runs.
 
-        Example:
-            manager = (
-                SweepManager.builder(config)
-                .with_registry("experiment.duckdb")
-                .with_cli()
-                .build()
-            )
+        Examples:
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_registry("experiment.duckdb")
+            ...     .with_cli()
+            ...     .build()
+            ... )
         """
         # Defaults
         if self._registry is None:

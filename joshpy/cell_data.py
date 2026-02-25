@@ -118,17 +118,16 @@ class CellDataLoader:
     Attributes:
         registry: The RunRegistry to load data into.
 
-    Example:
-        registry = RunRegistry("experiment.duckdb")
-        loader = CellDataLoader(registry)
-
-        # Load a CSV export
-        rows_loaded = loader.load_csv(
-            csv_path=Path("/tmp/output.csv"),
-            run_id="abc123",
-            run_hash="a1b2c3d4e5f6",
-        )
-        print(f"Loaded {rows_loaded} rows")
+    Examples:
+        >>> registry = RunRegistry("experiment.duckdb")
+        >>> loader = CellDataLoader(registry)
+        >>> # Load a CSV export
+        >>> rows_loaded = loader.load_csv(
+        ...     csv_path=Path("/tmp/output.csv"),
+        ...     run_id="abc123",
+        ...     run_hash="a1b2c3d4e5f6",
+        ... )
+        >>> print(f"Loaded {rows_loaded} rows")
     """
 
     def __init__(self, registry: Any):
@@ -362,22 +361,21 @@ class DiagnosticQueries:
     Attributes:
         registry: The RunRegistry to query.
 
-    Example:
-        queries = DiagnosticQueries(registry)
+    Examples:
+        >>> queries = DiagnosticQueries(registry)
+        >>> # Time series at a location
+        >>> df = queries.get_cell_timeseries(
+        ...     longitude=-116.1,
+        ...     latitude=33.9,
+        ...     variable="treeCount",
+        ... )
 
-        # Time series at a location
-        df = queries.get_cell_timeseries(
-            longitude=-116.1,
-            latitude=33.9,
-            variable="treeCount",
-        )
-
-        # Spatial snapshot
-        df = queries.get_spatial_snapshot(
-            step=50,
-            variable="treeCount",
-            run_hash="a1b2c3d4e5f6",
-        )
+        >>> # Spatial snapshot
+        >>> df = queries.get_spatial_snapshot(
+        ...     step=50,
+        ...     variable="treeCount",
+        ...     run_hash="a1b2c3d4e5f6",
+        ... )
     """
 
     def __init__(self, registry: Any):

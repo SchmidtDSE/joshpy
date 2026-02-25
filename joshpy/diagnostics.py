@@ -5,27 +5,26 @@ Quick visualization primitives for simulation sanity checks:
 - Are values exploding or crashing?
 - How do different parameter settings compare?
 
-Example:
-    from joshpy.registry import RunRegistry
-    from joshpy.diagnostics import SimulationDiagnostics
+Examples:
+    >>> from joshpy.registry import RunRegistry
+    >>> from joshpy.diagnostics import SimulationDiagnostics
+    >>> registry = RunRegistry("experiment.duckdb")
+    >>> diag = SimulationDiagnostics(registry)
 
-    registry = RunRegistry("experiment.duckdb")
-    diag = SimulationDiagnostics(registry)
+    >>> # What's in the data?
+    >>> print(registry.get_data_summary())
 
-    # What's in the data?
-    print(registry.get_data_summary())
+    >>> # Plot time series (spatially aggregated)
+    >>> diag.plot_timeseries("averageAge", run_hash="abc123")
 
-    # Plot time series (spatially aggregated)
-    diag.plot_timeseries("averageAge", run_hash="abc123")
+    >>> # Plot per-patch time series (no aggregation)
+    >>> diag.plot_timeseries("averageAge", run_hash="abc123", aggregate="none")
 
-    # Plot per-patch time series (no aggregation)
-    diag.plot_timeseries("averageAge", run_hash="abc123", aggregate="none")
+    >>> # Compare across parameter values
+    >>> diag.plot_comparison("averageAge", group_by="maxGrowth")
 
-    # Compare across parameter values
-    diag.plot_comparison("averageAge", group_by="maxGrowth")
-
-    # Filter by arbitrary parameters
-    diag.plot_timeseries("averageAge", maxGrowth=10, survivalProb=0.9)
+    >>> # Filter by arbitrary parameters
+    >>> diag.plot_timeseries("averageAge", maxGrowth=10, survivalProb=0.9)
 """
 
 from __future__ import annotations
@@ -63,16 +62,16 @@ class SimulationDiagnostics:
     Attributes:
         registry: The RunRegistry containing simulation data.
 
-    Example:
-        registry = RunRegistry("experiment.duckdb")
-        diag = SimulationDiagnostics(registry)
+    Examples:
+        >>> registry = RunRegistry("experiment.duckdb")
+        >>> diag = SimulationDiagnostics(registry)
 
-        # Quick time series check
-        diag.plot_timeseries("averageAge", run_hash="abc123")
+        >>> # Quick time series check
+        >>> diag.plot_timeseries("averageAge", run_hash="abc123")
 
-        # Save to file
-        fig = diag.plot_timeseries("averageAge", run_hash="abc123", show=False)
-        fig.savefig("diagnostic.png")
+        >>> # Save to file
+        >>> fig = diag.plot_timeseries("averageAge", run_hash="abc123", show=False)
+        >>> fig.savefig("diagnostic.png")
     """
 
     # Valid aggregation modes
