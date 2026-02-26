@@ -6,39 +6,14 @@ subtitle: "Python client for Josh ecological simulations"
 **joshpy** enables parameter sweeps, experiment tracking, and result analysis
 for [Josh](https://joshsim.org) agent-based ecological simulations.
 
+![Joshpy](assets/joshsim.png)
+
 ## Features
 
 - **Orchestration**: Define parameter sweeps with Jinja templating and execute simulations
 - **Tracking**: DuckDB-backed registry for experiment management  
 - **Analysis**: Query results across parameter values and replicates
 - **Visualization**: Quick matplotlib diagnostics + R/ggplot2 for publication-quality figures
-
-## Quick Example
-
-```python
-from pathlib import Path
-from joshpy.sweep import SweepManager
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
-
-config = JobConfig(
-    template_path=Path("templates/config.jshc.j2"),
-    source_path=Path("simulation.josh"),
-    simulation="Main",
-    replicates=10,
-    sweep=SweepConfig(
-        parameters=[SweepParameter(name="maxGrowth", values=[10, 50, 100])]
-    ),
-)
-
-with SweepManager.from_config(config, registry="results.duckdb") as manager:
-    manager.run()
-    manager.load_results()
-    
-    # Query and plot
-    from joshpy.diagnostics import SimulationDiagnostics
-    diag = SimulationDiagnostics(manager.registry)
-    diag.plot_comparison("biomass", group_by="maxGrowth")
-```
 
 ## Get Started
 
