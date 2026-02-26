@@ -46,7 +46,7 @@ from typing import Any
 from joshpy.registry import _infer_type, _quote_identifier
 
 try:
-    from pydantic import BaseModel, Field
+    from pydantic import BaseModel, ConfigDict, Field
 
     HAS_PYDANTIC = True
 except ImportError:
@@ -105,8 +105,7 @@ if HAS_PYDANTIC:
         entity_type: str = "patch"
         variables: dict[str, Any] = Field(default_factory=dict)
 
-        class Config:
-            frozen = True
+        model_config = ConfigDict(frozen=True)
 
 
 class CellDataLoader:

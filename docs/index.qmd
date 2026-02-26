@@ -6,7 +6,7 @@ subtitle: "Python client for Josh ecological simulations"
 **joshpy** enables parameter sweeps, experiment tracking, and result analysis
 for [Josh](https://joshsim.org) agent-based ecological simulations.
 
-![Joshpy](assets/joshsim.png)
+![](assets/joshsim.png)
 
 ## Features
 

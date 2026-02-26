@@ -30,11 +30,25 @@ Examples:
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import matplotlib.pyplot as plt
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 from joshpy.registry import RunRegistry, _quote_identifier
+
+
+def _import_matplotlib() -> Any:
+    """Import matplotlib.pyplot, raising helpful ImportError if unavailable."""
+    try:
+        import matplotlib.pyplot as plt
+
+        return plt
+    except ImportError:
+        raise ImportError(
+            "matplotlib is required for plotting. "
+            "Install with: pip install joshpy[registry]"
+        ) from None
 
 
 def _sort_key_numeric_then_string(value: str) -> tuple[int, float | str]:
@@ -219,7 +233,7 @@ class SimulationDiagnostics:
         title: str | None = None,
         show: bool = True,
         **params: Any,
-    ) -> plt.Figure:
+    ) -> Any:
         """Plot variable over time.
 
         Args:
@@ -241,6 +255,7 @@ class SimulationDiagnostics:
         Raises:
             ValueError: If variable not found or no data matches filters.
         """
+        plt = _import_matplotlib()
         self._validate_variable(variable)
         self._validate_aggregation(aggregate)
 
@@ -280,7 +295,7 @@ class SimulationDiagnostics:
         fig, ax = plt.subplots(figsize=(10, 6))
 
         # Color cycle for multiple configs
-        colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
+        colors = plt.cm.tab10.colors
 
         for idx, cfg_hash in enumerate(matching_configs):
             color = colors[idx % len(colors)]
@@ -439,7 +454,7 @@ class SimulationDiagnostics:
         show: bool = True,
         show_sql: bool = False,
         **params: Any,
-    ) -> plt.Figure:
+    ) -> Any:
         """Compare variable across parameter values.
 
         The group_by argument is auto-detected: it can be either a config
@@ -470,6 +485,7 @@ class SimulationDiagnostics:
             will create one group per unique value, which may be unwieldy.
             For continuous variables, consider binning in a custom SQL query.
         """
+        plt = _import_matplotlib()
         self._validate_variable(variable)
         self._validate_aggregation(aggregate)
 
@@ -606,7 +622,7 @@ class SimulationDiagnostics:
 
             fig, ax = plt.subplots(figsize=(10, 6))
 
-            colors = plt.cm.tab10.colors  # type: ignore[attr-defined]
+            colors = plt.cm.tab10.colors
             # Sort values numerically then alphabetically
             sorted_groups = sorted(group_data.keys(), key=_sort_key_numeric_then_string)
             for idx, group_val in enumerate(sorted_groups):
@@ -638,7 +654,7 @@ class SimulationDiagnostics:
         replicate: int = 0,
         title: str | None = None,
         show: bool = True,
-    ) -> plt.Figure:
+    ) -> Any:
         """Plot spatial scatter at a single timestep.
 
         Creates a scatter plot colored by variable value. For real GIS work,
@@ -658,6 +674,7 @@ class SimulationDiagnostics:
         Raises:
             ValueError: If variable not found or no data matches.
         """
+        plt = _import_matplotlib()
         self._validate_variable(variable)
 
         quoted = _quote_identifier(variable)
