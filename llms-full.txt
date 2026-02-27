@@ -371,22 +371,23 @@ from pathlib import Path
 from joshpy.jobs import (
     JobConfig,
     SweepConfig,
-    SweepParameter,
+    ConfigSweepParameter,
+    FileSweepParameter,
     JobExpander,
     to_run_config,
 )
 from joshpy.cli import JoshCLI
 
-# Define sweep configuration
+# Define sweep configuration with config parameters
 config = JobConfig(
     template_path=Path("templates/config.jshc.j2"),
     source_path=Path("simulation.josh"),
     simulation="Main",
     replicates=3,
     sweep=SweepConfig(
-        parameters=[
-            SweepParameter(name="maxGrowth", values=[10, 50, 100]),
-            SweepParameter(name="mortality", values=[0.1, 0.2]),
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100]),
+            ConfigSweepParameter(name="mortality", values=[0.1, 0.2]),
         ]
     ),
 )
@@ -409,6 +410,42 @@ for job in job_set:
 job_set.cleanup()
 ```
 
+### File Parameter Sweeps
+
+Sweep over different input data files (e.g., climate scenarios):
+
+```python
+# Define sweep with both config and file parameters
+config = JobConfig(
+    template_path=Path("templates/config.jshc.j2"),
+    source_path=Path("simulation.josh"),
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[10, 50]),
+        ],
+        file_parameters=[
+            FileSweepParameter(name="climate", paths=[
+                "data/climate_rcp26.jshd",
+                "data/climate_rcp45.jshd",
+                "data/climate_rcp85.jshd",
+            ]),
+        ],
+    ),
+)
+
+# Expand to concrete jobs (2 config values x 3 files = 6 jobs)
+job_set = JobExpander().expand(config)
+
+# Each job has file_mappings populated with the appropriate climate file
+for job in job_set:
+    print(f"Config: {job.parameters}, Climate: {job.file_mappings['climate']}")
+```
+
+File parameter labels are derived from filename stems (e.g., "climate_rcp45.jshd" → "climate_rcp45").
+These labels are added to custom_tags for tracking.
+
 ### Template File (config.jshc.j2)
 
 Jinja template for configuration:
@@ -428,8 +465,8 @@ config = JobConfig(
     template_string="maxGrowth = {{ maxGrowth }} meters",
     source_path=Path("simulation.josh"),
     sweep=SweepConfig(
-        parameters=[
-            SweepParameter(name="maxGrowth", values=[10, 50, 100])
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100])
         ]
     ),
 )
@@ -441,14 +478,14 @@ Define parameter ranges instead of explicit values:
 
 ```python
 # Like numpy.arange(start, stop, step)
-SweepParameter(
+ConfigSweepParameter(
     name="survivalProb",
     values={"start": 80, "stop": 100, "step": 5}
 )
 # Result: [80, 85, 90, 95]
 
 # Like numpy.linspace(start, stop, num)
-SweepParameter(
+ConfigSweepParameter(
     name="seedCount",
     values={"start": 1000, "stop": 5000, "num": 5}
 )
@@ -467,7 +504,7 @@ simulation: Main
 replicates: 3
 
 sweep:
-  parameters:
+  config_parameters:
     - name: scenario
       values: [baseline, optimistic, pessimistic]
     
@@ -476,6 +513,13 @@ sweep:
     
     - name: seedCount
       range: {start: 1000, stop: 5000, num: 5}
+  
+  file_parameters:
+    - name: climate
+      paths:
+        - data/climate_rcp26.jshd
+        - data/climate_rcp45.jshd
+        - data/climate_rcp85.jshd
 ```
 
 Load and execute:
@@ -1200,7 +1244,7 @@ End-to-end parameter sweep with tracking:
 
 ```python
 from pathlib import Path
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, run_sweep
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter, JobExpander, run_sweep
 from joshpy.cli import JoshCLI
 from joshpy.registry import RunRegistry
 
@@ -1218,9 +1262,9 @@ survivalProb = {{ survivalProb }} percent
     source_path=Path("joshua_tree.josh"),
     simulation="JoshuaTreeSim",
     replicates=5,
-    sweep=SweepConfig(parameters=[
-        SweepParameter(name="maxGrowth", values=[5, 10, 20]),
-        SweepParameter(name="survivalProb", values={"start": 80, "stop": 100, "step": 5}),
+    sweep=SweepConfig(config_parameters=[
+        ConfigSweepParameter(name="maxGrowth", values=[5, 10, 20]),
+        ConfigSweepParameter(name="survivalProb", values={"start": 80, "stop": 100, "step": 5}),
     ]),
 )
 

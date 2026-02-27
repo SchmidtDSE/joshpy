@@ -16,7 +16,7 @@ Example usage:
         template_path=Path("template.jshc.j2"),
         source_path=Path("simulation.josh"),
         simulation="JoshuaTreeSim",
-        sweep=SweepConfig(parameters=[...]),
+        sweep=SweepConfig(config_parameters=[...]),
     )
     job_set = JobExpander().expand(config)
 

@@ -944,7 +944,7 @@ class TestSessionInfoJobConfig(unittest.TestCase):
 
     def test_job_config_property_with_full_config(self):
         """job_config property should handle full JobConfig with sweep."""
-        from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+        from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
 
         config = JobConfig(
             template_path=Path("/path/to/template.j2"),
@@ -952,9 +952,9 @@ class TestSessionInfoJobConfig(unittest.TestCase):
             replicates=5,
             source_path=Path("/path/to/sim.josh"),
             sweep=SweepConfig(
-                parameters=[
-                    SweepParameter(name="maxGrowth", values=[10, 20, 30]),
-                    SweepParameter(name="survivalProb", values=[0.8, 0.9]),
+                config_parameters=[
+                    ConfigSweepParameter(name="maxGrowth", values=[10, 20, 30]),
+                    ConfigSweepParameter(name="survivalProb", values=[0.8, 0.9]),
                 ],
             ),
             file_mappings={
