@@ -37,7 +37,9 @@ from joshpy.cli import (
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
-        SweepParameter,
+        ConfigSweepParameter,
+        FileSweepParameter,
+        SweepParameter,  # Alias for backward compatibility
         SweepConfig,
         JobConfig,
         ExpandedJob,
@@ -47,6 +49,12 @@ try:
         to_run_config,
         to_run_remote_config,
         run_sweep,
+    )
+    from joshpy.strategies import (
+        SweepStrategy,
+        CartesianStrategy,
+        OptunaStrategy,
+        strategy_from_dict,
     )
     HAS_JOBS = True
 except ImportError:
@@ -78,6 +86,9 @@ try:
         SweepManager,
         SweepManagerBuilder,
         recover_sweep_results,
+        load_job_results,
+        LoadConfig,
+        ResultLoadError,
     )
     HAS_SWEEP = True
 except ImportError:
@@ -104,7 +115,9 @@ __all__ = [
     "ExportFileInfo",
     "ExportPaths",
     # Jobs (optional)
-    "SweepParameter",
+    "ConfigSweepParameter",
+    "FileSweepParameter",
+    "SweepParameter",  # Alias for backward compatibility
     "SweepConfig",
     "JobConfig",
     "ExpandedJob",
@@ -115,6 +128,11 @@ __all__ = [
     "to_run_remote_config",
     "run_sweep",
     "HAS_JOBS",
+    # Strategies (optional, part of jobs)
+    "SweepStrategy",
+    "CartesianStrategy",
+    "OptunaStrategy",
+    "strategy_from_dict",
     # Registry (optional)
     "RunRegistry",
     "RegistryCallback",
@@ -131,5 +149,8 @@ __all__ = [
     "SweepManager",
     "SweepManagerBuilder",
     "recover_sweep_results",
+    "load_job_results",
+    "LoadConfig",
+    "ResultLoadError",
     "HAS_SWEEP",
 ]

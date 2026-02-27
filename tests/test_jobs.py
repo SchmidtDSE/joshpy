@@ -5,7 +5,9 @@ import unittest
 from pathlib import Path
 
 from joshpy.jobs import (
-    SweepParameter,
+    ConfigSweepParameter,
+    FileSweepParameter,
+    SweepParameter,  # Backward compat alias
     SweepConfig,
     JobConfig,
     ExpandedJob,
@@ -183,6 +185,64 @@ class TestSweepParameter(unittest.TestCase):
         self.assertEqual(param.values, [0, 2, 4])
 
 
+class TestFileSweepParameter(unittest.TestCase):
+    """Tests for FileSweepParameter class."""
+
+    def test_basic_creation(self):
+        """Basic file parameter creation with paths."""
+        param = FileSweepParameter(name="climate", paths=[
+            Path("data/rcp26.jshd"),
+            Path("data/rcp45.jshd"),
+        ])
+        self.assertEqual(param.name, "climate")
+        self.assertEqual(len(param.paths), 2)
+        self.assertEqual(param.paths[0], Path("data/rcp26.jshd"))
+
+    def test_string_to_path_conversion(self):
+        """String paths should be converted to Path objects."""
+        param = FileSweepParameter(name="data", paths=[
+            "data/file1.jshd",
+            "data/file2.jshd",
+        ])
+        self.assertIsInstance(param.paths[0], Path)
+        self.assertEqual(param.paths[0], Path("data/file1.jshd"))
+
+    def test_labels_from_stems(self):
+        """Labels should be derived from filename stems."""
+        param = FileSweepParameter(name="climate", paths=[
+            Path("data/rcp26.jshd"),
+            Path("data/rcp45.jshd"),
+            Path("other/rcp85.jshd"),
+        ])
+        self.assertEqual(param.labels, ["rcp26", "rcp45", "rcp85"])
+
+    def test_duplicate_stems_raises(self):
+        """Duplicate filename stems should raise ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            FileSweepParameter(name="climate", paths=[
+                Path("dir1/data.jshd"),
+                Path("dir2/data.jshd"),
+            ])
+        self.assertIn("duplicate stems", str(ctx.exception).lower())
+
+    def test_to_dict(self):
+        """to_dict should serialize paths as strings."""
+        param = FileSweepParameter(name="climate", paths=[
+            Path("a.jshd"),
+            Path("b.jshd"),
+        ])
+        result = param.to_dict()
+        self.assertEqual(result["name"], "climate")
+        self.assertEqual(result["paths"], ["a.jshd", "b.jshd"])
+
+    def test_from_dict(self):
+        """from_dict should deserialize paths."""
+        data = {"name": "climate", "paths": ["a.jshd", "b.jshd"]}
+        param = FileSweepParameter.from_dict(data)
+        self.assertEqual(param.name, "climate")
+        self.assertEqual(param.paths, [Path("a.jshd"), Path("b.jshd")])
+
+
 class TestSweepConfig(unittest.TestCase):
     """Tests for SweepConfig class."""
 
@@ -194,17 +254,17 @@ class TestSweepConfig(unittest.TestCase):
 
     def test_single_param_expand(self):
         """Single parameter should expand to list of single-key dicts."""
-        config = SweepConfig(parameters=[
-            SweepParameter(name="x", values=[1, 2, 3])
+        config = SweepConfig(config_parameters=[
+            ConfigSweepParameter(name="x", values=[1, 2, 3])
         ])
         result = config.expand()
         self.assertEqual(result, [{"x": 1}, {"x": 2}, {"x": 3}])
 
     def test_multiple_param_expand(self):
         """Multiple parameters should produce cartesian product."""
-        config = SweepConfig(parameters=[
-            SweepParameter(name="a", values=[1, 2]),
-            SweepParameter(name="b", values=["x", "y"]),
+        config = SweepConfig(config_parameters=[
+            ConfigSweepParameter(name="a", values=[1, 2]),
+            ConfigSweepParameter(name="b", values=["x", "y"]),
         ])
         result = config.expand()
         expected = [
@@ -217,9 +277,9 @@ class TestSweepConfig(unittest.TestCase):
 
     def test_len(self):
         """Length should be product of parameter value counts."""
-        config = SweepConfig(parameters=[
-            SweepParameter(name="a", values=[1, 2, 3]),  # 3
-            SweepParameter(name="b", values=["x", "y"]),  # 2
+        config = SweepConfig(config_parameters=[
+            ConfigSweepParameter(name="a", values=[1, 2, 3]),  # 3
+            ConfigSweepParameter(name="b", values=["x", "y"]),  # 2
         ])
         self.assertEqual(len(config), 6)
 
@@ -229,12 +289,12 @@ class TestSweepConfig(unittest.TestCase):
         self.assertEqual(len(config), 1)
 
     def test_to_dict(self):
-        """to_dict should serialize parameters."""
-        config = SweepConfig(parameters=[
-            SweepParameter(name="x", values=[1, 2])
+        """to_dict should serialize config_parameters."""
+        config = SweepConfig(config_parameters=[
+            ConfigSweepParameter(name="x", values=[1, 2])
         ])
         result = config.to_dict()
-        self.assertEqual(result["parameters"][0]["name"], "x")
+        self.assertEqual(result["config_parameters"][0]["name"], "x")
 
     def test_from_dict(self):
         """from_dict should deserialize parameters."""
@@ -242,6 +302,97 @@ class TestSweepConfig(unittest.TestCase):
         config = SweepConfig.from_dict(data)
         self.assertEqual(len(config.parameters), 1)
         self.assertEqual(config.parameters[0].name, "x")
+
+    def test_from_dict_new_style(self):
+        """from_dict should deserialize config_parameters."""
+        data = {"config_parameters": [{"name": "x", "values": [1, 2]}]}
+        config = SweepConfig.from_dict(data)
+        self.assertEqual(len(config.config_parameters), 1)
+        self.assertEqual(config.config_parameters[0].name, "x")
+
+    def test_parameters_property_returns_config_parameters(self):
+        """parameters property should return config_parameters for backward compat."""
+        config = SweepConfig(config_parameters=[
+            ConfigSweepParameter(name="x", values=[1, 2])
+        ])
+        self.assertEqual(config.parameters, config.config_parameters)
+
+    def test_file_param_expand(self):
+        """File parameters should expand with path and label."""
+        config = SweepConfig(file_parameters=[
+            FileSweepParameter(name="climate", paths=[
+                Path("data/rcp45.jshd"),
+                Path("data/rcp85.jshd"),
+            ])
+        ])
+        result = config.expand()
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["climate"]["path"], Path("data/rcp45.jshd"))
+        self.assertEqual(result[0]["climate"]["label"], "rcp45")
+        self.assertEqual(result[1]["climate"]["path"], Path("data/rcp85.jshd"))
+        self.assertEqual(result[1]["climate"]["label"], "rcp85")
+
+    def test_mixed_param_expand(self):
+        """Config and file parameters should expand as cartesian product."""
+        config = SweepConfig(
+            config_parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2]),
+            ],
+            file_parameters=[
+                FileSweepParameter(name="data", paths=[
+                    Path("a.jshd"),
+                    Path("b.jshd"),
+                ])
+            ]
+        )
+        result = config.expand()
+        self.assertEqual(len(result), 4)  # 2 x 2
+
+        # Check first combo: x=1, data=a.jshd
+        self.assertEqual(result[0]["x"], 1)
+        self.assertEqual(result[0]["data"]["path"], Path("a.jshd"))
+        self.assertEqual(result[0]["data"]["label"], "a")
+
+        # Check last combo: x=2, data=b.jshd
+        self.assertEqual(result[3]["x"], 2)
+        self.assertEqual(result[3]["data"]["path"], Path("b.jshd"))
+        self.assertEqual(result[3]["data"]["label"], "b")
+
+    def test_len_with_file_params(self):
+        """Length should include file parameter counts."""
+        config = SweepConfig(
+            config_parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2, 3]),  # 3
+            ],
+            file_parameters=[
+                FileSweepParameter(name="data", paths=[
+                    Path("a.jshd"),
+                    Path("b.jshd"),
+                ]),  # 2
+            ]
+        )
+        self.assertEqual(len(config), 6)  # 3 x 2
+
+    def test_to_dict_with_file_params(self):
+        """to_dict should serialize file_parameters."""
+        config = SweepConfig(file_parameters=[
+            FileSweepParameter(name="data", paths=[Path("a.jshd")])
+        ])
+        result = config.to_dict()
+        self.assertEqual(result["file_parameters"][0]["name"], "data")
+        self.assertEqual(result["file_parameters"][0]["paths"], ["a.jshd"])
+
+    def test_from_dict_with_file_params(self):
+        """from_dict should deserialize file_parameters."""
+        data = {
+            "config_parameters": [{"name": "x", "values": [1, 2]}],
+            "file_parameters": [{"name": "data", "paths": ["a.jshd", "b.jshd"]}]
+        }
+        config = SweepConfig.from_dict(data)
+        self.assertEqual(len(config.config_parameters), 1)
+        self.assertEqual(len(config.file_parameters), 1)
+        self.assertEqual(config.file_parameters[0].name, "data")
+        self.assertEqual(config.file_parameters[0].paths, [Path("a.jshd"), Path("b.jshd")])
 
 
 class TestJobConfig(unittest.TestCase):
@@ -292,8 +443,8 @@ class TestJobConfig(unittest.TestCase):
             simulation="TestSim",
             replicates=3,
             template_string="var = {{ val }}",
-            sweep=SweepConfig(parameters=[
-                SweepParameter(name="val", values=[1, 2, 3])
+            sweep=SweepConfig(config_parameters=[
+                ConfigSweepParameter(name="val", values=[1, 2, 3])
             ])
         )
         yaml_str = original.to_yaml()
@@ -302,8 +453,8 @@ class TestJobConfig(unittest.TestCase):
         self.assertEqual(restored.simulation, original.simulation)
         self.assertEqual(restored.replicates, original.replicates)
         self.assertEqual(restored.template_string, original.template_string)
-        self.assertEqual(len(restored.sweep.parameters), 1)
-        self.assertEqual(restored.sweep.parameters[0].values, [1, 2, 3])
+        self.assertEqual(len(restored.sweep.config_parameters), 1)
+        self.assertEqual(restored.sweep.config_parameters[0].values, [1, 2, 3])
 
 
 class TestJobExpander(unittest.TestCase):
@@ -326,8 +477,8 @@ class TestJobExpander(unittest.TestCase):
         """Expanding with sweep should produce multiple jobs."""
         config = JobConfig(
             template_string="value = {{ x }}",
-            sweep=SweepConfig(parameters=[
-                SweepParameter(name="x", values=[1, 2, 3])
+            sweep=SweepConfig(config_parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2, 3])
             ])
         )
         expander = JobExpander()
@@ -342,8 +493,8 @@ class TestJobExpander(unittest.TestCase):
         """Expanded jobs should have config files written."""
         config = JobConfig(
             template_string="x = {{ val }}",
-            sweep=SweepConfig(parameters=[
-                SweepParameter(name="val", values=[10, 20])
+            sweep=SweepConfig(config_parameters=[
+                ConfigSweepParameter(name="val", values=[10, 20])
             ])
         )
         expander = JobExpander()
@@ -361,9 +512,9 @@ class TestJobExpander(unittest.TestCase):
         """Expanded jobs should have custom_tags from parameters."""
         config = JobConfig(
             template_string="a={{ a }}, b={{ b }}",
-            sweep=SweepConfig(parameters=[
-                SweepParameter(name="a", values=[1]),
-                SweepParameter(name="b", values=["test"]),
+            sweep=SweepConfig(config_parameters=[
+                ConfigSweepParameter(name="a", values=[1]),
+                ConfigSweepParameter(name="b", values=["test"]),
             ])
         )
         expander = JobExpander()
@@ -397,6 +548,114 @@ class TestJobExpander(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             expander.expand(config)
+
+    def test_expand_with_file_params(self):
+        """Expanding with file parameters should update file_mappings."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test files
+            file_a = Path(tmpdir) / "scenario_a.jshd"
+            file_b = Path(tmpdir) / "scenario_b.jshd"
+            file_a.write_bytes(b"data a")
+            file_b.write_bytes(b"data b")
+
+            config = JobConfig(
+                template_string="test config",
+                sweep=SweepConfig(file_parameters=[
+                    FileSweepParameter(name="climate", paths=[file_a, file_b])
+                ]),
+                source_path=Path(tmpdir) / "sim.josh",
+            )
+            # Create source file for hash computation
+            config.source_path.write_text("simulation")
+
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 2)
+
+                # First job should have file_a in file_mappings
+                job_a = job_set.jobs[0]
+                self.assertEqual(job_a.file_mappings["climate"], file_a)
+                self.assertEqual(job_a.custom_tags["climate"], "scenario_a")
+                self.assertEqual(job_a.custom_tags["climate_file"], "scenario_a.jshd")
+
+                # Second job should have file_b in file_mappings
+                job_b = job_set.jobs[1]
+                self.assertEqual(job_b.file_mappings["climate"], file_b)
+                self.assertEqual(job_b.custom_tags["climate"], "scenario_b")
+                self.assertEqual(job_b.custom_tags["climate_file"], "scenario_b.jshd")
+            finally:
+                job_set.cleanup()
+
+    def test_expand_preserves_default_file_mappings(self):
+        """File params should override while preserving other file_mappings."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test files
+            sweep_file_a = Path(tmpdir) / "sweep_a.jshd"
+            sweep_file_b = Path(tmpdir) / "sweep_b.jshd"
+            default_file = Path(tmpdir) / "default.jshd"
+            sweep_file_a.write_bytes(b"data a")
+            sweep_file_b.write_bytes(b"data b")
+            default_file.write_bytes(b"default data")
+
+            config = JobConfig(
+                template_string="test config",
+                file_mappings={"other": default_file},  # This should be preserved
+                sweep=SweepConfig(file_parameters=[
+                    FileSweepParameter(name="climate", paths=[sweep_file_a, sweep_file_b])
+                ]),
+                source_path=Path(tmpdir) / "sim.josh",
+            )
+            config.source_path.write_text("simulation")
+
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                for job in job_set:
+                    # Default file_mapping should be preserved
+                    self.assertEqual(job.file_mappings["other"], default_file)
+                    # Swept file should be set
+                    self.assertIn(job.file_mappings["climate"], [sweep_file_a, sweep_file_b])
+            finally:
+                job_set.cleanup()
+
+    def test_expand_mixed_config_and_file_params(self):
+        """Mixed config and file params should create cartesian product."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_a = Path(tmpdir) / "a.jshd"
+            file_b = Path(tmpdir) / "b.jshd"
+            file_a.write_bytes(b"data a")
+            file_b.write_bytes(b"data b")
+
+            config = JobConfig(
+                template_string="x = {{ x }}",
+                sweep=SweepConfig(
+                    config_parameters=[
+                        ConfigSweepParameter(name="x", values=[1, 2]),
+                    ],
+                    file_parameters=[
+                        FileSweepParameter(name="data", paths=[file_a, file_b]),
+                    ],
+                ),
+                source_path=Path(tmpdir) / "sim.josh",
+            )
+            config.source_path.write_text("simulation")
+
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 4)  # 2 x 2
+
+                # Jobs should only have config params in parameters dict
+                # (file params affect file_mappings, not parameters)
+                for job in job_set:
+                    self.assertIn("x", job.parameters)
+                    self.assertNotIn("data", job.parameters)
+            finally:
+                job_set.cleanup()
 
 
 class TestJobSet(unittest.TestCase):
