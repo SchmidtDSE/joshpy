@@ -11,7 +11,7 @@ from joshpy.sweep import (
     SweepManager,
     SweepManagerBuilder,
 )
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter, JobExpander
 from joshpy.registry import RunRegistry
 from joshpy.cli import JoshCLI
 
@@ -333,7 +333,7 @@ class TestSweepManagerBuilder(unittest.TestCase):
             simulation="TestSim",
             replicates=2,
             sweep=SweepConfig(
-                parameters=[SweepParameter(name="maxGrowth", values=[10, 20])]
+                config_parameters=[ConfigSweepParameter(name="maxGrowth", values=[10, 20])]
             ),
         )
 
@@ -500,7 +500,7 @@ class TestSweepManagerBuilder(unittest.TestCase):
             simulation="TestSim",
             replicates=2,
             sweep=SweepConfig(
-                parameters=[SweepParameter(name="maxGrowth", values=[30, 40])]  # Different values
+                config_parameters=[ConfigSweepParameter(name="maxGrowth", values=[30, 40])]  # Different values
             ),
         )
         
@@ -532,7 +532,7 @@ class TestSweepManager(unittest.TestCase):
             simulation="TestSim",
             replicates=1,
             sweep=SweepConfig(
-                parameters=[SweepParameter(name="maxGrowth", values=[10, 20])]
+                config_parameters=[ConfigSweepParameter(name="maxGrowth", values=[10, 20])]
             ),
         )
 

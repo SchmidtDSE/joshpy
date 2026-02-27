@@ -2,6 +2,9 @@
 
 This module provides high-level tools for managing parameter sweeps:
 - `recover_sweep_results()` - Load CSV results from completed sweep jobs into registry
+- `load_job_results()` - Load CSV results for a single job with retry logic
+- `LoadConfig` - Configuration for result loading behavior
+- `ResultLoadError` - Error raised when result loading fails
 - `SweepManager` - Convenience orchestrator for parameter sweeps
 - `SweepManagerBuilder` - Builder pattern for flexible SweepManager configuration
 
@@ -34,6 +37,7 @@ Example usage:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +58,223 @@ from joshpy.jobs import (
 from joshpy.registry import RunRegistry
 
 
+@dataclass
+class LoadConfig:
+    """Configuration for result loading behavior.
+
+    Controls retry logic and timing for loading CSV results from completed jobs.
+    Used by `load_job_results()` and `recover_sweep_results()`.
+
+    Attributes:
+        max_retries: Maximum number of retry attempts for file operations.
+        retry_delay: Seconds to wait between retry attempts.
+        settle_delay: Seconds to wait after file appears before reading.
+            Helps avoid partial reads when files are still being written.
+        raise_on_missing: If True, raise ResultLoadError when CSV not found
+            after all retries. If False, silently skip missing files.
+
+    Examples:
+        >>> # Default configuration
+        >>> config = LoadConfig()
+
+        >>> # Aggressive retries for slow filesystems
+        >>> config = LoadConfig(max_retries=5, retry_delay=1.0, settle_delay=0.5)
+
+        >>> # Fail fast on missing files
+        >>> config = LoadConfig(raise_on_missing=True)
+    """
+
+    max_retries: int = 3
+    retry_delay: float = 0.5  # seconds
+    settle_delay: float = 0.2  # seconds to wait after file appears
+    raise_on_missing: bool = False  # raise if CSV not found after retries
+
+
+class ResultLoadError(Exception):
+    """Raised when result loading fails after retries.
+
+    Contains context about which job failed and how many jobs succeeded
+    before the failure, useful for debugging and recovery.
+
+    Attributes:
+        job: The job that failed to load.
+        succeeded_before: Number of jobs that loaded successfully before this failure.
+        message: Description of what went wrong.
+
+    Examples:
+        >>> try:
+        ...     load_job_results(cli, job, registry, export_paths,
+        ...                      load_config=LoadConfig(raise_on_missing=True))
+        ... except ResultLoadError as e:
+        ...     print(f"Failed after {e.succeeded_before} successful jobs")
+        ...     print(f"Job: {e.job.run_hash}")
+    """
+
+    def __init__(self, job: ExpandedJob, succeeded_before: int, message: str) -> None:
+        """Initialize ResultLoadError.
+
+        Args:
+            job: The job that failed to load.
+            succeeded_before: Number of jobs that succeeded before this failure.
+            message: Description of what went wrong.
+        """
+        self.job = job
+        self.succeeded_before = succeeded_before
+        self.message = message
+        super().__init__(
+            f"Failed to load results for job {job.run_hash}: {message}. "
+            f"{succeeded_before} jobs succeeded before this failure."
+        )
+
+
+def _wait_for_file(path: Path, config: LoadConfig) -> bool:
+    """Wait for file to exist and settle.
+
+    Implements retry logic for file existence checks, with a settle delay
+    to avoid reading partially-written files.
+
+    Args:
+        path: Path to the file to wait for.
+        config: Load configuration with retry settings.
+
+    Returns:
+        True if file exists and is ready (non-empty), False otherwise.
+    """
+    for attempt in range(config.max_retries):
+        if path.exists():
+            # Brief pause to let writes complete (avoid partial reads)
+            time.sleep(config.settle_delay)
+            # Verify file is non-empty
+            try:
+                if path.stat().st_size > 0:
+                    return True
+            except OSError:
+                # File might have been removed between exists() and stat()
+                pass
+        if attempt < config.max_retries - 1:
+            time.sleep(config.retry_delay)
+    return False
+
+
+def load_job_results(
+    cli: JoshCLI,
+    job: ExpandedJob,
+    registry: RunRegistry,
+    export_paths: ExportPaths,
+    *,
+    export_type: str = "patch",
+    quiet: bool = False,
+    load_config: LoadConfig | None = None,
+    succeeded_before: int = 0,
+) -> int:
+    """Load CSV results for a single job into the registry.
+
+    Extracts result loading logic from recover_sweep_results() for reuse
+    in adaptive sweep runners. Includes retry logic for robustness against
+    filesystem delays and partial writes.
+
+    Args:
+        cli: JoshCLI instance (needed for path resolution).
+        job: The completed job to load results for.
+        registry: Registry to load results into.
+        export_paths: Export path configuration from inspect_exports().
+        export_type: Type of export ("patch", "meta", "entity").
+        quiet: Suppress output.
+        load_config: Retry and timing configuration. Uses defaults if None.
+        succeeded_before: Number of jobs that succeeded before this one.
+            Used for error context in ResultLoadError.
+
+    Returns:
+        Number of rows loaded.
+
+    Raises:
+        ResultLoadError: If raise_on_missing=True and CSV not found after retries,
+            or if CSV load fails after retries.
+
+    Examples:
+        >>> # Basic usage
+        >>> export_paths = cli.inspect_exports(InspectExportsConfig(...))
+        >>> rows = load_job_results(cli, job, registry, export_paths)
+
+        >>> # With retry configuration
+        >>> config = LoadConfig(max_retries=5, raise_on_missing=True)
+        >>> rows = load_job_results(cli, job, registry, export_paths,
+        ...                         load_config=config)
+    """
+    if load_config is None:
+        load_config = LoadConfig()
+
+    # Get path template for requested export type
+    path_template = _get_export_path(export_paths, export_type)
+    if not path_template:
+        return 0
+
+    # Get run_id from registry
+    runs = registry.get_runs_for_hash(job.run_hash)
+    if not runs:
+        return 0
+
+    run_id = runs[0].run_id
+    loader = CellDataLoader(registry)
+    total_rows = 0
+    simulation = job.simulation
+
+    for rep in range(job.replicates):
+        # Build template variables from job parameters and custom tags
+        template_vars = {
+            "simulation": simulation,
+            "replicate": rep,
+            **job.parameters,
+            **job.custom_tags,
+        }
+
+        try:
+            csv_path = export_paths.resolve_path(path_template, **template_vars)
+        except KeyError:
+            continue
+
+        # Wait for file with retries
+        if not _wait_for_file(csv_path, load_config):
+            if load_config.raise_on_missing:
+                raise ResultLoadError(
+                    job=job,
+                    succeeded_before=succeeded_before,
+                    message=f"CSV not found after {load_config.max_retries} retries: {csv_path}",
+                )
+            continue
+
+        # Load with retries for transient errors
+        last_error: Exception | None = None
+        for attempt in range(load_config.max_retries):
+            try:
+                rows = loader.load_csv(
+                    csv_path=csv_path,
+                    run_id=run_id,
+                    run_hash=job.run_hash,
+                )
+                total_rows += rows
+                if not quiet:
+                    print(f"  Loaded {rows} rows from {csv_path.name}")
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                if attempt < load_config.max_retries - 1:
+                    time.sleep(load_config.retry_delay)
+
+        if last_error is not None:
+            if load_config.raise_on_missing:
+                raise ResultLoadError(
+                    job=job,
+                    succeeded_before=succeeded_before,
+                    message=f"CSV load failed after {load_config.max_retries} retries: {last_error}",
+                )
+            elif not quiet:
+                print(f"  Error loading {csv_path}: {last_error}")
+
+    return total_rows
+
+
 def recover_sweep_results(
     cli: JoshCLI,
     job_set: JobSet,
@@ -61,6 +282,7 @@ def recover_sweep_results(
     *,
     export_type: str = "patch",
     quiet: bool = False,
+    load_config: LoadConfig | None = None,
 ) -> int:
     """Load CSV results from completed sweep jobs into the registry.
 
@@ -68,12 +290,15 @@ def recover_sweep_results(
     then resolves template variables for each job's parameters, custom_tags,
     and replicates.
 
+    This is a convenience wrapper around load_job_results() for batch loading.
+
     Args:
         cli: JoshCLI instance (needed for inspect_exports).
         job_set: The expanded jobs to collect results for.
         registry: Registry to load results into.
         export_type: Type of export to load ("patch", "meta", "entity").
         quiet: Suppress progress output.
+        load_config: Retry and timing configuration. Uses defaults if None.
 
     Returns:
         Total number of rows loaded.
@@ -81,6 +306,7 @@ def recover_sweep_results(
     Raises:
         ValueError: If jobs have different source_paths or no source_path.
         RuntimeError: If no export path configured for export_type.
+        ResultLoadError: If load_config.raise_on_missing=True and loading fails.
 
     Examples:
         >>> from joshpy.sweep import recover_sweep_results
@@ -91,7 +317,15 @@ def recover_sweep_results(
         ...     export_type="patch",
         ... )
         >>> print(f"Loaded {rows} rows from completed jobs")
+
+        >>> # With retry configuration
+        >>> from joshpy.sweep import LoadConfig
+        >>> config = LoadConfig(max_retries=5, settle_delay=0.5)
+        >>> rows = recover_sweep_results(cli, job_set, registry, load_config=config)
     """
+    if load_config is None:
+        load_config = LoadConfig()
+
     # Validate jobs have consistent source paths
     source_paths = {job.source_path for job in job_set if job.source_path}
     if len(source_paths) == 0:
@@ -121,16 +355,15 @@ def recover_sweep_results(
     if not quiet:
         print(f"Loading {export_type} results from: {path_template}")
 
-    # Load CSV for each job and replicate
-    loader = CellDataLoader(registry)
+    # Load CSV for each job using load_job_results()
     total_rows = 0
     total_jobs = len(job_set.jobs)
     jobs_loaded = 0
     jobs_not_in_registry = 0
-    files_missing = 0
+    succeeded_jobs = 0
 
     for job in job_set:
-        # Get run_id from registry
+        # Check if job is in registry
         runs = registry.get_runs_for_hash(job.run_hash)
         if not runs:
             jobs_not_in_registry += 1
@@ -139,47 +372,22 @@ def recover_sweep_results(
                 print(f"  No run recorded for job ({params_str or 'no params'})")
             continue
 
-        run_id = runs[0].run_id
-
-        # Load each replicate - resolve path with all available variables
-        job_rows = 0
-        for rep in range(job.replicates):
-            # Build template variables from job parameters and custom tags
-            template_vars = {
-                "simulation": simulation,
-                "replicate": rep,
-                **job.parameters,
-                **job.custom_tags,
-            }
-
-            try:
-                csv_path = export_paths.resolve_path(path_template, **template_vars)
-            except KeyError as e:
-                if not quiet:
-                    print(f"  Warning: Cannot resolve path template - missing variable {e}")
-                continue
-
-            if csv_path.exists():
-                try:
-                    rows = loader.load_csv(
-                        csv_path=csv_path,
-                        run_id=run_id,
-                        run_hash=job.run_hash,
-                    )
-                    job_rows += rows
-                    if not quiet:
-                        print(f"  Loaded {rows} rows from {csv_path.name}")
-                except Exception as e:
-                    if not quiet:
-                        print(f"  Error loading {csv_path}: {e}")
-            else:
-                files_missing += 1
-                if not quiet:
-                    print(f"  File not found: {csv_path}")
+        # Load results for this job
+        job_rows = load_job_results(
+            cli=cli,
+            job=job,
+            registry=registry,
+            export_paths=export_paths,
+            export_type=export_type,
+            quiet=quiet,
+            load_config=load_config,
+            succeeded_before=succeeded_jobs,
+        )
 
         if job_rows > 0:
             total_rows += job_rows
             jobs_loaded += 1
+        succeeded_jobs += 1
 
     if not quiet:
         print("\nResults:")
@@ -187,8 +395,6 @@ def recover_sweep_results(
         print(f"  Jobs with results loaded: {jobs_loaded}")
         if jobs_not_in_registry > 0:
             print(f"  Jobs not yet executed (no run in registry): {jobs_not_in_registry}")
-        if files_missing > 0:
-            print(f"  Output files not found: {files_missing}")
         print(f"  Total rows loaded: {total_rows}")
 
     return total_rows
@@ -292,7 +498,7 @@ class SweepManager:
             ...     source_path=Path("simulation.josh"),
             ...     simulation="Main",
             ...     replicates=3,
-            ...     sweep=SweepConfig(parameters=[...]),
+            ...     sweep=SweepConfig(config_parameters=[...]),
             ... )
             >>> manager = SweepManager.from_config(config, registry=":memory:")
         """
