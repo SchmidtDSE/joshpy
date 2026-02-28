@@ -74,18 +74,20 @@ website:
             - reference/jobs.SweepConfig.qmd
             - reference/jobs.ConfigSweepParameter.qmd
             - reference/jobs.FileSweepParameter.qmd
-            - reference/jobs.SweepParameter.qmd
             - reference/jobs.JobExpander.qmd
             - reference/jobs.JobSet.qmd
             - reference/jobs.ExpandedJob.qmd
             - reference/jobs.run_sweep.qmd
             - reference/jobs.SweepResult.qmd
+            - reference/jobs.AdaptiveSweepResult.qmd
         - section: "Strategies"
           contents:
             - reference/strategies.SweepStrategy.qmd
             - reference/strategies.CartesianStrategy.qmd
             - reference/strategies.OptunaStrategy.qmd
             - reference/strategies.strategy_from_dict.qmd
+            - reference/strategies.run_adaptive_sweep.qmd
+            - reference/strategies.sample_params_from_trial.qmd
         - section: "Registry"
           contents:
             - reference/registry.RunRegistry.qmd
@@ -165,12 +167,12 @@ quartodoc:
         - jobs.SweepConfig
         - jobs.ConfigSweepParameter
         - jobs.FileSweepParameter
-        - jobs.SweepParameter
         - jobs.JobExpander
         - jobs.JobSet
         - jobs.ExpandedJob
         - jobs.run_sweep
         - jobs.SweepResult
+        - jobs.AdaptiveSweepResult
     
     - title: Strategies Module
       desc: Sweep expansion strategies for parameter optimization
@@ -179,6 +181,8 @@ quartodoc:
         - strategies.CartesianStrategy
         - strategies.OptunaStrategy
         - strategies.strategy_from_dict
+        - strategies.run_adaptive_sweep
+        - strategies.sample_params_from_trial
     
     - title: Registry Module
       desc: DuckDB-backed experiment tracking

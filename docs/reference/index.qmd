@@ -23,7 +23,6 @@ Job configuration and parameter sweep execution
 | [jobs.SweepConfig](jobs.SweepConfig.qmd#joshpy.jobs.SweepConfig) | Configuration for parameter sweep expansion. |
 | [jobs.ConfigSweepParameter](jobs.ConfigSweepParameter.qmd#joshpy.jobs.ConfigSweepParameter) | A configuration parameter to sweep over in job expansion. |
 | [jobs.FileSweepParameter](jobs.FileSweepParameter.qmd#joshpy.jobs.FileSweepParameter) | A file parameter to sweep over in job expansion. |
-| [jobs.SweepParameter](jobs.SweepParameter.qmd#joshpy.jobs.SweepParameter) |  |
 | [jobs.JobExpander](jobs.JobExpander.qmd#joshpy.jobs.JobExpander) | Expands JobConfig with sweeps into concrete ExpandedJobs. |
 | [jobs.JobSet](jobs.JobSet.qmd#joshpy.jobs.JobSet) | A collection of jobs to execute (from expanding a JobConfig). |
 | [jobs.ExpandedJob](jobs.ExpandedJob.qmd#joshpy.jobs.ExpandedJob) | A fully-expanded job with concrete parameter values. |
