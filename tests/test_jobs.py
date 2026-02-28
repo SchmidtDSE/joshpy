@@ -7,7 +7,6 @@ from pathlib import Path
 from joshpy.jobs import (
     ConfigSweepParameter,
     FileSweepParameter,
-    SweepParameter,  # Backward compat alias
     SweepConfig,
     JobConfig,
     ExpandedJob,
@@ -136,18 +135,18 @@ class TestNormalizeValues(unittest.TestCase):
             _normalize_values(values)
 
 
-class TestSweepParameter(unittest.TestCase):
-    """Tests for SweepParameter class."""
+class TestConfigSweepParameter(unittest.TestCase):
+    """Tests for ConfigSweepParameter class."""
 
     def test_basic_creation(self):
         """Basic parameter creation with list."""
-        param = SweepParameter(name="survival", values=[85, 90, 95])
+        param = ConfigSweepParameter(name="survival", values=[85, 90, 95])
         self.assertEqual(param.name, "survival")
         self.assertEqual(param.values, [85, 90, 95])
 
     def test_range_expansion(self):
         """Parameters with range spec should expand."""
-        param = SweepParameter(
+        param = ConfigSweepParameter(
             name="survival",
             values={"start": 80, "stop": 90, "step": 2}
         )
@@ -155,13 +154,13 @@ class TestSweepParameter(unittest.TestCase):
 
     def test_to_dict_with_values(self):
         """to_dict should include values."""
-        param = SweepParameter(name="x", values=[1, 2, 3])
+        param = ConfigSweepParameter(name="x", values=[1, 2, 3])
         result = param.to_dict()
         self.assertEqual(result, {"name": "x", "values": [1, 2, 3]})
 
     def test_to_dict_with_range(self):
         """to_dict should preserve range spec."""
-        param = SweepParameter(
+        param = ConfigSweepParameter(
             name="x",
             values={"start": 0, "stop": 10, "step": 2}
         )
@@ -173,14 +172,14 @@ class TestSweepParameter(unittest.TestCase):
     def test_from_dict_with_values(self):
         """from_dict should create parameter with values."""
         data = {"name": "x", "values": [1, 2, 3]}
-        param = SweepParameter.from_dict(data)
+        param = ConfigSweepParameter.from_dict(data)
         self.assertEqual(param.name, "x")
         self.assertEqual(param.values, [1, 2, 3])
 
     def test_from_dict_with_range(self):
         """from_dict should create parameter with range."""
         data = {"name": "x", "range": {"start": 0, "stop": 6, "step": 2}}
-        param = SweepParameter.from_dict(data)
+        param = ConfigSweepParameter.from_dict(data)
         self.assertEqual(param.name, "x")
         self.assertEqual(param.values, [0, 2, 4])
 

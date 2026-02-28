@@ -342,5 +342,306 @@ class TestSweepConfigWithStrategy(unittest.TestCase):
         self.assertIsInstance(config.strategy, CartesianStrategy)
 
 
+class TestAdaptiveSweepResult(unittest.TestCase):
+    """Tests for AdaptiveSweepResult."""
+
+    def test_is_adaptive_property(self):
+        """AdaptiveSweepResult.is_adaptive should be True."""
+        from joshpy.jobs import AdaptiveSweepResult
+
+        result = AdaptiveSweepResult()
+        self.assertTrue(result.is_adaptive)
+
+    def test_total_trials_from_study(self):
+        """total_trials should return study trial count when available."""
+        from joshpy.jobs import AdaptiveSweepResult
+        from unittest.mock import MagicMock
+
+        mock_study = MagicMock()
+        mock_study.trials = [MagicMock(), MagicMock(), MagicMock()]
+
+        result = AdaptiveSweepResult(study=mock_study)
+        self.assertEqual(result.total_trials, 3)
+
+    def test_total_trials_from_job_results(self):
+        """total_trials should fall back to job_results length when no study."""
+        from joshpy.jobs import AdaptiveSweepResult
+        from unittest.mock import MagicMock
+
+        mock_jobs = [(MagicMock(), MagicMock()) for _ in range(5)]
+        result = AdaptiveSweepResult(job_results=mock_jobs)
+        self.assertEqual(result.total_trials, 5)
+
+    def test_trial_metrics_filters_inf(self):
+        """trial_metrics should exclude inf values."""
+        from joshpy.jobs import AdaptiveSweepResult
+        from unittest.mock import MagicMock
+
+        mock_trials = []
+        for value in [1.0, 2.0, float("inf"), 3.0, None]:
+            t = MagicMock()
+            t.value = value
+            mock_trials.append(t)
+
+        mock_study = MagicMock()
+        mock_study.trials = mock_trials
+
+        result = AdaptiveSweepResult(study=mock_study)
+        self.assertEqual(result.trial_metrics, [1.0, 2.0, 3.0])
+
+    def test_trial_metrics_empty_without_study(self):
+        """trial_metrics should return empty list without study."""
+        from joshpy.jobs import AdaptiveSweepResult
+
+        result = AdaptiveSweepResult()
+        self.assertEqual(result.trial_metrics, [])
+
+    def test_get_trial_summary(self):
+        """get_trial_summary should return dict with statistics."""
+        from joshpy.jobs import AdaptiveSweepResult
+        from unittest.mock import MagicMock
+
+        mock_trials = []
+        for value in [1.0, 2.0, 3.0]:
+            t = MagicMock()
+            t.value = value
+            mock_trials.append(t)
+
+        mock_study = MagicMock()
+        mock_study.trials = mock_trials
+
+        result = AdaptiveSweepResult(
+            study=mock_study, best_value=1.0, best_params={"x": 10}
+        )
+        summary = result.get_trial_summary()
+
+        self.assertEqual(summary["n_trials"], 3)
+        self.assertEqual(summary["n_completed"], 3)
+        self.assertEqual(summary["n_failed"], 0)
+        self.assertEqual(summary["best_value"], 1.0)
+        self.assertEqual(summary["best_params"], {"x": 10})
+        self.assertAlmostEqual(summary["mean_value"], 2.0)
+        self.assertIsNotNone(summary["std_value"])
+
+    def test_get_trial_summary_empty_without_study(self):
+        """get_trial_summary should return empty dict without study."""
+        from joshpy.jobs import AdaptiveSweepResult
+
+        result = AdaptiveSweepResult()
+        self.assertEqual(result.get_trial_summary(), {})
+
+    def test_get_best_job(self):
+        """get_best_job should return job with best run_hash."""
+        from joshpy.jobs import AdaptiveSweepResult, ExpandedJob
+        from unittest.mock import MagicMock
+        from pathlib import Path
+
+        # Create mock jobs
+        job1 = ExpandedJob(
+            config_content="",
+            config_path=Path("/tmp/a"),
+            config_name="sweep_config",
+            run_hash="hash1",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+        )
+        job2 = ExpandedJob(
+            config_content="",
+            config_path=Path("/tmp/b"),
+            config_name="sweep_config",
+            run_hash="hash2",
+            parameters={"x": 2},
+            simulation="Main",
+            replicates=1,
+        )
+
+        # Create mock study with best trial
+        mock_trial = MagicMock()
+        mock_trial.user_attrs = {"run_hash": "hash2"}
+        mock_study = MagicMock()
+        mock_study.best_trial = mock_trial
+
+        result = AdaptiveSweepResult(
+            job_results=[(job1, MagicMock()), (job2, MagicMock())], study=mock_study
+        )
+
+        best_job = result.get_best_job()
+        self.assertEqual(best_job, job2)
+        self.assertEqual(best_job.parameters, {"x": 2})
+
+    def test_get_best_job_returns_none_without_study(self):
+        """get_best_job should return None without study."""
+        from joshpy.jobs import AdaptiveSweepResult
+
+        result = AdaptiveSweepResult()
+        self.assertIsNone(result.get_best_job())
+
+    def test_iteration(self):
+        """AdaptiveSweepResult should be iterable."""
+        from joshpy.jobs import AdaptiveSweepResult
+        from unittest.mock import MagicMock
+
+        mock_jobs = [(MagicMock(), MagicMock()) for _ in range(3)]
+        result = AdaptiveSweepResult(job_results=mock_jobs)
+
+        items = list(result)
+        self.assertEqual(len(items), 3)
+
+    def test_len(self):
+        """len(AdaptiveSweepResult) should return job count."""
+        from joshpy.jobs import AdaptiveSweepResult
+        from unittest.mock import MagicMock
+
+        mock_jobs = [(MagicMock(), MagicMock()) for _ in range(4)]
+        result = AdaptiveSweepResult(job_results=mock_jobs)
+
+        self.assertEqual(len(result), 4)
+
+
+def _has_optuna() -> bool:
+    """Check if optuna is available."""
+    try:
+        import optuna  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+@unittest.skipUnless(_has_optuna(), "optuna not installed")
+class TestRunAdaptiveSweepValidation(unittest.TestCase):
+    """Tests for run_adaptive_sweep input validation."""
+
+    def test_requires_sweep_config(self):
+        """Should raise ValueError if config.sweep is None."""
+        from joshpy.strategies import run_adaptive_sweep
+        from joshpy.jobs import JobConfig
+        from unittest.mock import MagicMock
+
+        config = JobConfig(template_string="test", sweep=None)
+        mock_cli = MagicMock()
+        mock_registry = MagicMock()
+
+        with self.assertRaises(ValueError) as ctx:
+            run_adaptive_sweep(
+                mock_cli,
+                config,
+                registry=mock_registry,
+                session_id="test",
+            )
+        self.assertIn("config.sweep is required", str(ctx.exception))
+
+    def test_requires_optuna_strategy(self):
+        """Should raise TypeError if strategy is not OptunaStrategy."""
+        from joshpy.strategies import run_adaptive_sweep
+        from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+        from unittest.mock import MagicMock
+
+        config = JobConfig(
+            template_string="test",
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])]
+                # Default CartesianStrategy
+            ),
+        )
+        mock_cli = MagicMock()
+        mock_registry = MagicMock()
+
+        with self.assertRaises(TypeError) as ctx:
+            run_adaptive_sweep(
+                mock_cli,
+                config,
+                registry=mock_registry,
+                session_id="test",
+            )
+        self.assertIn("requires OptunaStrategy", str(ctx.exception))
+
+
+class TestCreateSingleJob(unittest.TestCase):
+    """Tests for _create_single_job helper."""
+
+    def test_creates_job_with_config_params(self):
+        """Should create ExpandedJob with config parameters."""
+        from joshpy.strategies import _create_single_job
+        from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+        from pathlib import Path
+        import tempfile
+        import os
+
+        # Create temp josh file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".josh", delete=False) as f:
+            f.write("start simulation Main\nend simulation\n")
+            josh_path = Path(f.name)
+
+        try:
+            config = JobConfig(
+                template_string="maxGrowth = {{ x }} meters",
+                source_path=josh_path,
+                simulation="Main",
+                replicates=3,
+                sweep=SweepConfig(
+                    config_parameters=[ConfigSweepParameter(name="x", values=[1, 2, 3])],
+                    strategy=OptunaStrategy(n_trials=10, objective="math:sin"),
+                ),
+            )
+
+            params = {"x": 42}
+            job = _create_single_job(config, params, trial_num=5)
+
+            self.assertEqual(job.parameters, {"x": 42})
+            self.assertEqual(job.simulation, "Main")
+            self.assertEqual(job.replicates, 3)
+            self.assertIn("maxGrowth = 42 meters", job.config_content)
+            self.assertIn("x", job.custom_tags)
+            self.assertEqual(job.custom_tags["x"], "42")
+            self.assertIsNotNone(job.run_hash)
+            self.assertTrue(job.config_path.exists())
+        finally:
+            os.unlink(josh_path)
+
+    def test_creates_job_with_file_params(self):
+        """Should create ExpandedJob with file parameters in file_mappings."""
+        from joshpy.strategies import _create_single_job
+        from joshpy.jobs import JobConfig, SweepConfig, FileSweepParameter
+        from pathlib import Path
+        import tempfile
+        import os
+
+        # Create temp josh file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".josh", delete=False) as f:
+            f.write("start simulation Main\nend simulation\n")
+            josh_path = Path(f.name)
+
+        # Create temp data file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jshd", delete=False) as f:
+            f.write("test data")
+            data_path = Path(f.name)
+
+        try:
+            config = JobConfig(
+                template_string="# config",
+                source_path=josh_path,
+                simulation="Main",
+                sweep=SweepConfig(
+                    file_parameters=[
+                        FileSweepParameter(name="climate", paths=[str(data_path)])
+                    ],
+                    strategy=OptunaStrategy(n_trials=10, objective="math:sin"),
+                ),
+            )
+
+            params = {"climate": {"path": data_path, "label": data_path.stem}}
+            job = _create_single_job(config, params, trial_num=0)
+
+            self.assertIn("climate", job.file_mappings)
+            self.assertEqual(job.file_mappings["climate"], data_path)
+            self.assertIn("climate", job.custom_tags)
+            self.assertEqual(job.custom_tags["climate"], data_path.stem)
+        finally:
+            os.unlink(josh_path)
+            os.unlink(data_path)
+
+
 if __name__ == "__main__":
     unittest.main()
