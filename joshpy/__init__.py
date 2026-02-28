@@ -39,13 +39,13 @@ try:
     from joshpy.jobs import (
         ConfigSweepParameter,
         FileSweepParameter,
-        SweepParameter,  # Alias for backward compatibility
         SweepConfig,
         JobConfig,
         ExpandedJob,
         JobSet,
         JobExpander,
         SweepResult,
+        AdaptiveSweepResult,
         to_run_config,
         to_run_remote_config,
         run_sweep,
@@ -54,7 +54,10 @@ try:
         SweepStrategy,
         CartesianStrategy,
         OptunaStrategy,
+        ObjectiveFn,
         strategy_from_dict,
+        sample_params_from_trial,
+        run_adaptive_sweep,
     )
     HAS_JOBS = True
 except ImportError:
@@ -117,13 +120,13 @@ __all__ = [
     # Jobs (optional)
     "ConfigSweepParameter",
     "FileSweepParameter",
-    "SweepParameter",  # Alias for backward compatibility
     "SweepConfig",
     "JobConfig",
     "ExpandedJob",
     "JobSet",
     "JobExpander",
     "SweepResult",
+    "AdaptiveSweepResult",
     "to_run_config",
     "to_run_remote_config",
     "run_sweep",
@@ -132,7 +135,10 @@ __all__ = [
     "SweepStrategy",
     "CartesianStrategy",
     "OptunaStrategy",
+    "ObjectiveFn",
     "strategy_from_dict",
+    "sample_params_from_trial",
+    "run_adaptive_sweep",
     # Registry (optional)
     "RunRegistry",
     "RegistryCallback",
