@@ -281,7 +281,7 @@ def _load_objective_from_path(path: str) -> ObjectiveFn:
     fn = getattr(module, func_name)
     if not callable(fn):
         raise ValueError(f"{path} is not callable")
-    return fn
+    return fn  # type: ignore[return-value]
 
 
 @register_strategy("optuna")
@@ -508,3 +508,455 @@ def sample_params_from_trial(
         params[fp.name] = {"path": fp.paths[idx], "label": fp.labels[idx]}
 
     return params
+
+
+def run_adaptive_sweep(
+    cli: Any,  # JoshCLI
+    config: Any,  # JobConfig
+    *,
+    registry: RunRegistry,
+    session_id: str,
+    objective: ObjectiveFn | None = None,
+    remote: bool = False,
+    api_key: str | None = None,
+    endpoint: str | None = None,
+    quiet: bool = False,
+    load_config: Any | None = None,  # LoadConfig
+) -> Any:  # AdaptiveSweepResult
+    """Run an adaptive sweep using Optuna.
+
+    Unlike run_sweep(), this generates jobs on-demand based on Optuna's
+    suggestions, loading results after each run to inform the next trial.
+
+    The lifecycle for each trial:
+    1. Sample parameters from Optuna trial
+    2. Create and register job for these params
+    3. Execute CLI for all replicates
+    4. Wait briefly for export writes to settle
+    5. Load CSV results with retries
+    6. Evaluate objective function
+    7. Report metric back to Optuna and store in registry
+
+    Note: Optuna runs trials serially (one at a time). Josh maintains
+    parallel replicate execution internally. Metrics wait for all
+    replicates to finish before evaluation.
+
+    Args:
+        cli: JoshCLI instance to use for execution.
+        config: JobConfig with OptunaStrategy configured.
+        registry: RunRegistry for tracking (required).
+        session_id: Session ID in registry (required).
+        objective: Optional objective function override. If not provided,
+            uses the objective from the strategy.
+        remote: If True, use run_remote() for cloud execution.
+        api_key: API key for remote execution (optional for local servers).
+        endpoint: Custom endpoint URL for remote execution.
+        quiet: If True, suppress progress output.
+        load_config: LoadConfig for result loading behavior.
+
+    Returns:
+        AdaptiveSweepResult with trial outcomes and best params.
+
+    Raises:
+        TypeError: If config.sweep.strategy is not OptunaStrategy.
+        ValueError: If no objective function is configured.
+        ImportError: If optuna is not installed.
+
+    Examples:
+        >>> from joshpy.strategies import run_adaptive_sweep, OptunaStrategy
+        >>> from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+        >>> from joshpy.registry import RunRegistry
+        >>> from joshpy.cli import JoshCLI
+        >>>
+        >>> def stability_metric(registry, run_hash, job):
+        ...     # Lower = more stable
+        ...     df = queries.get_timeseries("population", run_hash=run_hash)
+        ...     return df["value"].std() / df["value"].mean()
+        >>>
+        >>> config = JobConfig(
+        ...     template_path=Path("template.jshc.j2"),
+        ...     source_path=Path("simulation.josh"),
+        ...     sweep=SweepConfig(
+        ...         config_parameters=[
+        ...             ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100]),
+        ...         ],
+        ...         strategy=OptunaStrategy(n_trials=50, direction="minimize"),
+        ...     ),
+        ... )
+        >>>
+        >>> registry = RunRegistry("experiment.duckdb")
+        >>> session_id = registry.create_session(config=config)
+        >>> cli = JoshCLI()
+        >>>
+        >>> result = run_adaptive_sweep(
+        ...     cli, config,
+        ...     registry=registry,
+        ...     session_id=session_id,
+        ...     objective=stability_metric,
+        ... )
+        >>> print(f"Best params: {result.best_params}")
+        >>> print(f"Best value: {result.best_value}")
+    """
+    _check_optuna()
+
+    # Import here to avoid circular dependencies
+    from joshpy.cli import InspectExportsConfig
+    from joshpy.jobs import (
+        AdaptiveSweepResult,
+        ExpandedJob,
+        to_run_config,
+        to_run_remote_config,
+    )
+    from joshpy.sweep import LoadConfig, load_job_results
+
+    if load_config is None:
+        load_config = LoadConfig()
+
+    # Validate strategy
+    if config.sweep is None:
+        raise ValueError("config.sweep is required for adaptive sweeps")
+
+    base_strategy = config.sweep.strategy
+    if not isinstance(base_strategy, OptunaStrategy):
+        raise TypeError(
+            f"run_adaptive_sweep requires OptunaStrategy, got {type(base_strategy).__name__}. "
+            "For non-adaptive strategies, use run_sweep() instead."
+        )
+
+    # After isinstance check, we know it's OptunaStrategy
+    strategy: OptunaStrategy = base_strategy
+
+    # Get objective function (from arg or strategy)
+    obj_fn = objective or strategy.get_objective()
+
+    # Create Optuna study
+    study = strategy.create_study()
+
+    # Get export paths once (for result loading)
+    export_paths = cli.inspect_exports(
+        InspectExportsConfig(
+            script=config.source_path,
+            simulation=config.simulation,
+        )
+    )
+
+    # Initialize tracking
+    job_results: list[tuple[ExpandedJob, Any]] = []
+    succeeded = 0
+    failed = 0
+    n_trials = strategy.n_trials
+
+    if not quiet:
+        print(f"Running adaptive sweep with {n_trials} trials")
+        print(f"  Direction: {strategy.direction}")
+        print(f"  Sampler: {strategy.sampler}")
+
+    # Set session status to running
+    registry.update_session_status(session_id, "running")
+
+    try:
+        for trial_num in range(n_trials):
+            # 1. Ask Optuna for next params
+            trial = study.ask()
+
+            # 2. Sample parameters from trial
+            params = sample_params_from_trial(
+                trial,
+                config.sweep.config_parameters,
+                config.sweep.file_parameters,
+            )
+
+            if not quiet:
+                # Format params for display
+                display_params = {
+                    k: v["label"] if isinstance(v, dict) and "label" in v else v
+                    for k, v in params.items()
+                }
+                print(f"[{trial_num + 1}/{n_trials}] Params: {display_params}")
+
+            # 3. Create job for these params
+            job = _create_single_job(config, params, trial_num)
+
+            # 4. Register job in registry
+            registry.register_run(
+                session_id=session_id,
+                run_hash=job.run_hash,
+                josh_path=str(job.source_path) if job.source_path else "",
+                config_content=job.config_content,
+                file_mappings=_convert_file_mappings(job.file_mappings),
+                parameters=job.parameters,
+            )
+
+            # 5. Execute CLI
+            if remote:
+                run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
+                result = cli.run_remote(run_config)
+            else:
+                run_config = to_run_config(job)
+                result = cli.run(run_config)
+
+            job_results.append((job, result))
+
+            if result.success:
+                succeeded += 1
+
+                # 6. Wait for writes to settle and load results
+                import time
+
+                time.sleep(load_config.settle_delay)
+
+                try:
+                    rows_loaded = load_job_results(
+                        cli,
+                        job,
+                        registry,
+                        export_paths,
+                        quiet=True,
+                        load_config=load_config,
+                        succeeded_before=succeeded - 1,
+                    )
+                except Exception as e:
+                    # Log but don't fail the whole sweep
+                    if not quiet:
+                        print(f"  [WARN] Result loading failed: {e}")
+                    study.tell(trial, float("inf"))
+                    trial.set_user_attr("error", str(e))
+                    trial.set_user_attr("run_hash", job.run_hash)
+                    continue
+
+                # 7. Compute objective
+                try:
+                    metric = obj_fn(registry, job.run_hash, job)
+                except Exception as e:
+                    if not quiet:
+                        print(f"  [WARN] Objective evaluation failed: {e}")
+                    study.tell(trial, float("inf"))
+                    trial.set_user_attr("error", f"objective_error: {e}")
+                    trial.set_user_attr("run_hash", job.run_hash)
+                    continue
+
+                # 8. Report to Optuna
+                study.tell(trial, metric)
+
+                # Store traceability info in Optuna trial
+                trial.set_user_attr("run_hash", job.run_hash)
+                trial.set_user_attr("metric", metric)
+                trial.set_user_attr("rows_loaded", rows_loaded)
+
+                if not quiet:
+                    print(f"  [OK] metric={metric:.4f} (rows={rows_loaded})")
+
+            else:
+                failed += 1
+                # Failed trial gets worst possible value
+                study.tell(trial, float("inf"))
+                trial.set_user_attr("run_hash", job.run_hash)
+                trial.set_user_attr("error", f"exit_code={result.exit_code}")
+                if not quiet:
+                    print(f"  [FAIL] exit_code={result.exit_code}")
+
+        # Store study outcomes in registry
+        _store_study_outcomes(registry, session_id, study)
+
+        # Update session status
+        final_status = "completed" if failed == 0 else "failed"
+        registry.update_session_status(session_id, final_status)
+
+        if not quiet:
+            print(f"\nAdaptive sweep complete:")
+            print(f"  Trials: {n_trials} ({succeeded} succeeded, {failed} failed)")
+            if study.best_trial is not None:
+                print(f"  Best value: {study.best_value}")
+                print(f"  Best params: {study.best_params}")
+
+        return AdaptiveSweepResult(
+            job_results=job_results,
+            succeeded=succeeded,
+            failed=failed,
+            study=study,
+            best_params=study.best_params if study.best_trial else None,
+            best_value=study.best_value if study.best_trial else None,
+        )
+
+    except Exception:
+        # Set status to failed on exception
+        registry.update_session_status(session_id, "failed")
+        raise
+
+
+def _create_single_job(
+    config: Any,  # JobConfig
+    params: dict[str, Any],
+    trial_num: int,
+) -> Any:  # ExpandedJob
+    """Create a single ExpandedJob from sampled parameters.
+
+    Used by run_adaptive_sweep() to create jobs dynamically for each trial.
+
+    Args:
+        config: The JobConfig with template and settings.
+        params: Parameter values sampled from Optuna trial.
+        trial_num: Trial number (for unique directory naming).
+
+    Returns:
+        ExpandedJob ready for execution.
+    """
+    import hashlib
+    import tempfile
+    from pathlib import Path
+
+    # Import here to avoid circular dependencies
+    from joshpy.jobs import ExpandedJob, _compute_run_hash
+
+    try:
+        from jinja2 import Environment, FileSystemLoader
+    except ImportError:
+        raise ImportError(
+            "jinja2 is required for job templating. Install with: pip install joshpy[jobs]"
+        )
+
+    # Load template
+    if config.template_path:
+        template_dir = config.template_path.parent
+        template_name = config.template_path.name
+        env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
+        template = env.get_template(template_name)
+    elif config.template_string:
+        env = Environment(autoescape=False)
+        template = env.from_string(config.template_string)
+    else:
+        raise ValueError("Either template_path or template_string must be provided")
+
+    # Separate config params from file params
+    config_params: dict[str, Any] = {}
+    file_mappings = config.file_mappings.copy()
+    custom_tags: dict[str, str] = {}
+
+    for key, value in params.items():
+        if isinstance(value, dict) and "path" in value and "label" in value:
+            # File parameter
+            file_path = value["path"]
+            file_label = value["label"]
+            file_mappings[key] = file_path
+            custom_tags[key] = file_label
+            if hasattr(file_path, "name"):
+                custom_tags[f"{key}_file"] = file_path.name
+            else:
+                custom_tags[f"{key}_file"] = str(file_path).split("/")[-1]
+        else:
+            # Config parameter
+            config_params[key] = value
+            custom_tags[str(key)] = str(value)
+
+    # Render template
+    rendered = template.render(**config_params)
+
+    # Compute run_hash
+    run_hash = _compute_run_hash(
+        josh_path=config.source_path,
+        config_content=rendered,
+        file_mappings=file_mappings if file_mappings else None,
+    )
+
+    # Add run_hash as custom tag
+    custom_tags["run_hash"] = run_hash
+
+    # Write config file to temp directory
+    temp_dir = Path(tempfile.mkdtemp(prefix="josh_adaptive_"))
+    config_subdir = temp_dir / f"trial_{trial_num:04d}_{run_hash}"
+    config_subdir.mkdir(parents=True, exist_ok=True)
+    config_name = "sweep_config.jshc"
+    config_path = config_subdir / config_name
+    config_path.write_text(rendered)
+
+    # Extract logical config name
+    logical_name = config_name.removesuffix(".jshc")
+
+    return ExpandedJob(
+        config_content=rendered,
+        config_path=config_path,
+        config_name=logical_name,
+        run_hash=run_hash,
+        parameters=config_params,
+        simulation=config.simulation,
+        replicates=config.replicates,
+        source_path=config.source_path,
+        file_mappings=file_mappings,
+        custom_tags=custom_tags,
+        upload_source_path=config.upload_source_path,
+        upload_config_path=config.upload_config_path,
+        upload_data_path=config.upload_data_path,
+        output_steps=config.output_steps,
+        seed=config.seed,
+        crs=config.crs,
+        use_float64=config.use_float64,
+    )
+
+
+def _convert_file_mappings(
+    file_mappings: dict[str, Any],
+) -> dict[str, dict[str, str]] | None:
+    """Convert file_mappings from {name: Path} to registry format.
+
+    Args:
+        file_mappings: Dict mapping names to Path objects.
+
+    Returns:
+        Dict in {name: {path, hash}} format, or None if empty.
+    """
+    if not file_mappings:
+        return None
+
+    from pathlib import Path
+
+    from joshpy.jobs import _hash_file
+
+    result: dict[str, dict[str, str]] = {}
+    for name, path in file_mappings.items():
+        path = Path(path) if not isinstance(path, Path) else path
+        result[name] = {
+            "path": str(path),
+            "hash": _hash_file(path) if path.exists() else "",
+        }
+    return result
+
+
+def _store_study_outcomes(
+    registry: RunRegistry,
+    session_id: str,
+    study: Any,  # optuna.Study
+) -> None:
+    """Store Optuna study outcomes in registry metadata.
+
+    This enables querying best params/value without Optuna installed.
+
+    Args:
+        registry: RunRegistry instance.
+        session_id: Session ID to update.
+        study: Completed Optuna study.
+    """
+    import json
+
+    # Build metadata dict
+    metadata: dict[str, Any] = {
+        "optuna_n_trials": len(study.trials),
+        "optuna_direction": study.direction.name,
+    }
+
+    if study.best_trial is not None:
+        metadata["optuna_best_params"] = study.best_params
+        metadata["optuna_best_value"] = study.best_value
+        metadata["optuna_best_trial_number"] = study.best_trial.number
+
+    # Get existing session metadata and merge
+    session = registry.get_session(session_id)
+    if session and session.metadata:
+        existing = session.metadata
+        existing.update(metadata)
+        metadata = existing
+
+    # Update session metadata via direct SQL (registry doesn't have update_session_metadata)
+    registry.conn.execute(
+        "UPDATE sweep_sessions SET metadata = ? WHERE session_id = ?",
+        [json.dumps(metadata), session_id],
+    )
