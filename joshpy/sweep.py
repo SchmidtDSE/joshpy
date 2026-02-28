@@ -532,27 +532,38 @@ class SweepManager:
         dry_run: bool = False,
         quiet: bool = False,
         on_complete: Callable[[ExpandedJob, Any], None] | None = None,
+        objective: Any | None = None,
     ) -> SweepResult:
         """Execute all jobs in the sweep.
 
-        Runs are automatically recorded in the registry.
+        Automatically detects adaptive vs batch strategy and dispatches
+        to the appropriate runner. Runs are automatically recorded in the registry.
+
+        For adaptive strategies (OptunaStrategy), uses run_adaptive_sweep()
+        which generates jobs on-demand based on Optuna's suggestions.
+
+        For non-adaptive strategies (CartesianStrategy), uses run_sweep()
+        which executes all pre-expanded jobs.
 
         Args:
             remote: If True, use run_remote() for remote execution.
             api_key: API key for authentication (optional for local servers).
             endpoint: Custom endpoint URL (optional).
-            stop_on_failure: If True, stop on first failure.
-            dry_run: If True, print plan without executing.
+            stop_on_failure: If True, stop on first failure (batch only).
+            dry_run: If True, print plan without executing (batch only).
             quiet: If True, suppress progress output.
             on_complete: Optional additional callback invoked after each job.
                 Signature: callback(job, result) -> None. Called after
                 registry recording. Use for progress reporting, logging, etc.
+            objective: Objective function for adaptive strategies. If not provided,
+                uses the objective from the strategy configuration.
 
         Returns:
-            SweepResult with all job outcomes.
+            SweepResult for batch strategies, AdaptiveSweepResult for adaptive.
+            Both are compatible (same base interface).
 
         Examples:
-            >>> # Local execution
+            >>> # Local execution (auto-detects strategy)
             >>> results = manager.run()
 
             >>> # Remote execution (Josh Cloud)
@@ -561,22 +572,55 @@ class SweepManager:
             >>> # Remote execution (local server, no API key)
             >>> results = manager.run(remote=True, endpoint="http://localhost:8080")
 
-            >>> # Dry run to see what would be executed
+            >>> # Dry run to see what would be executed (batch only)
             >>> results = manager.run(dry_run=True)
+
+            >>> # Adaptive sweep with custom objective
+            >>> def my_objective(registry, run_hash, job):
+            ...     return registry.query("SELECT AVG(value) FROM cell_data WHERE run_hash=?", [run_hash]).fetchone()[0]
+            >>> results = manager.run(objective=my_objective)
         """
-        return run_sweep(
-            cli=self.cli,
-            job_set=self.job_set,
-            registry=self.registry,
-            session_id=self.session_id,
-            remote=remote,
-            api_key=api_key,
-            endpoint=endpoint,
-            on_complete=on_complete,
-            stop_on_failure=stop_on_failure,
-            dry_run=dry_run,
-            quiet=quiet,
-        )
+        # Check if strategy is adaptive
+        strategy = self.config.sweep.strategy if self.config.sweep else None
+
+        if strategy is not None and strategy.is_adaptive:
+            # Use adaptive runner
+            from joshpy.strategies import run_adaptive_sweep
+
+            if dry_run:
+                # Adaptive doesn't support dry_run directly
+                if not quiet:
+                    n_trials = getattr(strategy, "n_trials", "?")
+                    print(f"Would run adaptive sweep with {n_trials} trials")
+                    print("  Dry run - no jobs will be executed")
+                return SweepResult()
+
+            return run_adaptive_sweep(
+                cli=self.cli,
+                config=self.config,
+                registry=self.registry,
+                session_id=self.session_id,
+                objective=objective,
+                remote=remote,
+                api_key=api_key,
+                endpoint=endpoint,
+                quiet=quiet,
+            )
+        else:
+            # Use batch runner
+            return run_sweep(
+                cli=self.cli,
+                job_set=self.job_set,
+                registry=self.registry,
+                session_id=self.session_id,
+                remote=remote,
+                api_key=api_key,
+                endpoint=endpoint,
+                on_complete=on_complete,
+                stop_on_failure=stop_on_failure,
+                dry_run=dry_run,
+                quiet=quiet,
+            )
 
     def load_results(
         self,
@@ -826,6 +870,9 @@ class SweepManagerBuilder:
 
         Expands jobs, creates or verifies session, and registers runs.
 
+        For adaptive strategies (OptunaStrategy), job expansion is deferred
+        to run time - the JobSet will be empty initially.
+
         Returns:
             Configured SweepManager ready for use.
 
@@ -849,30 +896,43 @@ class SweepManagerBuilder:
             self._cli = JoshCLI()
             self._owns_cli = True
 
-        # Expand jobs
-        expander = JobExpander()
-        job_set = expander.expand(self._config)
+        # Check if strategy is adaptive
+        strategy = self._config.sweep.strategy if self._config.sweep else None
+        is_adaptive = strategy is not None and strategy.is_adaptive
 
-        # Create or use session
-        if self._session_id:
-            session_id = self._session_id
-            # Verify hashes match
-            self._verify_hashes(job_set, session_id)
-        else:
-            session_id = self._registry.create_session(
+        if is_adaptive:
+            # For adaptive strategies, jobs are created on-demand during run()
+            # Don't pre-expand - just create session
+            job_set = JobSet(jobs=[])
+            session_id = self._session_id or self._registry.create_session(
                 config=self._config,
                 experiment_name=self._experiment_name,
             )
-            # Register runs
-            for job in job_set:
-                self._registry.register_run(
-                    session_id=session_id,
-                    run_hash=job.run_hash,
-                    josh_path=str(job.source_path) if job.source_path else "",
-                    config_content=job.config_content,
-                    file_mappings=self._convert_file_mappings(job.file_mappings),
-                    parameters=job.parameters,
+        else:
+            # For non-adaptive strategies, expand jobs upfront
+            expander = JobExpander()
+            job_set = expander.expand(self._config)
+
+            # Create or use session
+            if self._session_id:
+                session_id = self._session_id
+                # Verify hashes match
+                self._verify_hashes(job_set, session_id)
+            else:
+                session_id = self._registry.create_session(
+                    config=self._config,
+                    experiment_name=self._experiment_name,
                 )
+                # Register runs
+                for job in job_set:
+                    self._registry.register_run(
+                        session_id=session_id,
+                        run_hash=job.run_hash,
+                        josh_path=str(job.source_path) if job.source_path else "",
+                        config_content=job.config_content,
+                        file_mappings=self._convert_file_mappings(job.file_mappings),
+                        parameters=job.parameters,
+                    )
 
         return SweepManager(
             config=self._config,
