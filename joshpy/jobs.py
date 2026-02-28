@@ -45,8 +45,6 @@ Example usage:
         result = cli.run(run_config)
         print(f"[{'OK' if result.success else 'FAIL'}] {job.parameters}")
 
-Note:
-    SweepParameter is an alias for ConfigSweepParameter for backward compatibility.
 """
 
 from __future__ import annotations
@@ -293,8 +291,7 @@ class ConfigSweepParameter:
         return cls(name=name, values=data.get("values", []))
 
 
-# Backward compatibility alias
-SweepParameter = ConfigSweepParameter
+
 
 
 @dataclass
@@ -422,6 +419,14 @@ class SweepConfig:
         # Delegate to strategy
         assert self.strategy is not None  # Set in __post_init__
         return list(self.strategy.expand(self.config_parameters, self.file_parameters))
+
+    def __bool__(self) -> bool:
+        """Return True if any parameters are defined.
+        
+        This is needed because __len__ raises for adaptive strategies,
+        and Python falls back to __len__ for truthiness if __bool__ is not defined.
+        """
+        return bool(self.config_parameters or self.file_parameters)
 
     def __len__(self) -> int:
         """Return total number of parameter combinations.
@@ -1004,6 +1009,148 @@ class SweepResult:
     job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
     succeeded: int = 0
     failed: int = 0
+
+    def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
+        """Iterate over (job, result) tuples."""
+        return iter(self.job_results)
+
+    def __len__(self) -> int:
+        """Return total number of job results."""
+        return len(self.job_results)
+
+
+@dataclass
+class AdaptiveSweepResult:
+    """Results from running an adaptive (Optuna) sweep.
+
+    Extends SweepResult with Optuna-specific fields for tracking the
+    optimization process and accessing the best results.
+
+    Attributes:
+        job_results: List of (ExpandedJob, CLIResult) tuples.
+        succeeded: Number of successful trials.
+        failed: Number of failed trials.
+        study: The Optuna study object (for advanced analysis).
+        best_params: Parameters that achieved the best objective value.
+        best_value: Best objective value found.
+
+    Examples:
+        >>> result = run_adaptive_sweep(cli, config, registry=registry, ...)
+        >>> print(f"Best params: {result.best_params}")
+        >>> print(f"Best value: {result.best_value}")
+        >>>
+        >>> # Access trial history
+        >>> for metric in result.trial_metrics:
+        ...     print(metric)
+        >>>
+        >>> # Get summary statistics
+        >>> summary = result.get_trial_summary()
+        >>> print(f"Mean: {summary['mean_value']}")
+    """
+
+    job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
+    succeeded: int = 0
+    failed: int = 0
+
+    # Optuna-specific fields
+    study: Any = None  # optuna.Study
+    best_params: dict[str, Any] | None = None
+    best_value: float | None = None
+
+    @property
+    def is_adaptive(self) -> bool:
+        """True - this result came from an adaptive strategy."""
+        return True
+
+    @property
+    def total_trials(self) -> int:
+        """Total number of trials run."""
+        if self.study is not None:
+            return len(self.study.trials)
+        return len(self.job_results)
+
+    @property
+    def trial_metrics(self) -> list[float]:
+        """List of objective values per trial.
+
+        Returns values for completed trials only (excludes failed/inf trials).
+
+        Returns:
+            List of objective values in trial order.
+        """
+        if self.study is None:
+            return []
+        return [
+            t.value
+            for t in self.study.trials
+            if t.value is not None and t.value != float("inf")
+        ]
+
+    def get_trial_summary(self) -> dict[str, Any]:
+        """Get summary statistics for the adaptive sweep.
+
+        Returns:
+            Dict with keys:
+            - n_trials: Total trials
+            - n_completed: Trials with valid metrics
+            - n_failed: Trials that failed or returned inf
+            - best_value: Best objective value
+            - best_params: Parameters that achieved best value
+            - mean_value: Mean of completed trial values
+            - std_value: Std deviation of completed trial values
+
+        Examples:
+            >>> summary = result.get_trial_summary()
+            >>> print(f"Completed: {summary['n_completed']}/{summary['n_trials']}")
+            >>> print(f"Best: {summary['best_value']}")
+        """
+        if self.study is None:
+            return {}
+
+        values = [
+            t.value
+            for t in self.study.trials
+            if t.value is not None and t.value != float("inf")
+        ]
+
+        mean_value = sum(values) / len(values) if values else None
+        std_value = None
+        if len(values) > 1 and mean_value is not None:
+            variance = sum((v - mean_value) ** 2 for v in values) / len(values)
+            std_value = variance**0.5
+
+        return {
+            "n_trials": len(self.study.trials),
+            "n_completed": len(values),
+            "n_failed": len(self.study.trials) - len(values),
+            "best_value": self.best_value,
+            "best_params": self.best_params,
+            "mean_value": mean_value,
+            "std_value": std_value,
+        }
+
+    def get_best_job(self) -> ExpandedJob | None:
+        """Get the job with best objective value.
+
+        Returns:
+            ExpandedJob with best metric, or None if no successful trials.
+
+        Examples:
+            >>> best_job = result.get_best_job()
+            >>> if best_job:
+            ...     print(f"Best config: {best_job.parameters}")
+        """
+        if self.study is None or self.study.best_trial is None:
+            return None
+
+        best_hash = self.study.best_trial.user_attrs.get("run_hash")
+        if not best_hash:
+            return None
+
+        for job, _ in self.job_results:
+            if job.run_hash == best_hash:
+                return job
+        return None
 
     def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
         """Iterate over (job, result) tuples."""
