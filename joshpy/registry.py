@@ -709,13 +709,13 @@ class RunRegistry:
             The session ID (generated or provided).
 
         Examples:
-            >>> from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+            >>> from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
             >>> config = JobConfig(
             ...     template_path=Path("template.jshc.j2"),
             ...     source_path=Path("simulation.josh"),
             ...     simulation="Main",
             ...     sweep=SweepConfig(
-            ...         parameters=[SweepParameter(name="maxGrowth", values=[10, 20, 30])]
+            ...         config_parameters=[ConfigSweepParameter(name="maxGrowth", values=[10, 20, 30])]
             ...     ),
             ... )
             >>> session_id = registry.create_session(config=config)
