@@ -19,6 +19,12 @@ website:
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
           - text: "---"
+          - text: "External Data"
+          - text: "Preprocessing"
+            href: tutorials/preprocessing.qmd
+          - text: "External Data Sweeps"
+            href: tutorials/external-data-sweep.qmd
+          - text: "---"
           - text: "Optimization"
           - text: "Adaptive Sweeps"
             href: tutorials/adaptive-sweep.qmd
@@ -53,6 +59,10 @@ website:
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
+        - section: "External Data"
+          contents:
+            - tutorials/preprocessing.qmd
+            - tutorials/external-data-sweep.qmd
         - section: "Optimization"
           contents:
             - tutorials/adaptive-sweep.qmd
