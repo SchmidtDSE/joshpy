@@ -23,6 +23,9 @@ pip install joshpy[jobs]
 # With experiment tracking (DuckDB registry)
 pip install joshpy[registry]
 
+# With adaptive optimization (Optuna)
+pip install joshpy[adaptive]
+
 # With all optional dependencies
 pip install joshpy[all]
 ```
@@ -34,14 +37,16 @@ joshpy/
 ├── __init__.py      # Public API exports and Josh HTTP client
 ├── cli.py           # CLI wrapper (JoshCLI, RunConfig, etc.)
 ├── jobs.py          # Parameter sweep orchestration
+├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy)
+├── sweep.py         # SweepManager for orchestration
 ├── registry.py      # DuckDB experiment tracking
-├── cell_data.py     # Spatiotemporal data loading
+├── cell_data.py     # Spatiotemporal data loading and queries
 ├── diagnostics.py   # Diagnostic plotting (SimulationDiagnostics)
 ├── jar.py           # JAR file management
 ├── metadata.py      # Simulation metadata
 ├── parse.py         # Response parsing utilities
 ├── remote.py        # Remote HTTP backend
-├── strategy.py      # Backend interface
+├── strategy.py      # Backend interface (HTTP vs local)
 ├── geocode.py       # Coordinate conversion
 └── definitions.py   # Type definitions
 ```
@@ -680,6 +685,144 @@ print(f"Total replicates: {job_set.total_replicates}")  # Sum of replicates acro
 
 ---
 
+## Adaptive Sweeps (Optuna Integration)
+
+For intelligent parameter optimization instead of exhaustive grid search, use `OptunaStrategy` with an objective function.
+
+### Installation
+
+```bash
+pip install joshpy[adaptive]  # Adds optuna dependency
+```
+
+### Basic Example
+
+```python
+from joshpy.strategies import OptunaStrategy, cv_objective
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.sweep import SweepManager
+
+config = JobConfig(
+    template_path=Path("config.jshc.j2"),
+    source_path=Path("simulation.josh"),
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="growthRate", values=list(range(10, 101, 5))),
+            ConfigSweepParameter(name="mortality", values=[0.05, 0.1, 0.15, 0.2]),
+        ],
+        strategy=OptunaStrategy(
+            n_trials=30,           # Run 30 trials (not all 76 combinations)
+            direction="minimize",  # Minimize objective
+            sampler="tpe",         # Tree-structured Parzen Estimator
+        ),
+    ),
+)
+
+# Use cv_objective for stability optimization (minimize coefficient of variation)
+objective = cv_objective("totalCover", burn_in=50)
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiment.duckdb", experiment_name="optimization")
+    .with_cli(jar_path=Path("joshsim-fat.jar"))
+    .build()
+)
+
+result = manager.run(objective=objective)
+
+print(f"Best parameters: {result.best_params}")
+print(f"Best CV: {result.best_value:.4f}")
+```
+
+### OptunaStrategy Options
+
+```python
+OptunaStrategy(
+    n_trials=100,          # Number of trials to run (default: 100)
+    direction="minimize",  # "minimize" or "maximize"
+    sampler="tpe",         # "tpe", "cmaes", or "random"
+    objective=None,        # Objective function or "module:function" string
+)
+```
+
+### Built-in Objective: cv_objective
+
+`cv_objective` creates an objective function that minimizes coefficient of variation (CV) for stability optimization:
+
+```python
+from joshpy.strategies import cv_objective
+
+# Minimize CV of totalCover, skipping first 50 steps as burn-in
+objective = cv_objective("totalCover", burn_in=50, extinction_threshold=0.01)
+```
+
+How it works:
+1. Skips the first `burn_in` timesteps to ignore transient dynamics
+2. For each replicate, computes CV = std/mean of its spatially-averaged time series
+3. Returns mean CV across all replicates
+4. Returns `inf` if any replicate goes extinct (mean < `extinction_threshold`)
+
+### Custom Objective Functions
+
+Objective functions have signature `(registry, run_hash, job) -> float`:
+
+```python
+def my_objective(registry, run_hash, job):
+    """Custom objective: maximize final biomass."""
+    from joshpy.cell_data import DiagnosticQueries
+    
+    queries = DiagnosticQueries(registry)
+    df = queries.get_replicate_uncertainty("totalBiomass", run_hash=run_hash)
+    
+    if len(df) == 0:
+        return float('inf')  # Failed run
+    
+    # Return negative because Optuna minimizes by default
+    return -df['mean'].iloc[-1]
+
+result = manager.run(objective=my_objective)
+```
+
+### AdaptiveSweepResult
+
+Adaptive sweeps return `AdaptiveSweepResult` with Optuna study access:
+
+```python
+result = manager.run(objective=objective)
+
+# Best results
+print(result.best_params)    # {"growthRate": 45, "mortality": 0.1}
+print(result.best_value)     # 0.0523
+
+# Trial metrics (list of objective values)
+print(result.trial_metrics)  # [0.12, 0.08, 0.15, ...]
+
+# Get best job for further analysis
+best_job = result.get_best_job()
+print(best_job.run_hash)
+
+# Trial summary statistics
+summary = result.get_trial_summary()
+print(summary)  # {"n_trials": 30, "n_completed": 30, "best_value": 0.0523, ...}
+
+# Access Optuna study directly for advanced analysis
+study = result.study
+optuna.visualization.plot_optimization_history(study)
+```
+
+### Cartesian vs Adaptive
+
+| CartesianStrategy | OptunaStrategy |
+|-------------------|----------------|
+| Runs all parameter combinations | Runs n_trials intelligently-chosen trials |
+| No learning between runs | Each trial informs the next |
+| Good for small spaces, sensitivity analysis | Good for large spaces, optimization |
+| Use with `JobExpander.expand()` | Use with `SweepManager.run(objective=...)` |
+
+---
+
 ## Experiment Registry
 
 The `registry` module provides DuckDB-backed tracking for experiments.
@@ -928,6 +1071,22 @@ df = queries.get_parameter_comparison(
     param_name="maxGrowth",
     show_sql=True,  # Prints the SQL query
 )
+
+# Per-replicate coefficient of variation (for stability analysis)
+result = queries.get_replicate_cv(
+    variable="totalCover",
+    run_hash="abc123",
+    burn_in=50,                # Skip first 50 timesteps
+    extinction_threshold=0.01, # Mean below this = extinction
+)
+print(result)
+# {
+#     'mean_cv': 0.15,           # Average CV across replicates
+#     'replicate_cvs': [0.1, 0.2, 0.15],  # Per-replicate CVs
+#     'n_replicates': 3,
+#     'n_timesteps': 50,         # Timesteps after burn-in
+#     'extinct_replicates': [],  # Replicates that went extinct
+# }
 ```
 
 ---

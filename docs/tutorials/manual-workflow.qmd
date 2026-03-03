@@ -62,12 +62,13 @@ abstractions:
 - **`ConfigSweepParameter`**: A single configuration parameter with a name and list of values
 
 The `JobExpander` will later compute the cartesian product of all parameters,
-generating one job per combination.
+generating one job per combination (in this case, by explicitly passing `CartesianStrategy`, which is the default non-adaptive expansion). See [Adaptive Sweeps](adaptive-sweep.qmd) for more on adaptive strategies.
 
 ```{python}
 from pathlib import Path
 
 from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
 
 # Paths to source files (optimized for fast tutorial builds)
 SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
@@ -83,10 +84,9 @@ config = JobConfig(
     replicates=3,
     sweep=SweepConfig(
         config_parameters=[
-            # maxGrowth is swept - creates one job per value
             ConfigSweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
-            # Note: daysPerYear is a static value in the template (not swept)
-        ]
+        ],
+        strategy=CartesianStrategy(),
     ),
 )
 ```

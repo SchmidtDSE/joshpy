@@ -55,4 +55,4 @@ docs-api = { cmd = "python -m quartodoc build --config docs/_quarto.yml", depend
 docs-build = { cmd = "bash scripts/render-docs.sh", depends-on = ["docs-install"] }
 docs-preview = { cmd = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto preview docs", depends-on = ["docs-build"] }
 docs-preview-fast = { cmd = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto preview docs", depends-on = ["docs-api"] }
-docs-clean = "rm -rf docs/_site docs/_freeze docs/reference/*.qmd docs/tutorials/demo_registry.duckdb"
+docs-clean = "rm -rf docs/_site docs/_freeze docs/reference/*.qmd docs/tutorials/demo_registry.duckdb docs/tutorials/external_sweep.duckdb* docs/tutorials/adaptive_demo.duckdb*"

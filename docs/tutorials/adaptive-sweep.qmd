@@ -428,7 +428,7 @@ import os
 manager.cleanup()
 manager.close()
 
-for f in ["adaptive_demo.duckdb"]:
+for f in ["adaptive_demo.duckdb", "adaptive_demo.duckdb.wal"]:
     if os.path.exists(f):
         os.remove(f)
 ```

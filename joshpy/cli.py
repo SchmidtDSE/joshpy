@@ -535,7 +535,7 @@ class JoshCLI:
         if config.y_coord:
             args.extend(["--y-coord", config.y_coord])
         if config.time_coord:
-            args.extend(["--time-coord", config.time_coord])
+            args.extend(["--time-dim", config.time_coord])
         if config.verbose:
             args.append("--verbose")
 
