@@ -29,6 +29,40 @@ Use the high-level `SweepManager` class that handles:
 
 Best for: Production workflows where you want simplicity.
 
+### [Adaptive Parameter Optimization](adaptive-sweep.qmd)
+
+Use Optuna's Bayesian optimization for intelligent parameter search:
+
+- `OptunaStrategy` for adaptive sampling
+- Objective functions for optimization
+- Efficient exploration of large parameter spaces
+
+Best for: Finding optimal parameters without exhaustive grid search.
+
+## External Data
+
+Tutorials for working with external geospatial data.
+
+### [Preprocessing External Data](preprocessing.qmd)
+
+Convert geospatial data to Josh's optimized `.jshd` format:
+
+- Create synthetic test data with spatial patterns
+- Preprocess NetCDF files with `cli.preprocess()`
+- Verify data with `inspect_jshd()`
+
+Best for: Preparing external data for simulations.
+
+### [Sweeping Over External Data](external-data-sweep.qmd)
+
+Run simulations with different input data files:
+
+- Use `external` keyword in Josh simulations
+- `FileSweepParameter` for data file sweeps
+- Visualize how input patterns affect outputs
+
+Best for: Comparing climate scenarios, sensitivity to input data.
+
 ## Analysis
 
 Tutorials for exploring and visualizing results.
@@ -55,6 +89,14 @@ All tutorials assume:
 
 ## Recommended Order
 
-1. **First**: [Manual Workflow](manual-workflow.qmd) - understand the components
-2. **Then**: [SweepManager](sweep-manager.qmd) - see the simplified workflow
-3. **Finally**: [Analysis](analysis.qmd) - learn visualization patterns
+**Getting Started:**
+
+1. [Manual Workflow](manual-workflow.qmd) - understand the components
+2. [SweepManager](sweep-manager.qmd) - see the simplified workflow
+3. [Analysis](analysis.qmd) - learn visualization patterns
+
+**Advanced Topics:**
+
+4. [Preprocessing](preprocessing.qmd) - work with external geospatial data
+5. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
+6. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search

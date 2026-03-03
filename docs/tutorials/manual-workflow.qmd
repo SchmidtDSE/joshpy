@@ -67,16 +67,8 @@ generating one job per combination (in this case, by explicitly passing `Cartesi
 ```{python}
 from pathlib import Path
 
-<<<<<<< Updated upstream
-from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
-=======
-<<<<<<< Updated upstream
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
-=======
 from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
 from joshpy.strategies import CartesianStrategy
->>>>>>> Stashed changes
->>>>>>> Stashed changes
 
 # Paths to source files (optimized for fast tutorial builds)
 SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
@@ -91,22 +83,10 @@ config = JobConfig(
     simulation="Main",
     replicates=3,
     sweep=SweepConfig(
-<<<<<<< Updated upstream
-        config_parameters=[
-=======
-<<<<<<< Updated upstream
-        parameters=[
->>>>>>> Stashed changes
-            # maxGrowth is swept - creates one job per value
-            ConfigSweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
-            # Note: daysPerYear is a static value in the template (not swept)
-        ]
-=======
         config_parameters=[
             ConfigSweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
         ],
         strategy=CartesianStrategy(),
->>>>>>> Stashed changes
     ),
 )
 ```

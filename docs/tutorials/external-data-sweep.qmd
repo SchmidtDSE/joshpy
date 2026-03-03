@@ -1,0 +1,388 @@
+---
+title: "Sweeping Over External Data Files"
+description: "Use FileSweepParameter to run simulations with different input data"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+In ecological modeling, you often need to run the same simulation with **different
+input data** - for example, comparing climate scenarios (RCP 2.6 vs 4.5 vs 8.5) or
+testing sensitivity to soil maps from different sources.
+
+joshpy's `FileSweepParameter` enables **sweeping over external data files**,
+running one simulation job per input file. This is similar to sweeping over
+configuration parameters, but the variation comes from `.jshd` data files rather
+than `.jshc` configuration values.
+
+This tutorial demonstrates:
+
+1. Using the `external` keyword in Josh to reference preprocessed data
+2. Configuring a file sweep with `FileSweepParameter`
+3. Running with `SweepManager` and `CartesianStrategy`
+4. Visualizing how different input patterns produce different outputs
+
+**Prerequisites**: 
+
+- Complete [Preprocessing External Data](preprocessing.qmd) first to create the `.jshd` files
+- joshpy installed with `pip install joshpy[all]`
+
+## The Simulation
+
+Our simulation uses `external soil_quality` to affect tree growth. Trees in
+patches with high soil quality grow faster than those in low-quality areas.
+
+::: {.callout-note collapse="true"}
+## View Simulation File (external_sweep.josh)
+
+```{python}
+#| label: show-simulation
+#| code-fold: true
+from pathlib import Path
+
+SOURCE_PATH = Path("../../examples/external_sweep.josh")
+print(SOURCE_PATH.read_text())
+```
+:::
+
+### Key Concepts
+
+**The `external` keyword:**
+```josh
+soil_quality.step = external soil_quality
+```
+This reads the `soil_quality` variable from a preprocessed `.jshd` file. The
+value varies spatially across the grid based on the file content.
+
+**Accessing patch data from organisms:**
+```josh
+max_growth.step = map here.soil_quality from [0 percent, 100 percent] to [0 meters, 10 meters] linear
+```
+The `here` keyword lets organisms access variables from their containing patch.
+Tree growth rate scales linearly with soil quality.
+
+## Step 1: Configure the File Sweep
+
+We use `FileSweepParameter` to sweep over three preprocessed `.jshd` files:
+
+```{python}
+#| label: configure-sweep
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, FileSweepParameter
+from joshpy.strategies import CartesianStrategy
+
+SOURCE_PATH = Path("../../examples/external_sweep.josh")
+TEMPLATE_PATH = Path("../../examples/templates/external_config.jshc.j2")
+DATA_DIR = Path("../../examples/external_data")
+
+config = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        file_parameters=[
+            FileSweepParameter(
+                name="soil_quality",  # Matches `external soil_quality` in Josh
+                paths=[
+                    DATA_DIR / "soil_quality_gradient.jshd",
+                    DATA_DIR / "soil_quality_triangle.jshd",
+                    DATA_DIR / "soil_quality_stripes.jshd",
+                ],
+            ),
+        ],
+        strategy=CartesianStrategy(),
+    ),
+)
+
+print(f"Sweep creates {len(config.sweep.file_parameters[0].paths)} jobs")
+print(f"Each job runs {config.replicates} replicates")
+print(f"Total simulation runs: {len(config.sweep.file_parameters[0].paths) * config.replicates}")
+```
+
+### FileSweepParameter Details
+
+| Attribute | Description |
+|-----------|-------------|
+| `name` | Key used in `file_mappings` and passed to `--data name=path` |
+| `paths` | List of `.jshd` file paths to sweep over |
+| `labels` | Auto-derived from filename stems (e.g., `soil_quality_gradient.jshd` -> `soil_quality_gradient`) |
+
+The `name` must match what Josh expects when resolving `external soil_quality`.
+The Josh runtime looks for a file mapping with this name.
+
+## Step 2: Build SweepManager
+
+```{python}
+#| label: build-manager
+from joshpy.sweep import SweepManager
+
+REGISTRY_PATH = "external_sweep.duckdb"
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry(REGISTRY_PATH, experiment_name="soil_quality_sweep")
+    .with_cli(jar_path=Path("../../jar/joshsim-fat.jar"))
+    .build()
+)
+
+print(f"Session ID: {manager.session_id}")
+print(f"Total jobs: {manager.job_set.total_jobs}")
+print(f"Total replicates: {manager.job_set.total_replicates}")
+```
+
+### Job Labels
+
+Each job gets a label derived from the file stem:
+
+```{python}
+#| label: show-jobs
+for job in manager.job_set.jobs:
+    print(f"Job {job.run_hash[:8]}: soil_quality={job.custom_tags.get('soil_quality', 'N/A')}")
+```
+
+## Step 3: Run the Sweep
+
+```{python}
+#| label: run-sweep
+results = manager.run()
+
+print(f"\nSweep complete!")
+print(f"Succeeded: {results.succeeded}")
+print(f"Failed: {results.failed}")
+```
+
+## Step 4: Load Results
+
+```{python}
+#| label: load-results
+manager.load_results()
+
+# Verify data loaded
+summary = manager.registry.get_data_summary()
+print(summary)
+```
+
+## Step 5: Analysis & Visualization
+
+Now we can analyze how different soil quality patterns affected tree growth.
+
+### Data Discovery
+
+```{python}
+#| label: discovery
+print("Export variables:", manager.registry.list_export_variables())
+print("Config parameters:", manager.registry.list_config_parameters())
+```
+
+### Compare Patterns Over Time
+
+```{python}
+#| label: fig-timeseries-comparison
+#| fig-cap: "Tree height trajectories for different soil quality patterns"
+
+from joshpy.diagnostics import SimulationDiagnostics
+
+diag = SimulationDiagnostics(manager.registry)
+
+diag.plot_comparison(
+    "average_height",
+    group_by="soil_quality",
+    title="Tree Height by Soil Quality Pattern",
+)
+```
+
+### Final Height Comparison
+
+```{python}
+#| label: fig-final-height
+#| fig-cap: "Final tree height at step 10 for each soil pattern"
+
+diag.plot_comparison(
+    "average_height",
+    group_by="soil_quality",
+    step=10,
+    title="Final Tree Height by Soil Pattern",
+)
+```
+
+### Spatial Patterns
+
+The key test: do the spatial patterns in tree height match the input soil quality patterns?
+
+```{python}
+#| label: fig-spatial-comparison
+#| fig-cap: "Spatial distribution of tree height for each soil quality pattern"
+#| fig-width: 12
+#| fig-height: 4
+
+import matplotlib.pyplot as plt
+from joshpy.cell_data import DiagnosticQueries
+
+queries = DiagnosticQueries(manager.registry)
+
+# Get run hashes for each pattern
+patterns = ["soil_quality_gradient", "soil_quality_triangle", "soil_quality_stripes"]
+pattern_jobs = {job.custom_tags.get("soil_quality"): job for job in manager.job_set.jobs}
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+for ax, pattern in zip(axes, patterns):
+    job = pattern_jobs.get(pattern)
+    if job is None:
+        ax.set_title(f"{pattern}: Not found")
+        continue
+    
+    df = queries.get_spatial_snapshot(
+        step=10,
+        variable="average_height",
+        run_hash=job.run_hash,
+        replicate=0,
+    )
+    
+    if len(df) == 0:
+        ax.set_title(f"{pattern}: No data")
+        continue
+    
+    scatter = ax.scatter(
+        df['longitude'], 
+        df['latitude'],
+        c=df['value'],  # get_spatial_snapshot returns 'value' column
+        cmap='YlGn',
+        s=10,
+        alpha=0.8,
+    )
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(pattern.replace('soil_quality_', '').title())
+
+plt.colorbar(scatter, ax=axes, label='Avg Height (m)', shrink=0.8)
+plt.tight_layout()
+plt.show()
+```
+
+### Verify Soil Quality Export
+
+We also exported `soil_quality` to verify the external data was read correctly:
+
+```{python}
+#| label: fig-soil-quality-export
+#| fig-cap: "Exported soil quality values confirm external data was read correctly"
+#| fig-width: 12
+#| fig-height: 4
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+for ax, pattern in zip(axes, patterns):
+    job = pattern_jobs.get(pattern)
+    if job is None:
+        continue
+    
+    df = queries.get_spatial_snapshot(
+        step=5,  # Mid-simulation
+        variable="soil_quality",
+        run_hash=job.run_hash,
+        replicate=0,
+    )
+    
+    if len(df) == 0:
+        continue
+    
+    scatter = ax.scatter(
+        df['longitude'], 
+        df['latitude'],
+        c=df['value'],  # get_spatial_snapshot returns 'value' column
+        cmap='YlGn',
+        vmin=0,
+        vmax=100,
+        s=10,
+        alpha=0.8,
+    )
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(f"{pattern.replace('soil_quality_', '').title()} (Soil Quality)")
+
+plt.colorbar(scatter, ax=axes, label='Soil Quality (%)', shrink=0.8)
+plt.tight_layout()
+plt.show()
+```
+
+## Direct SQL Queries
+
+For custom analysis, query the registry directly:
+
+```{python}
+#| label: sql-analysis
+# Compare mean height by soil pattern
+# File parameters are stored as JSON in job_configs.file_mappings
+# We extract the filename to identify the pattern
+result = manager.registry.query(r"""
+    SELECT 
+        regexp_extract(jc.file_mappings, 'soil_quality_([a-z]+)\.jshd', 1) as pattern,
+        cd.step,
+        AVG(cd.average_height) as mean_height,
+        STDDEV(cd.average_height) as std_height
+    FROM cell_data cd
+    JOIN job_configs jc ON cd.run_hash = jc.run_hash
+    GROUP BY pattern, cd.step
+    ORDER BY pattern, cd.step
+""")
+result.df().head(15)
+```
+
+## Summary
+
+This tutorial demonstrated the **file sweep workflow**:
+
+1. **`external` keyword** - Reference preprocessed `.jshd` data in Josh simulations
+2. **`FileSweepParameter`** - Define which files to sweep over
+3. **`SweepManager`** - Orchestrate execution with automatic registry tracking
+4. **Spatial visualization** - Confirm output patterns match input data
+
+### Key Differences: Config vs File Sweeps
+
+| Aspect | ConfigSweepParameter | FileSweepParameter |
+|--------|---------------------|-------------------|
+| **Variation source** | Jinja template values | External data files |
+| **Storage** | `job.parameters` dict | `job.file_mappings` dict |
+| **Josh reference** | `config name.variable` | `external variable` |
+| **CLI flag** | `--custom-tag` | `--data` |
+| **Hash includes** | Rendered config content | File content hash |
+
+### When to Use File Sweeps
+
+- **Climate scenarios**: Compare RCP 2.6 vs 4.5 vs 8.5 projections
+- **Sensitivity analysis**: Test different soil maps or elevation data
+- **Ensemble runs**: Use multiple realizations of stochastic inputs
+- **Data source comparison**: Compare satellite vs ground-truth inputs
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+import os
+
+manager.cleanup()
+manager.close()
+
+# Remove temporary registry and any WAL files
+for f in [REGISTRY_PATH, f"{REGISTRY_PATH}.wal"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+## Learn More
+
+- [Preprocessing External Data](preprocessing.qmd) - Create `.jshd` files from NetCDF/GeoTIFF
+- [Manual Workflow](manual-workflow.qmd) - Step-by-step control using individual components
+- [SweepManager Workflow](sweep-manager.qmd) - Simplified orchestration with config sweeps
+- [Analysis & Visualization](analysis.qmd) - Query and visualize any registry

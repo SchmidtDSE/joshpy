@@ -1,0 +1,406 @@
+---
+title: "Preprocessing External Data"
+description: "Convert geospatial data to Josh's optimized .jshd format"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Introduction
+
+Josh simulations can incorporate **external geospatial data** like climate projections,
+soil maps, or elevation models. Before use, this data must be **preprocessed** into
+Josh's optimized `.jshd` (Josh Data) format.
+
+Preprocessing does several things:
+
+1. **Spatial alignment**: Resamples data to match your simulation grid
+2. **Coordinate transformation**: Handles CRS conversions
+3. **Temporal alignment**: Maps time steps between data and simulation
+4. **Binary optimization**: Creates fast-loading binary format
+
+This tutorial demonstrates:
+
+1. Creating synthetic test data with clear spatial patterns
+2. Preprocessing NetCDF files to `.jshd` format using `cli.preprocess()`
+3. Verifying preprocessed data with `inspect_jshd()`
+
+**Prerequisites**: joshpy installed with `pip install joshpy[all]`
+
+## Step 1: Create Synthetic Test Data
+
+For this tutorial, we create synthetic soil quality data with three distinct
+spatial patterns. These patterns make it easy to verify that preprocessing
+works correctly and that simulations respond to external data as expected.
+
+### The Patterns
+
+We'll create three NetCDF files:
+
+| Pattern | Description | Expected Effect |
+|---------|-------------|-----------------|
+| **Gradient** | Soil quality increases west-to-east (0% to 100%) | Trees grow taller in the east |
+| **Triangle** | Peak quality in center, decreasing to edges | Trees tallest in center |
+| **Stripes** | Alternating bands of 20% and 80% quality | Bands of short and tall trees |
+
+### Grid Specification
+
+Our synthetic data matches the tutorial simulation grid:
+ 
+- **Extent**: 33.7-34.0° latitude, -116.4 to -115.4° longitude
+- **Resolution**: ~0.01° (~1km cells)
+- **Size**: Approximately 31 x 102 cells
+
+::: {.callout-note collapse="true"}
+## View NetCDF Creation Code
+
+```{python}
+#| label: create-netcdf-show
+#| code-fold: true
+#| code-summary: "Show NetCDF creation code"
+#| eval: false
+
+from pathlib import Path
+import numpy as np
+from scipy.io import netcdf_file
+
+# Output directory
+OUTPUT_DIR = Path("../../examples/external_data")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Grid specification (matches external_sweep.josh)
+LAT_MIN, LAT_MAX = 33.7, 34.0
+LON_MIN, LON_MAX = -116.4, -115.4
+
+# Resolution: ~0.01 degrees (~1km)
+RESOLUTION = 0.01
+lats = np.arange(LAT_MIN, LAT_MAX + RESOLUTION, RESOLUTION)
+lons = np.arange(LON_MIN, LON_MAX + RESOLUTION, RESOLUTION)
+
+# Single timestep - required by Josh preprocessing
+times = np.array([2025.0])
+
+print(f"Grid size: {len(lats)} x {len(lons)} = {len(lats) * len(lons)} cells")
+
+def create_netcdf_with_time(filepath, data, lats, lons, times):
+    """Create a NetCDF file with soil_quality variable and time dimension."""
+    # Add time dimension to data (shape: time x lat x lon)
+    data_3d = data[np.newaxis, :, :]
+    
+    with netcdf_file(str(filepath), 'w') as f:
+        # Create dimensions
+        f.createDimension('time', len(times))
+        f.createDimension('lat', len(lats))
+        f.createDimension('lon', len(lons))
+        
+        # Time variable
+        time_var = f.createVariable('time', 'f8', ('time',))
+        time_var[:] = times
+        time_var.units = 'years'
+        
+        # Coordinate variables
+        lat_var = f.createVariable('lat', 'f8', ('lat',))
+        lat_var[:] = lats
+        lat_var.units = 'degrees_north'
+        
+        lon_var = f.createVariable('lon', 'f8', ('lon',))
+        lon_var[:] = lons
+        lon_var.units = 'degrees_east'
+        
+        # Data variable
+        soil_var = f.createVariable('soil_quality', 'f4', ('time', 'lat', 'lon'))
+        soil_var[:] = data_3d
+        soil_var.units = 'percent'
+
+# Create meshgrid for calculations
+lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+# Pattern 1: Gradient (west-to-east)
+gradient_data = ((lon_grid - LON_MIN) / (LON_MAX - LON_MIN)) * 100
+create_netcdf_with_time(OUTPUT_DIR / "soil_quality_gradient.nc", gradient_data, lats, lons, times)
+
+# Pattern 2: Triangle (center peak)
+center_lon = (LON_MIN + LON_MAX) / 2
+center_lat = (LAT_MIN + LAT_MAX) / 2
+max_dist = np.sqrt((LON_MAX - center_lon)**2 + (LAT_MAX - center_lat)**2)
+dist_from_center = np.sqrt((lon_grid - center_lon)**2 + (lat_grid - center_lat)**2)
+triangle_data = np.maximum(0, (1 - dist_from_center / max_dist)) * 100
+create_netcdf_with_time(OUTPUT_DIR / "soil_quality_triangle.nc", triangle_data, lats, lons, times)
+
+# Pattern 3: Stripes (alternating bands)
+stripe_width = 0.1  # degrees longitude
+stripe_index = ((lon_grid - LON_MIN) / stripe_width).astype(int)
+stripes_data = np.where(stripe_index % 2 == 0, 80.0, 20.0)
+create_netcdf_with_time(OUTPUT_DIR / "soil_quality_stripes.nc", stripes_data, lats, lons, times)
+```
+:::
+
+```{python}
+#| label: run-create-netcdf
+#| echo: false
+
+# Execute the creation code
+from pathlib import Path
+import numpy as np
+from scipy.io import netcdf_file
+
+OUTPUT_DIR = Path("../../examples/external_data")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+LAT_MIN, LAT_MAX = 33.7, 34.0
+LON_MIN, LON_MAX = -116.4, -115.4
+RESOLUTION = 0.01
+lats = np.arange(LAT_MIN, LAT_MAX + RESOLUTION, RESOLUTION)
+lons = np.arange(LON_MIN, LON_MAX + RESOLUTION, RESOLUTION)
+times = np.array([2025.0])
+
+def create_netcdf_with_time(filepath, data, lats, lons, times):
+    data_3d = data[np.newaxis, :, :]
+    with netcdf_file(str(filepath), 'w') as f:
+        f.createDimension('time', len(times))
+        f.createDimension('lat', len(lats))
+        f.createDimension('lon', len(lons))
+        time_var = f.createVariable('time', 'f8', ('time',))
+        time_var[:] = times
+        time_var.units = 'years'
+        lat_var = f.createVariable('lat', 'f8', ('lat',))
+        lat_var[:] = lats
+        lat_var.units = 'degrees_north'
+        lon_var = f.createVariable('lon', 'f8', ('lon',))
+        lon_var[:] = lons
+        lon_var.units = 'degrees_east'
+        soil_var = f.createVariable('soil_quality', 'f4', ('time', 'lat', 'lon'))
+        soil_var[:] = data_3d
+        soil_var.units = 'percent'
+
+lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+gradient_data = ((lon_grid - LON_MIN) / (LON_MAX - LON_MIN)) * 100
+create_netcdf_with_time(OUTPUT_DIR / "soil_quality_gradient.nc", gradient_data, lats, lons, times)
+
+center_lon = (LON_MIN + LON_MAX) / 2
+center_lat = (LAT_MIN + LAT_MAX) / 2
+max_dist = np.sqrt((LON_MAX - center_lon)**2 + (LAT_MAX - center_lat)**2)
+dist_from_center = np.sqrt((lon_grid - center_lon)**2 + (lat_grid - center_lat)**2)
+triangle_data = np.maximum(0, (1 - dist_from_center / max_dist)) * 100
+create_netcdf_with_time(OUTPUT_DIR / "soil_quality_triangle.nc", triangle_data, lats, lons, times)
+
+stripe_width = 0.1
+stripe_index = ((lon_grid - LON_MIN) / stripe_width).astype(int)
+stripes_data = np.where(stripe_index % 2 == 0, 80.0, 20.0)
+create_netcdf_with_time(OUTPUT_DIR / "soil_quality_stripes.nc", stripes_data, lats, lons, times)
+
+print(f"Created 3 NetCDF files in {OUTPUT_DIR}")
+print(f"Grid size: {len(lats)} x {len(lons)} = {len(lats) * len(lons)} cells")
+```
+
+### Visualize Input Patterns
+
+```{python}
+#| label: fig-input-patterns
+#| fig-cap: "Synthetic soil quality patterns for preprocessing"
+#| fig-width: 12
+#| fig-height: 4
+
+import matplotlib.pyplot as plt
+from scipy.io import netcdf_file
+from pathlib import Path
+import numpy as np
+
+OUTPUT_DIR = Path("../../examples/external_data")
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+patterns = [
+    ("soil_quality_gradient.nc", "Gradient (West-to-East)"),
+    ("soil_quality_triangle.nc", "Triangle (Center Peak)"),
+    ("soil_quality_stripes.nc", "Stripes (Alternating)"),
+]
+
+for ax, (filename, title) in zip(axes, patterns):
+    with netcdf_file(str(OUTPUT_DIR / filename), 'r') as f:
+        data = f.variables['soil_quality'][0, :, :].copy()  # First timestep
+        lats = f.variables['lat'][:].copy()
+        lons = f.variables['lon'][:].copy()
+    
+    im = ax.imshow(data, extent=[lons.min(), lons.max(), lats.min(), lats.max()],
+                   origin='lower', cmap='YlGn', vmin=0, vmax=100, aspect='auto')
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(title)
+
+plt.colorbar(im, ax=axes, label='Soil Quality (%)', shrink=0.8)
+plt.tight_layout()
+plt.show()
+```
+
+## Step 2: Preprocess with JoshCLI
+
+The `cli.preprocess()` method converts NetCDF files to Josh's `.jshd` format.
+It requires a reference simulation to define the target grid.
+
+### Reference Simulation
+
+The preprocessing command needs a Josh simulation file to know the target grid:
+
+```{python}
+#| label: show-simulation
+from pathlib import Path
+
+SOURCE_PATH = Path("../../examples/external_sweep.josh")
+print(SOURCE_PATH.read_text())
+```
+
+### Preprocess Each Pattern
+
+The output filename determines how Josh resolves `external` references. For example,
+`soil_quality_gradient.jshd` will be referenced as `external soil_quality` when passed
+with `--data soil_quality=soil_quality_gradient.jshd`.
+
+```{python}
+#| label: preprocess-all
+from pathlib import Path
+from joshpy.cli import JoshCLI, PreprocessConfig
+
+# Setup CLI
+cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+
+SOURCE_PATH = Path("../../examples/external_sweep.josh")
+DATA_DIR = Path("../../examples/external_data")
+
+# Patterns to preprocess
+patterns = ["gradient", "triangle", "stripes"]
+
+for pattern in patterns:
+    nc_file = DATA_DIR / f"soil_quality_{pattern}.nc"
+    jshd_file = DATA_DIR / f"soil_quality_{pattern}.jshd"
+    
+    print(f"Preprocessing {nc_file.name}...")
+    
+    result = cli.preprocess(PreprocessConfig(
+        script=SOURCE_PATH,
+        simulation="Main",
+        data_file=nc_file,
+        variable="soil_quality",
+        units="percent",
+        output=jshd_file,
+        x_coord="lon",
+        y_coord="lat",
+        time_coord="time",
+    ))
+    
+    if result.success:
+        print(f"  -> {jshd_file.name} created successfully")
+    else:
+        print(f"  -> FAILED: {result.stderr}")
+```
+
+### PreprocessConfig Options
+
+| Parameter | Description |
+|-----------|-------------|
+| `script` | Josh simulation file (defines target grid) |
+| `simulation` | Name of simulation to use |
+| `data_file` | Input NetCDF/GeoTIFF file |
+| `variable` | Variable name to extract |
+| `units` | Units for the data |
+| `output` | Output `.jshd` file path |
+| `x_coord` | Name of X coordinate in input file |
+| `y_coord` | Name of Y coordinate in input file |
+| `time_coord` | Name of time coordinate (required for NetCDF) |
+| `amend` | Add to existing `.jshd` file (default: False) |
+| `crs` | Coordinate reference system |
+
+## Step 3: Verify with inspect_jshd()
+
+Use `inspect_jshd()` to verify that preprocessing worked correctly by
+spot-checking values at known coordinates.
+
+```{python}
+#| label: inspect-jshd
+from joshpy.cli import JoshCLI, InspectJshdConfig
+from pathlib import Path
+
+cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+DATA_DIR = Path("../../examples/external_data")
+
+# Test coordinates (grid space, not lat/lon)
+# Grid is approximately 31 x 102 cells
+test_points = [
+    (0, 15, "West edge"),
+    (50, 15, "Center"),
+    (100, 15, "East edge"),
+]
+
+print("Gradient pattern (should increase west-to-east):")
+for x, y, label in test_points:
+    result = cli.inspect_jshd(InspectJshdConfig(
+        jshd_file=DATA_DIR / "soil_quality_gradient.jshd",
+        variable="data",  # Preprocessed data stored as 'data'
+        timestep=0,
+        x=x,
+        y=y,
+    ))
+    if result.success:
+        value = result.stdout.strip()
+        print(f"  ({x:3d}, {y:2d}) {label}: {value}")
+    else:
+        print(f"  ({x:3d}, {y:2d}) {label}: ERROR - {result.stderr[:80]}")
+
+print("\nStripes pattern (should alternate 20/80):")
+for x in [0, 10, 20, 30, 40]:
+    result = cli.inspect_jshd(InspectJshdConfig(
+        jshd_file=DATA_DIR / "soil_quality_stripes.jshd",
+        variable="data",
+        timestep=0,
+        x=x,
+        y=15,
+    ))
+    if result.success:
+        value = result.stdout.strip()
+        print(f"  x={x:3d}: {value}")
+```
+
+::: {.callout-note}
+## Variable Name in JSHD Files
+
+When inspecting `.jshd` files, the data is stored under the generic name `data`,
+not the original variable name from the NetCDF file. However, when Josh resolves
+`external soil_quality`, it uses the **filename stem** passed via `--data`, not
+the internal variable name.
+:::
+
+## Summary
+
+In this tutorial, we:
+
+1. **Created synthetic test data** with clear spatial patterns using `scipy.io.netcdf_file`
+2. **Preprocessed NetCDF to .jshd** using `cli.preprocess()` with a reference simulation
+3. **Verified the data** using `cli.inspect_jshd()` to spot-check values
+
+The preprocessed `.jshd` files are now ready for use in simulations. The next
+tutorial, [Sweeping Over External Data](external-data-sweep.qmd), demonstrates
+how to run parameter sweeps over multiple external data files.
+
+### Files Created
+
+| File | Description |
+|------|-------------|
+| `examples/external_data/soil_quality_gradient.nc` | Synthetic NetCDF - west-to-east gradient |
+| `examples/external_data/soil_quality_triangle.nc` | Synthetic NetCDF - center peak |
+| `examples/external_data/soil_quality_stripes.nc` | Synthetic NetCDF - alternating stripes |
+| `examples/external_data/soil_quality_gradient.jshd` | Preprocessed - gradient pattern |
+| `examples/external_data/soil_quality_triangle.jshd` | Preprocessed - triangle pattern |
+| `examples/external_data/soil_quality_stripes.jshd` | Preprocessed - stripes pattern |
+
+## Learn More
+
+- [External Data Sweep Tutorial](external-data-sweep.qmd) - Use these files in a file sweep
+- [JoshCLI Reference](../reference/cli.JoshCLI.qmd) - CLI wrapper documentation
+- [PreprocessConfig Reference](../reference/cli.PreprocessConfig.qmd) - Preprocessing options
+- [Josh Data Guide](https://joshsim.org/guides/data.html) - Josh documentation on external data
