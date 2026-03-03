@@ -528,7 +528,7 @@ class SweepManager:
         remote: bool = False,
         api_key: str | None = None,
         endpoint: str | None = None,
-        stop_on_failure: bool = False,
+        stop_on_failure: bool = True,
         dry_run: bool = False,
         quiet: bool = False,
         on_complete: Callable[[ExpandedJob, Any], None] | None = None,
@@ -549,7 +549,9 @@ class SweepManager:
             remote: If True, use run_remote() for remote execution.
             api_key: API key for authentication (optional for local servers).
             endpoint: Custom endpoint URL (optional).
-            stop_on_failure: If True, stop on first failure (batch only).
+            stop_on_failure: If True (default), stop on first job failure. For
+                adaptive strategies, raises SweepExecutionError with full error
+                details. For batch strategies, returns partial results.
             dry_run: If True, print plan without executing (batch only).
             quiet: If True, suppress progress output.
             on_complete: Optional additional callback invoked after each job.
@@ -605,6 +607,7 @@ class SweepManager:
                 api_key=api_key,
                 endpoint=endpoint,
                 quiet=quiet,
+                stop_on_failure=stop_on_failure,
             )
         else:
             # Use batch runner
