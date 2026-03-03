@@ -1,0 +1,434 @@
+---
+title: "Adaptive Parameter Optimization"
+description: "Using Optuna to intelligently search parameter space"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+This tutorial demonstrates **adaptive parameter sweeps** using Optuna's Bayesian 
+optimization. Unlike exhaustive grid search (`CartesianStrategy`), adaptive sweeps:
+ 
+- **Learn from results**: Each trial informs the next parameter selection
+- **Focus on promising regions**: Spend more trials where objectives are better
+- **Efficient exploration**: Find good parameters with fewer total trials
+
+We'll optimize fire damage parameters in a grass-shrub ecosystem to achieve 
+**stable vegetation dynamics** (minimize coefficient of variation over time).
+
+**Prerequisites**: 
+
+- Familiarity with [SweepManager Workflow](sweep-manager.qmd)
+- Install with adaptive support: `pip install joshpy[adaptive]`
+
+## The Model
+
+Our grass/shrub ecosystem has **balancing feedback** via fire disturbance:
+
+- High vegetation cover → more frequent fires → reduced cover
+- Low cover → fewer fires → recovery
+
+For a detailed walkthrough of this model, see the [Grass-Shrub Fire Guide](https://joshsim.org/guides/grass_shrub_fire.html) on joshsim.org.
+
+### Optimization Goal
+
+We optimize `grassDamage` and `shrubDamage` (50-95%) to minimize the **coefficient 
+of variation (CV)** of total vegetation cover over time.
+
+The objective function:
+
+1. Skips the first 50 timesteps (burn-in) to ignore transient dynamics
+2. For each replicate, computes the spatially-averaged cover at each timestep
+3. Computes CV = std / mean for each replicate's time series
+4. Returns the mean CV across all replicates
+
+This per-replicate approach correctly detects instability even when replicates 
+oscillate out of phase (which would be hidden by averaging across replicates first).
+Lower CV means more stable dynamics—the system stays near equilibrium rather than 
+oscillating wildly.
+
+::: {.callout-note collapse="true"}
+## View Configuration Template (adaptive_config.jshc.j2)
+
+```jinja
+# Fire damage parameters for adaptive optimization
+# Swept by Optuna to find stable vegetation dynamics
+
+# Grass fire damage (% of cover lost per fire event)
+grassDamage = {{ grassDamage }} percent
+
+# Shrub fire damage (% of cover lost per fire event)
+shrubDamage = {{ shrubDamage }} percent
+```
+:::
+
+::: {.callout-note collapse="true"}
+## View Simulation File (adaptive_fire.josh)
+
+```josh
+# Grass-shrub fire dynamics simulation for adaptive optimization demo
+# Demonstrates balancing feedback for stability optimization
+#
+# This model creates potential for stable equilibria that depend on fire damage 
+# parameters. We can optimize to find parameters that minimize population 
+# variance (stability).
+#
+# Balancing feedback:
+# - High cover -> more fires -> reduced cover
+# - Low cover -> fewer fires -> growth recovers
+
+start simulation Main
+
+  # Small 4x4 grid for fast execution (16 patches)
+  # 5km cells with bounding box sized for 4x4 layout
+  grid.size = 5000 m
+  grid.low = 33.8 degrees latitude, -116.0 degrees longitude
+  grid.high = 33.98 degrees latitude, -115.78 degrees longitude
+  grid.patch = "Default"
+
+  # 100 steps to reach equilibrium and observe long-term stability
+  steps.low = 0 count
+  steps.high = 100 count
+
+  # Output exports to files (run_hash passed as custom-tag by joshpy)
+  exportFiles.patch = "file:///tmp/adaptive_fire_{run_hash}_{replicate}.csv"
+
+  # Fire trigger parameters (fixed)
+  fire.trigger.coverThreshold = 30 percent
+  fire.trigger.highProb = 8 percent
+  fire.trigger.typicalProb = 2 percent
+  
+  # Fire damage parameters (from config - swept by Optuna)
+  fire.damage.grass = config adaptive_config.grassDamage
+  fire.damage.shrub = config adaptive_config.shrubDamage
+
+end simulation
+
+start patch Default
+
+  # Initialize vegetation cover randomly (0-30% each type)
+  grassCover.init = sample uniform from 0 percent to 30 percent
+  shrubCover.init = sample uniform from 0 percent to 30 percent
+  
+  # Total vegetation determines fire risk
+  totalCover.step = prior.grassCover + prior.shrubCover
+  
+  # Fire probability depends on total cover
+  isHighCover.step = totalCover > meta.fire.trigger.coverThreshold
+  fireProbability.step = meta.fire.trigger.highProb if isHighCover else meta.fire.trigger.typicalProb
+  
+  # Stochastic fire occurrence
+  fireRoll.step = sample uniform from 0 percent to 100 percent
+  onFire.step = fireRoll < fireProbability
+
+  # Fire damage with some variability
+  damageGrass.step = sample normal with mean of meta.fire.damage.grass std of 5 percent
+  damageShrub.step = sample normal with mean of meta.fire.damage.shrub std of 5 percent
+
+  # Constant growth rates
+  growthGrass.step = 4 percent
+  growthShrub.step = 3 percent
+
+  # Apply growth or fire damage
+  grassCover.step = {
+    const afterFire = prior.grassCover * (100 percent - damageGrass)
+    const afterGrowth = prior.grassCover + growthGrass
+    const newValue = afterFire if onFire else afterGrowth
+    return limit newValue to [0 percent, 100 percent]
+  }
+
+  shrubCover.step = {
+    const afterFire = prior.shrubCover * (100 percent - damageShrub)
+    const afterGrowth = prior.shrubCover + growthShrub
+    const newValue = afterFire if onFire else afterGrowth
+    return limit newValue to [0 percent, 100 percent]
+  }
+
+  # Export patch-level vegetation cover
+  export.grassCover.step = grassCover
+  export.shrubCover.step = shrubCover
+  export.totalCover.step = totalCover
+  export.onFire.step = onFire
+
+end patch
+
+start unit year
+
+  alias years
+  alias yr
+
+end unit
+```
+:::
+
+## Step 1: Define the Objective Function
+
+```{python}
+from joshpy.strategies import cv_objective
+
+# Built-in objective for stability optimization
+# cv_objective(variable, burn_in) returns a function that computes
+# coefficient of variation (std/mean) for the given variable,
+# skipping the first `burn_in` steps.
+BURN_IN_STEPS = 50
+
+stability_objective = cv_objective("totalCover", burn_in=BURN_IN_STEPS)
+```
+
+::: {.callout-tip}
+## Custom Objectives
+
+Objective functions have signature `(registry, run_hash, job) -> float`.
+Lower values are better (for `direction="minimize"`). Return `float('inf')` 
+for failed/invalid runs.
+:::
+
+## Step 2: Configure with OptunaStrategy
+
+```{python}
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import OptunaStrategy
+
+SOURCE_PATH = Path("../../examples/adaptive_fire.josh")
+TEMPLATE_PATH = Path("../../examples/templates/adaptive_config.jshc.j2")
+DAMAGE_VALUES = list(range(50, 96, 5))  # 50, 55, ..., 95
+
+config = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="grassDamage", values=DAMAGE_VALUES),
+            ConfigSweepParameter(name="shrubDamage", values=DAMAGE_VALUES),
+        ],
+        strategy=OptunaStrategy(
+            n_trials=30,
+            direction="minimize",
+            sampler="tpe",
+        ),
+    ),
+)
+```
+
+### Adaptive vs Cartesian Search
+
+| CartesianStrategy | OptunaStrategy |
+|-------------------|----------------|
+| All 100 combinations | 30 intelligently-chosen trials |
+| No learning | Each trial informs the next |
+| Exhaustive | Efficient for large spaces |
+
+## Step 3: Run the Sweep
+
+```{python}
+from joshpy.sweep import SweepManager
+
+REGISTRY_PATH = "adaptive_demo.duckdb"
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry(REGISTRY_PATH, experiment_name="fire_stability")
+    .with_cli(jar_path=Path("../../jar/joshsim-fat.jar"))
+    .build()
+)
+
+result = manager.run(objective=stability_objective)
+
+print(f"Best parameters: {result.best_params}")
+print(f"Best CV: {result.best_value:.4f}")
+```
+
+::: {.callout-note}
+## Error Handling
+
+By default, `stop_on_failure=True` raises `SweepExecutionError` on first failure.
+Use `stop_on_failure=False` for exploratory runs where some failures are expected.
+:::
+
+## Step 4: Optimization Results
+
+### Trial Summary
+
+```{python}
+summary = result.get_trial_summary()
+print(f"Completed: {summary['n_completed']}/{summary['n_trials']} trials")
+print(f"Best CV: {summary['best_value']:.4f}")
+print(f"Mean CV: {summary['mean_value']:.4f}")
+```
+
+### Optimization Progress
+
+```{python}
+#| label: fig-optuna-progress
+#| fig-cap: "Optuna learns to find stable parameters over trials"
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+metrics = result.trial_metrics
+cumulative_best = np.minimum.accumulate(metrics)
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.scatter(range(1, len(metrics) + 1), metrics, alpha=0.6, label='Trial CV')
+ax.plot(range(1, len(metrics) + 1), cumulative_best, 'r-', linewidth=2, label='Best so far')
+ax.set_xlabel('Trial Number')
+ax.set_ylabel('Coefficient of Variation')
+ax.set_title('Optimization Progress')
+ax.legend()
+plt.tight_layout()
+plt.show()
+```
+
+### Parameter Space Exploration
+
+```{python}
+#| label: fig-param-space
+#| fig-cap: "Parameter combinations explored, colored by stability"
+
+import pandas as pd
+
+trial_data = []
+for i, (job, _) in enumerate(result.job_results):
+    cv = metrics[i] if metrics[i] < float('inf') else None
+    trial_data.append({
+        'grassDamage': job.parameters['grassDamage'],
+        'shrubDamage': job.parameters['shrubDamage'],
+        'cv': cv,
+    })
+
+df_trials = pd.DataFrame(trial_data).dropna()
+
+plt.figure(figsize=(8, 6))
+scatter = plt.scatter(df_trials['grassDamage'], df_trials['shrubDamage'], 
+                      c=df_trials['cv'], cmap='plasma_r', s=100, alpha=0.8)
+plt.colorbar(scatter, label='CV (lower = stable)')
+plt.xlabel('Grass Damage (%)')
+plt.ylabel('Shrub Damage (%)')
+plt.title('Parameter Space Exploration')
+plt.tight_layout()
+plt.show()
+```
+
+## Step 5: Analyze Vegetation Dynamics
+
+The real value is understanding **why** certain parameters are stable. We use 
+the same analysis tools from [Analysis & Visualization](analysis.qmd).
+
+### Best vs Worst Parameters
+
+```{python}
+#| label: fig-dynamics-comparison
+#| fig-cap: "Stable (best) vs unstable (worst) vegetation dynamics"
+
+from joshpy.diagnostics import SimulationDiagnostics
+from joshpy.cell_data import DiagnosticQueries
+
+queries = DiagnosticQueries(manager.registry)
+best_job = result.get_best_job()
+
+# Note: This worst-job finding is for illustration purposes.
+# In practice, you'd typically focus on the best parameters
+# and use Optuna's built-in visualization tools.
+finite = [(i, m) for i, m in enumerate(metrics) if m < float('inf')]
+worst_idx = max(finite, key=lambda x: x[1])[0]
+worst_job, _ = result.job_results[worst_idx]
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
+
+# Get CVs for labels
+best_cv = result.best_value
+worst_cv = metrics[worst_idx]
+
+for ax, job, label, cv in [(axes[0], best_job, "BEST (stable)", best_cv), 
+                            (axes[1], worst_job, "WORST (unstable)", worst_cv)]:
+    df = queries.get_replicate_uncertainty("totalCover", run_hash=job.run_hash)
+    ax.fill_between(df['step'], df['mean'] - df['std'], df['mean'] + df['std'], alpha=0.3)
+    ax.plot(df['step'], df['mean'], linewidth=2)
+    ax.axvline(50, color='gray', linestyle='--', alpha=0.5, label='Burn-in')
+    ax.set_xlabel('Time Step')
+    ax.set_title(f"{label}\ngrass={job.parameters['grassDamage']}%, shrub={job.parameters['shrubDamage']}%, CV={cv:.4f}")
+    if ax == axes[0]:
+        ax.set_ylabel('Total Cover')
+        ax.legend()
+
+plt.tight_layout()
+plt.show()
+```
+
+### Species-Level Dynamics (Best Parameters)
+
+```{python}
+#| label: fig-species-dynamics
+#| fig-cap: "Grass and shrub dynamics with optimized parameters"
+
+df_grass = queries.get_replicate_uncertainty("grassCover", run_hash=best_job.run_hash)
+df_shrub = queries.get_replicate_uncertainty("shrubCover", run_hash=best_job.run_hash)
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.fill_between(df_grass['step'], df_grass['mean'] - df_grass['std'], 
+                df_grass['mean'] + df_grass['std'], alpha=0.2, color='green')
+ax.plot(df_grass['step'], df_grass['mean'], color='green', linewidth=2, label='Grass')
+ax.fill_between(df_shrub['step'], df_shrub['mean'] - df_shrub['std'],
+                df_shrub['mean'] + df_shrub['std'], alpha=0.2, color='brown')
+ax.plot(df_shrub['step'], df_shrub['mean'], color='brown', linewidth=2, label='Shrub')
+ax.axvline(50, color='gray', linestyle='--', alpha=0.5, label='Burn-in')
+ax.set_xlabel('Time Step')
+ax.set_ylabel('Cover')
+ax.set_title(f"Species Dynamics (grass={best_job.parameters['grassDamage']}%, shrub={best_job.parameters['shrubDamage']}%)")
+ax.legend()
+plt.tight_layout()
+plt.show()
+```
+
+## Registry Independence
+
+The registry produced by adaptive sweeps is **identical** to one from cartesian 
+sweeps or manual workflows. All analysis tools work the same:
+
+```{python}
+# Same queries work regardless of how data was generated
+print(f"Variables: {manager.registry.list_export_variables()}")
+print(f"Cell data rows: {manager.registry.get_data_summary().cell_data_rows}")
+```
+
+See [Analysis & Visualization](analysis.qmd) for the full analysis toolkit.
+
+## When to Use Adaptive Sweeps
+
+| Use `OptunaStrategy` when: | Use `CartesianStrategy` when: |
+|---------------------------|------------------------------|
+| Large parameter space | Small parameter space |
+| Clear optimization objective | Need ALL combinations |
+| Expensive simulations | Building response surfaces |
+| "Good enough" parameters | Sensitivity analysis |
+
+## Learn More
+
+- [Optuna Documentation](https://optuna.readthedocs.io/) - Full optimization framework
+- [TPE Sampler](https://optuna.readthedocs.io/en/stable/reference/samplers/generated/optuna.samplers.TPESampler.html) - Default sampler details
+- [Analysis & Visualization](analysis.qmd) - Query and visualize any registry
+
+## Cleanup
+
+```{python}
+import os
+
+manager.cleanup()
+manager.close()
+
+for f in ["adaptive_demo.duckdb"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
