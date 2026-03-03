@@ -1,0 +1,66 @@
+# External data sweep simulation - tree growth affected by soil quality
+# Demonstrates using external geospatial data in Josh simulations
+#
+# The `external soil_quality` expression reads preprocessed .jshd data
+# that varies spatially across the grid. Tree growth rate scales with
+# soil quality, creating visible spatial patterns in the output.
+
+start simulation Main
+
+  # Grid extent for the tutorial area
+  # Note: grid.low = northwest corner (higher lat, lower lon)
+  #       grid.high = southeast corner (lower lat, higher lon)
+  grid.size = 1000 m
+  grid.low = 34.0 degrees latitude, -116.4 degrees longitude
+  grid.high = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.patch = "Default"
+
+  # 10 timesteps to observe growth patterns
+  steps.low = 0 count
+  steps.high = 10 count
+
+  # Output exports to files (run_hash passed as custom-tag by joshpy)
+  exportFiles.patch = "file:///tmp/external_sweep_{run_hash}_{replicate}.csv"
+
+end simulation
+
+start patch Default
+
+  # Create trees in each patch
+  ForeverTree.init = create 10 count of ForeverTree
+
+  # Read soil quality from external preprocessed data
+  # This value varies spatially based on the .jshd file content
+  soil_quality.step = external soil_quality
+
+  # Export patch-level averages
+  export.average_height.step = mean(ForeverTree.height)
+  export.average_age.step = mean(ForeverTree.age)
+  export.soil_quality.step = soil_quality
+
+end patch
+
+start organism ForeverTree
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 meters
+
+  # Growth rate scales with soil quality from external data
+  # 0% soil quality -> 0 meters max growth
+  # 100% soil quality -> 10 meters max growth
+  max_growth.step = map here.soil_quality from [0 percent, 100 percent] to [0 meters, 10 meters] linear
+
+  # Actual growth is random up to max_growth
+  height.step = prior.height + sample uniform from 0 meters to max_growth
+
+end organism
+
+start unit year
+
+  alias years
+  alias yr
+  alias yrs
+
+end unit
