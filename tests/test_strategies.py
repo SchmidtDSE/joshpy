@@ -643,5 +643,306 @@ class TestCreateSingleJob(unittest.TestCase):
             os.unlink(data_path)
 
 
+class TestSweepExecutionError(unittest.TestCase):
+    """Tests for SweepExecutionError exception."""
+
+    def test_error_message_includes_exit_code(self):
+        """Error message should include exit code."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10, "y": 20}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 1
+        result.stderr = None
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=5, succeeded_before=3
+        )
+
+        self.assertIn("exit_code=1", str(error))
+        self.assertIn("Trial 6", str(error))  # trial_num is 0-indexed
+        self.assertIn("3 trial(s) succeeded", str(error))
+        self.assertIn("abc123", str(error))
+
+    def test_error_message_includes_stderr(self):
+        """Error message should include stderr when present."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 1
+        result.stderr = "Error: Configuration not found\nStack trace..."
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=0, succeeded_before=0
+        )
+
+        self.assertIn("STDERR:", str(error))
+        self.assertIn("Configuration not found", str(error))
+
+    def test_error_attributes_accessible(self):
+        """Error should expose job, result, and counts as attributes."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 42
+        result.stderr = "some error"
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=7, succeeded_before=5
+        )
+
+        self.assertIs(error.job, job)
+        self.assertIs(error.result, result)
+        self.assertEqual(error.trial_num, 7)
+        self.assertEqual(error.succeeded_before, 5)
+
+
+class TestStopOnFailureBehavior(unittest.TestCase):
+    """Tests for stop_on_failure parameter in run_adaptive_sweep."""
+
+    def test_stop_on_failure_true_raises_on_cli_failure(self):
+        """Should raise SweepExecutionError when CLI returns non-zero."""
+        from joshpy.strategies import (
+            run_adaptive_sweep,
+            OptunaStrategy,
+            SweepExecutionError,
+        )
+        from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+        from unittest.mock import MagicMock, patch
+        from pathlib import Path
+        import tempfile
+        import os
+
+        # Create temp josh file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".josh", delete=False) as f:
+            f.write("start simulation Main\nend simulation\n")
+            josh_path = Path(f.name)
+
+        try:
+            config = JobConfig(
+                template_string="x = {{ x }} meters",
+                source_path=josh_path,
+                simulation="Main",
+                replicates=1,
+                sweep=SweepConfig(
+                    config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])],
+                    strategy=OptunaStrategy(n_trials=2, direction="minimize"),
+                ),
+            )
+
+            # Mock CLI to fail
+            mock_cli = MagicMock()
+            mock_result = MagicMock()
+            mock_result.success = False
+            mock_result.exit_code = 1
+            mock_result.stderr = "Test error message"
+            mock_cli.run.return_value = mock_result
+            mock_cli.inspect_exports.return_value = MagicMock(patch=None)
+
+            # Mock registry
+            mock_registry = MagicMock()
+            mock_registry.get_runs_for_hash.return_value = []
+
+            with self.assertRaises(SweepExecutionError) as ctx:
+                run_adaptive_sweep(
+                    mock_cli,
+                    config,
+                    registry=mock_registry,
+                    session_id="test",
+                    objective=lambda r, h, j: 0.0,
+                    stop_on_failure=True,
+                    quiet=True,
+                )
+
+            error = ctx.exception
+            self.assertEqual(error.result.exit_code, 1)
+            self.assertIn("Test error message", str(error))
+
+        finally:
+            os.unlink(josh_path)
+
+    def test_stop_on_failure_false_continues_on_cli_failure(self):
+        """Should continue and return results when stop_on_failure=False."""
+        from joshpy.strategies import run_adaptive_sweep, OptunaStrategy
+        from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+        from unittest.mock import MagicMock
+        from pathlib import Path
+        import tempfile
+        import os
+
+        # Create temp josh file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".josh", delete=False) as f:
+            f.write("start simulation Main\nend simulation\n")
+            josh_path = Path(f.name)
+
+        try:
+            config = JobConfig(
+                template_string="x = {{ x }} meters",
+                source_path=josh_path,
+                simulation="Main",
+                replicates=1,
+                sweep=SweepConfig(
+                    config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])],
+                    strategy=OptunaStrategy(n_trials=3, direction="minimize"),
+                ),
+            )
+
+            # Mock CLI to fail
+            mock_cli = MagicMock()
+            mock_result = MagicMock()
+            mock_result.success = False
+            mock_result.exit_code = 1
+            mock_result.stderr = "Test error"
+            mock_cli.run.return_value = mock_result
+            mock_cli.inspect_exports.return_value = MagicMock(patch=None)
+
+            # Mock registry - need to return proper values for _store_study_outcomes
+            mock_registry = MagicMock()
+            mock_registry.get_runs_for_hash.return_value = []
+            # Return a mock session with None metadata (so it doesn't try to serialize MagicMock)
+            mock_session = MagicMock()
+            mock_session.metadata = None
+            mock_registry.get_session.return_value = mock_session
+
+            # Should NOT raise - just return results with failures
+            result = run_adaptive_sweep(
+                mock_cli,
+                config,
+                registry=mock_registry,
+                session_id="test",
+                objective=lambda r, h, j: 0.0,
+                stop_on_failure=False,
+                quiet=True,
+            )
+
+            # All 3 trials should have run (and failed)
+            self.assertEqual(result.failed, 3)
+            self.assertEqual(result.succeeded, 0)
+            self.assertEqual(len(result.job_results), 3)
+
+        finally:
+            os.unlink(josh_path)
+
+
+class TestCvObjective(unittest.TestCase):
+    """Tests for cv_objective built-in."""
+
+    def test_returns_callable(self):
+        """cv_objective should return a callable."""
+        from joshpy.strategies import cv_objective
+
+        obj = cv_objective("totalCover", burn_in=50)
+        self.assertTrue(callable(obj))
+
+    def test_computes_mean_cv_across_replicates(self):
+        """Should return mean CV from get_replicate_cv."""
+        from joshpy.strategies import cv_objective
+        from unittest.mock import MagicMock, patch
+
+        mock_registry = MagicMock()
+        mock_job = MagicMock()
+
+        # Mock get_replicate_cv to return a known mean_cv
+        mock_result = {
+            "mean_cv": 0.15,
+            "replicate_cvs": [0.1, 0.15, 0.2],
+            "n_replicates": 3,
+            "n_timesteps": 50,
+            "extinct_replicates": [],
+        }
+
+        with patch('joshpy.cell_data.DiagnosticQueries') as mock_queries_cls:
+            mock_queries = MagicMock()
+            mock_queries.get_replicate_cv.return_value = mock_result
+            mock_queries_cls.return_value = mock_queries
+
+            obj = cv_objective("totalCover", burn_in=50)
+            result = obj(mock_registry, "test_hash", mock_job)
+
+            # Should return the mean_cv from get_replicate_cv
+            self.assertAlmostEqual(result, 0.15, places=5)
+
+            # Verify get_replicate_cv was called with correct args
+            mock_queries.get_replicate_cv.assert_called_once_with(
+                variable="totalCover",
+                run_hash="test_hash",
+                burn_in=50,
+                extinction_threshold=0.01,
+            )
+
+    def test_returns_inf_for_extinction(self):
+        """Should return inf when any replicate goes extinct."""
+        from joshpy.strategies import cv_objective
+        from unittest.mock import MagicMock, patch
+
+        mock_registry = MagicMock()
+        mock_job = MagicMock()
+
+        # Mock get_replicate_cv returning inf due to extinction
+        mock_result = {
+            "mean_cv": float("inf"),
+            "replicate_cvs": [0.1, float("inf"), 0.2],
+            "n_replicates": 3,
+            "n_timesteps": 50,
+            "extinct_replicates": [1],
+        }
+
+        with patch('joshpy.cell_data.DiagnosticQueries') as mock_queries_cls:
+            mock_queries = MagicMock()
+            mock_queries.get_replicate_cv.return_value = mock_result
+            mock_queries_cls.return_value = mock_queries
+
+            obj = cv_objective("totalCover", burn_in=0)
+            result = obj(mock_registry, "test_hash", mock_job)
+
+            self.assertEqual(result, float('inf'))
+
+    def test_passes_extinction_threshold(self):
+        """Should pass custom extinction_threshold to get_replicate_cv."""
+        from joshpy.strategies import cv_objective
+        from unittest.mock import MagicMock, patch
+
+        mock_registry = MagicMock()
+        mock_job = MagicMock()
+
+        mock_result = {
+            "mean_cv": 0.2,
+            "replicate_cvs": [0.2],
+            "n_replicates": 1,
+            "n_timesteps": 50,
+            "extinct_replicates": [],
+        }
+
+        with patch('joshpy.cell_data.DiagnosticQueries') as mock_queries_cls:
+            mock_queries = MagicMock()
+            mock_queries.get_replicate_cv.return_value = mock_result
+            mock_queries_cls.return_value = mock_queries
+
+            obj = cv_objective("totalCover", burn_in=10, extinction_threshold=0.05)
+            obj(mock_registry, "test_hash", mock_job)
+
+            # Verify custom extinction_threshold was passed
+            mock_queries.get_replicate_cv.assert_called_once_with(
+                variable="totalCover",
+                run_hash="test_hash",
+                burn_in=10,
+                extinction_threshold=0.05,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
