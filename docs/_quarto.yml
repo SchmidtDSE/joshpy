@@ -19,6 +19,10 @@ website:
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
           - text: "---"
+          - text: "Optimization"
+          - text: "Adaptive Sweeps"
+            href: tutorials/adaptive-sweep.qmd
+          - text: "---"
           - text: "Analysis"
           - text: "Analysis & Visualization"
             href: tutorials/analysis.qmd
@@ -49,6 +53,9 @@ website:
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
+        - section: "Optimization"
+          contents:
+            - tutorials/adaptive-sweep.qmd
         - section: "Analysis"
           contents:
             - tutorials/analysis.qmd

@@ -28,6 +28,7 @@ Job configuration and parameter sweep execution
 | [jobs.ExpandedJob](jobs.ExpandedJob.qmd#joshpy.jobs.ExpandedJob) | A fully-expanded job with concrete parameter values. |
 | [jobs.run_sweep](jobs.run_sweep.qmd#joshpy.jobs.run_sweep) | Execute all jobs in a JobSet. |
 | [jobs.SweepResult](jobs.SweepResult.qmd#joshpy.jobs.SweepResult) | Results from running a parameter sweep. |
+| [jobs.AdaptiveSweepResult](jobs.AdaptiveSweepResult.qmd#joshpy.jobs.AdaptiveSweepResult) | Results from running an adaptive (Optuna) sweep. |
 
 ## Strategies Module
 
@@ -39,6 +40,8 @@ Sweep expansion strategies for parameter optimization
 | [strategies.CartesianStrategy](strategies.CartesianStrategy.qmd#joshpy.strategies.CartesianStrategy) | Full cartesian product of all parameters (default strategy). |
 | [strategies.OptunaStrategy](strategies.OptunaStrategy.qmd#joshpy.strategies.OptunaStrategy) | Bayesian optimization using Optuna. |
 | [strategies.strategy_from_dict](strategies.strategy_from_dict.qmd#joshpy.strategies.strategy_from_dict) | Create a strategy from a dict (YAML deserialization). |
+| [strategies.run_adaptive_sweep](strategies.run_adaptive_sweep.qmd#joshpy.strategies.run_adaptive_sweep) | Run an adaptive sweep using Optuna. |
+| [strategies.sample_params_from_trial](strategies.sample_params_from_trial.qmd#joshpy.strategies.sample_params_from_trial) | Sample parameters from an Optuna trial. |
 
 ## Registry Module
 
