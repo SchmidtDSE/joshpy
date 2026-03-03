@@ -58,6 +58,8 @@ try:
         strategy_from_dict,
         sample_params_from_trial,
         run_adaptive_sweep,
+        SweepExecutionError,
+        cv_objective,
     )
     HAS_JOBS = True
 except ImportError:
@@ -139,6 +141,8 @@ __all__ = [
     "strategy_from_dict",
     "sample_params_from_trial",
     "run_adaptive_sweep",
+    "SweepExecutionError",
+    "cv_objective",
     # Registry (optional)
     "RunRegistry",
     "RegistryCallback",

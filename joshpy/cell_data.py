@@ -60,6 +60,10 @@ except ImportError:
     HAS_PANDAS = False
 
 
+# Minimum timesteps after burn-in for meaningful CV calculation
+MIN_TIMESTEPS_FOR_CV = 10
+
+
 def _check_pydantic() -> None:
     """Raise ImportError if pydantic is not available."""
     if not HAS_PYDANTIC:
@@ -598,6 +602,141 @@ class DiagnosticQueries:
 
         params: list[Any] = [run_hash, step] if step else [run_hash]
         return self.registry.conn.execute(query, params).df()
+
+    def get_replicate_cv(
+        self,
+        variable: str,
+        run_hash: str,
+        burn_in: int = 0,
+        extinction_threshold: float = 0.01,
+    ) -> dict[str, Any]:
+        """Compute coefficient of variation for each replicate's time series.
+
+        For each replicate:
+        1. Get spatially-averaged values at each timestep (after burn_in)
+        2. Compute CV = std(values) / mean(values)
+        3. Return inf if mean < extinction_threshold (extinction)
+
+        This is the correct way to measure stability - computing CV per replicate
+        then averaging, rather than computing CV on cross-replicate means which
+        can hide instability when replicates oscillate out of phase.
+
+        Args:
+            variable: Export variable to analyze (e.g., "totalCover")
+            run_hash: Run hash to filter by
+            burn_in: Steps to skip before measuring (default: 0)
+            extinction_threshold: Mean below this is considered extinction (default: 0.01)
+
+        Returns:
+            Dict with keys:
+            - 'mean_cv': Average CV across replicates (inf if any extinct)
+            - 'replicate_cvs': List of per-replicate CVs (inf for extinct)
+            - 'n_replicates': Number of replicates
+            - 'n_timesteps': Timesteps per replicate after burn-in
+            - 'extinct_replicates': List of replicate indices with extinction
+
+        Warns:
+            UserWarning if n_timesteps < MIN_TIMESTEPS_FOR_CV
+        """
+        _check_pandas()
+
+        # First check if we have any data for this run_hash
+        count_result = self.registry.conn.execute(
+            "SELECT COUNT(*) FROM cell_data WHERE run_hash = ?", [run_hash]
+        ).fetchone()
+        if count_result is None or count_result[0] == 0:
+            return {
+                "mean_cv": float("inf"),
+                "replicate_cvs": [],
+                "n_replicates": 0,
+                "n_timesteps": 0,
+                "extinct_replicates": [],
+            }
+
+        quoted = _quote_identifier(variable)
+
+        query = f"""
+            WITH replicate_timeseries AS (
+                SELECT
+                    replicate,
+                    step,
+                    AVG({quoted}) as value
+                FROM cell_data
+                WHERE run_hash = ? AND step >= ?
+                GROUP BY replicate, step
+            ),
+            replicate_stats AS (
+                SELECT
+                    replicate,
+                    AVG(value) as mean_val,
+                    STDDEV_SAMP(value) as std_val,
+                    COUNT(*) as n_steps
+                FROM replicate_timeseries
+                GROUP BY replicate
+            )
+            SELECT
+                replicate,
+                mean_val,
+                std_val,
+                n_steps,
+                CASE
+                    WHEN mean_val < ? THEN NULL
+                    ELSE std_val / mean_val
+                END as cv
+            FROM replicate_stats
+            ORDER BY replicate
+        """
+
+        df = self.registry.conn.execute(query, [run_hash, burn_in, extinction_threshold]).df()
+
+        if len(df) == 0:
+            return {
+                "mean_cv": float("inf"),
+                "replicate_cvs": [],
+                "n_replicates": 0,
+                "n_timesteps": 0,
+                "extinct_replicates": [],
+            }
+
+        n_timesteps = int(df["n_steps"].iloc[0]) if len(df) > 0 else 0
+        n_replicates = len(df)
+
+        # Warn if too few timesteps for meaningful CV
+        if n_timesteps < MIN_TIMESTEPS_FOR_CV:
+            warnings.warn(
+                f"Only {n_timesteps} timesteps after burn-in (minimum recommended: "
+                f"{MIN_TIMESTEPS_FOR_CV}). CV may not be meaningful.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # Identify extinct replicates (NULL cv means extinction)
+        extinct_replicates = df[df["cv"].isna()]["replicate"].tolist()
+
+        # Build per-replicate CV list (inf for extinct)
+        replicate_cvs = [
+            float("inf") if pd.isna(cv) else float(cv) for cv in df["cv"]
+        ]
+
+        # If any replicate went extinct, return inf with warning
+        if extinct_replicates:
+            warnings.warn(
+                f"Extinction detected in {len(extinct_replicates)} replicate(s): "
+                f"{extinct_replicates}. Returning inf.",
+                UserWarning,
+                stacklevel=2,
+            )
+            mean_cv = float("inf")
+        else:
+            mean_cv = float(df["cv"].mean())
+
+        return {
+            "mean_cv": mean_cv,
+            "replicate_cvs": replicate_cvs,
+            "n_replicates": n_replicates,
+            "n_timesteps": n_timesteps,
+            "extinct_replicates": extinct_replicates,
+        }
 
     def get_bbox_timeseries(
         self,

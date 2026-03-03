@@ -53,6 +53,95 @@ ObjectiveFn = Callable[["RunRegistry", str, "ExpandedJob"], float]
 _STRATEGY_TYPES: dict[str, type[SweepStrategy]] = {}
 
 
+def cv_objective(
+    variable: str, burn_in: int = 0, extinction_threshold: float = 0.01
+) -> ObjectiveFn:
+    """Create objective minimizing coefficient of variation.
+
+    Computes CV separately for each replicate's time series (after burn-in),
+    then returns the mean CV across replicates. This correctly detects
+    instability even when replicates oscillate out of phase.
+
+    Lower CV = more stable dynamics. Common for equilibrium optimization.
+
+    Args:
+        variable: Export variable to analyze (e.g., "totalCover")
+        burn_in: Steps to skip before measuring (default: 0)
+        extinction_threshold: Mean below this returns inf (default: 0.01)
+
+    Returns:
+        Objective function: (registry, run_hash, job) -> float
+        Returns float('inf') if any replicate goes extinct or has insufficient data.
+
+    Example:
+        >>> strategy = OptunaStrategy(
+        ...     n_trials=30,
+        ...     direction="minimize",
+        ...     objective=cv_objective("totalCover", burn_in=50),
+        ... )
+    """
+    def objective(registry: "RunRegistry", run_hash: str, job: "ExpandedJob") -> float:
+        from joshpy.cell_data import DiagnosticQueries
+
+        queries = DiagnosticQueries(registry)
+        result = queries.get_replicate_cv(
+            variable=variable,
+            run_hash=run_hash,
+            burn_in=burn_in,
+            extinction_threshold=extinction_threshold,
+        )
+        return result["mean_cv"]
+
+    return objective
+
+
+class SweepExecutionError(Exception):
+    """Raised when a sweep trial fails and stop_on_failure=True.
+
+    This exception provides detailed information about the failed trial,
+    including the job parameters, run hash, and stderr output from the
+    CLI execution.
+
+    Attributes:
+        job: The ExpandedJob that failed.
+        result: The CLIResult with exit code and stderr.
+        trial_num: Zero-indexed trial number that failed.
+        succeeded_before: Number of trials that succeeded before this failure.
+
+    Examples:
+        >>> try:
+        ...     result = manager.run(objective=my_objective)
+        ... except SweepExecutionError as e:
+        ...     print(f"Trial {e.trial_num + 1} failed")
+        ...     print(f"Parameters: {e.job.parameters}")
+        ...     print(f"Error: {e.result.stderr}")
+    """
+
+    def __init__(
+        self,
+        job: Any,  # ExpandedJob
+        result: Any,  # CLIResult
+        trial_num: int,
+        succeeded_before: int,
+    ) -> None:
+        self.job = job
+        self.result = result
+        self.trial_num = trial_num
+        self.succeeded_before = succeeded_before
+
+        # Build informative message
+        message = (
+            f"Trial {trial_num + 1} failed with exit_code={result.exit_code}. "
+            f"{succeeded_before} trial(s) succeeded before this failure.\n"
+            f"Parameters: {job.parameters}\n"
+            f"Run hash: {job.run_hash}"
+        )
+        if result.stderr:
+            message += f"\n\nSTDERR:\n{result.stderr}"
+
+        super().__init__(message)
+
+
 def register_strategy(name: str) -> Callable[[type[SweepStrategy]], type[SweepStrategy]]:
     """Decorator to register a strategy type for YAML serialization.
 
@@ -522,6 +611,7 @@ def run_adaptive_sweep(
     endpoint: str | None = None,
     quiet: bool = False,
     load_config: Any | None = None,  # LoadConfig
+    stop_on_failure: bool = True,
 ) -> Any:  # AdaptiveSweepResult
     """Run an adaptive sweep using Optuna.
 
@@ -553,6 +643,9 @@ def run_adaptive_sweep(
         endpoint: Custom endpoint URL for remote execution.
         quiet: If True, suppress progress output.
         load_config: LoadConfig for result loading behavior.
+        stop_on_failure: If True (default), raise SweepExecutionError on first
+            trial failure. If False, continue with remaining trials and report
+            failures in the result.
 
     Returns:
         AdaptiveSweepResult with trial outcomes and best params.
@@ -561,6 +654,7 @@ def run_adaptive_sweep(
         TypeError: If config.sweep.strategy is not OptunaStrategy.
         ValueError: If no objective function is configured.
         ImportError: If optuna is not installed.
+        SweepExecutionError: If stop_on_failure=True and a trial fails.
 
     Examples:
         >>> from joshpy.strategies import run_adaptive_sweep, OptunaStrategy
@@ -697,10 +791,24 @@ def run_adaptive_sweep(
 
             job_results.append((job, result))
 
+            # 6. Record the run result in the registry (needed for load_job_results)
+            run_id = registry.start_run(
+                run_hash=job.run_hash,
+                replicate=0,  # CLI runs all replicates at once
+                output_path=str(job.config_path.parent) if job.config_path else None,
+                metadata={"parameters": job.parameters, "trial": trial_num},
+            )
+            error_msg = result.stderr if not result.success else None
+            registry.complete_run(
+                run_id=run_id,
+                exit_code=result.exit_code,
+                error_message=error_msg,
+            )
+
             if result.success:
                 succeeded += 1
 
-                # 6. Wait for writes to settle and load results
+                # 7. Wait for writes to settle and load results
                 import time
 
                 time.sleep(load_config.settle_delay)
@@ -719,9 +827,10 @@ def run_adaptive_sweep(
                     # Log but don't fail the whole sweep
                     if not quiet:
                         print(f"  [WARN] Result loading failed: {e}")
-                    study.tell(trial, float("inf"))
+                    # Set user attrs BEFORE tell() since trial is finished after tell()
                     trial.set_user_attr("error", str(e))
                     trial.set_user_attr("run_hash", job.run_hash)
+                    study.tell(trial, float("inf"))
                     continue
 
                 # 7. Compute objective
@@ -730,30 +839,45 @@ def run_adaptive_sweep(
                 except Exception as e:
                     if not quiet:
                         print(f"  [WARN] Objective evaluation failed: {e}")
-                    study.tell(trial, float("inf"))
+                    # Set user attrs BEFORE tell() since trial is finished after tell()
                     trial.set_user_attr("error", f"objective_error: {e}")
                     trial.set_user_attr("run_hash", job.run_hash)
+                    study.tell(trial, float("inf"))
                     continue
 
-                # 8. Report to Optuna
-                study.tell(trial, metric)
-
-                # Store traceability info in Optuna trial
+                # 8. Store traceability info BEFORE tell() since trial is finished after
                 trial.set_user_attr("run_hash", job.run_hash)
                 trial.set_user_attr("metric", metric)
                 trial.set_user_attr("rows_loaded", rows_loaded)
+
+                # Report to Optuna (finishes the trial)
+                study.tell(trial, metric)
 
                 if not quiet:
                     print(f"  [OK] metric={metric:.4f} (rows={rows_loaded})")
 
             else:
                 failed += 1
-                # Failed trial gets worst possible value
-                study.tell(trial, float("inf"))
+                # Set user attrs BEFORE tell() since trial is finished after tell()
                 trial.set_user_attr("run_hash", job.run_hash)
                 trial.set_user_attr("error", f"exit_code={result.exit_code}")
+                # Failed trial gets worst possible value
+                study.tell(trial, float("inf"))
+
                 if not quiet:
                     print(f"  [FAIL] exit_code={result.exit_code}")
+                    if result.stderr:
+                        print(f"\n  STDERR:\n{result.stderr}")
+
+                if stop_on_failure:
+                    # Update session status before raising
+                    registry.update_session_status(session_id, "failed")
+                    raise SweepExecutionError(
+                        job=job,
+                        result=result,
+                        trial_num=trial_num,
+                        succeeded_before=succeeded,
+                    )
 
         # Store study outcomes in registry
         _store_study_outcomes(registry, session_id, study)
@@ -861,15 +985,24 @@ def _create_single_job(
     # Add run_hash as custom tag
     custom_tags["run_hash"] = run_hash
 
+    # Derive config name from template path (e.g., "adaptive_config.jshc.j2" -> "adaptive_config.jshc")
+    # This ensures the config name matches what the Josh file references via "config <name>.xxx"
+    if config.template_path:
+        # Remove .j2 extension to get .jshc filename
+        config_name = config.template_path.stem  # "adaptive_config.jshc"
+        if not config_name.endswith(".jshc"):
+            config_name = config_name + ".jshc"
+    else:
+        config_name = "sweep_config.jshc"
+
     # Write config file to temp directory
     temp_dir = Path(tempfile.mkdtemp(prefix="josh_adaptive_"))
     config_subdir = temp_dir / f"trial_{trial_num:04d}_{run_hash}"
     config_subdir.mkdir(parents=True, exist_ok=True)
-    config_name = "sweep_config.jshc"
     config_path = config_subdir / config_name
     config_path.write_text(rendered)
 
-    # Extract logical config name
+    # Extract logical config name (without .jshc extension) for --data flag
     logical_name = config_name.removesuffix(".jshc")
 
     return ExpandedJob(
