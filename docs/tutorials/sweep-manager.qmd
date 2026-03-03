@@ -60,12 +60,12 @@ abstractions:
 - **`JobConfig`**: The top-level configuration specifying source files, templates,
   and sweep parameters
 - **`SweepConfig`**: Defines which parameters to sweep and their values
-- **`SweepParameter`**: A single parameter with a name and list of values
+- **`ConfigSweepParameter`**: A single configuration parameter with a name and list of values
 
 ```{python}
 from pathlib import Path
 
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
 
 # Paths to source files (optimized for fast tutorial builds)
 SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
@@ -80,9 +80,9 @@ config = JobConfig(
     simulation="Main",
     replicates=3,
     sweep=SweepConfig(
-        parameters=[
+        config_parameters=[
             # maxGrowth is swept - creates one job per value
-            SweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
+            ConfigSweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
             # Note: daysPerYear is a static value in the template (not swept)
         ]
     ),

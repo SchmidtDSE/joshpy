@@ -11,7 +11,7 @@ from joshpy.sweep import (
     SweepManager,
     SweepManagerBuilder,
 )
-from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter, JobExpander
 from joshpy.registry import RunRegistry
 from joshpy.cli import JoshCLI
 
@@ -333,7 +333,7 @@ class TestSweepManagerBuilder(unittest.TestCase):
             simulation="TestSim",
             replicates=2,
             sweep=SweepConfig(
-                parameters=[SweepParameter(name="maxGrowth", values=[10, 20])]
+                config_parameters=[ConfigSweepParameter(name="maxGrowth", values=[10, 20])]
             ),
         )
 
@@ -500,7 +500,7 @@ class TestSweepManagerBuilder(unittest.TestCase):
             simulation="TestSim",
             replicates=2,
             sweep=SweepConfig(
-                parameters=[SweepParameter(name="maxGrowth", values=[30, 40])]  # Different values
+                config_parameters=[ConfigSweepParameter(name="maxGrowth", values=[30, 40])]  # Different values
             ),
         )
         
@@ -532,7 +532,7 @@ class TestSweepManager(unittest.TestCase):
             simulation="TestSim",
             replicates=1,
             sweep=SweepConfig(
-                parameters=[SweepParameter(name="maxGrowth", values=[10, 20])]
+                config_parameters=[ConfigSweepParameter(name="maxGrowth", values=[10, 20])]
             ),
         )
 
@@ -685,6 +685,136 @@ class TestSweepManager(unittest.TestCase):
         finally:
             manager.cleanup()
             manager.close()
+
+
+def _has_optuna() -> bool:
+    """Check if optuna is available."""
+    try:
+        import optuna  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+class TestSweepManagerAdaptiveDispatch(unittest.TestCase):
+    """Tests for SweepManager adaptive strategy dispatch."""
+
+    def setUp(self):
+        """Create test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.josh_path = Path(self.temp_dir) / "test.josh"
+        self.josh_path.write_text("start simulation Main\nend simulation\n")
+
+    def tearDown(self):
+        """Clean up temp directory."""
+        import shutil
+
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_run_detects_cartesian_strategy(self):
+        """run() should use run_sweep for CartesianStrategy."""
+        from joshpy.strategies import CartesianStrategy
+
+        config = JobConfig(
+            template_string="# config",
+            source_path=self.josh_path,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])],
+                strategy=CartesianStrategy(),
+            ),
+        )
+
+        with patch("joshpy.sweep.run_sweep") as mock_run_sweep:
+            from joshpy.jobs import SweepResult
+
+            mock_run_sweep.return_value = SweepResult(succeeded=2, failed=0)
+
+            manager = SweepManager.from_config(config, registry=":memory:")
+
+            try:
+                result = manager.run(quiet=True)
+                mock_run_sweep.assert_called_once()
+            finally:
+                manager.cleanup()
+                manager.close()
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_run_detects_optuna_strategy(self):
+        """run() should use run_adaptive_sweep for OptunaStrategy."""
+        from joshpy.strategies import OptunaStrategy
+
+        config = JobConfig(
+            template_string="# config",
+            source_path=self.josh_path,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])],
+                strategy=OptunaStrategy(n_trials=5, objective="math:sin"),
+            ),
+        )
+
+        with patch("joshpy.strategies.run_adaptive_sweep") as mock_run_adaptive:
+            from joshpy.jobs import AdaptiveSweepResult
+
+            mock_run_adaptive.return_value = AdaptiveSweepResult(
+                succeeded=3, failed=0, best_value=0.5
+            )
+
+            manager = SweepManager.from_config(config, registry=":memory:")
+
+            try:
+                result = manager.run(quiet=True)
+                mock_run_adaptive.assert_called_once()
+            finally:
+                manager.cleanup()
+                manager.close()
+
+    def test_run_dry_run_with_adaptive_prints_message(self):
+        """run(dry_run=True) should print message for adaptive without executing."""
+        from joshpy.strategies import OptunaStrategy
+        from joshpy.jobs import SweepResult
+
+        config = JobConfig(
+            template_string="# config",
+            source_path=self.josh_path,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])],
+                strategy=OptunaStrategy(n_trials=10, objective="math:sin"),
+            ),
+        )
+
+        manager = SweepManager.from_config(config, registry=":memory:")
+
+        try:
+            # Dry run should return empty SweepResult without calling run_adaptive_sweep
+            result = manager.run(dry_run=True, quiet=True)
+            self.assertIsInstance(result, SweepResult)
+            self.assertEqual(len(result), 0)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_run_without_sweep_uses_batch(self):
+        """run() should use run_sweep when no sweep config is present."""
+        config = JobConfig(
+            template_string="# config",
+            source_path=self.josh_path,
+            # No sweep config
+        )
+
+        with patch("joshpy.sweep.run_sweep") as mock_run_sweep:
+            from joshpy.jobs import SweepResult
+
+            mock_run_sweep.return_value = SweepResult(succeeded=1, failed=0)
+
+            manager = SweepManager.from_config(config, registry=":memory:")
+
+            try:
+                result = manager.run(quiet=True)
+                mock_run_sweep.assert_called_once()
+            finally:
+                manager.cleanup()
+                manager.close()
 
 
 if __name__ == "__main__":

@@ -3,11 +3,18 @@
 This module enables Python users to programmatically generate .jshc configuration
 files using Jinja templating and expand parameter sweeps into concrete job combinations.
 
+Supports two types of sweep parameters:
+- **ConfigSweepParameter**: Values injected into Jinja templates (e.g., maxGrowth=10,50,100)
+- **FileSweepParameter**: Different input data files to sweep over (e.g., climate scenarios)
+
 For execution, use the JoshCLI class from joshpy.cli module.
 
 Example usage:
     from pathlib import Path
-    from joshpy.jobs import JobConfig, SweepConfig, SweepParameter, JobExpander, to_run_config
+    from joshpy.jobs import (
+        JobConfig, SweepConfig, ConfigSweepParameter, FileSweepParameter,
+        JobExpander, to_run_config,
+    )
     from joshpy.cli import JoshCLI
 
     config = JobConfig(
@@ -15,10 +22,17 @@ Example usage:
         simulation="ForestSim",
         replicates=3,
         sweep=SweepConfig(
-            parameters=[
-                SweepParameter(name="survivalProbAdult", values=[85, 90, 95]),
-                SweepParameter(name="seedPerTree", values=[500, 1000, 2000]),
-            ]
+            config_parameters=[
+                ConfigSweepParameter(name="survivalProbAdult", values=[85, 90, 95]),
+                ConfigSweepParameter(name="seedPerTree", values=[500, 1000, 2000]),
+            ],
+            file_parameters=[
+                FileSweepParameter(name="climate", paths=[
+                    "data/rcp26.jshd",
+                    "data/rcp45.jshd",
+                    "data/rcp85.jshd",
+                ]),
+            ],
         ),
     )
 
@@ -30,6 +44,7 @@ Example usage:
         run_config = to_run_config(job)
         result = cli.run(run_config)
         print(f"[{'OK' if result.success else 'FAIL'}] {job.parameters}")
+
 """
 
 from __future__ import annotations
@@ -46,6 +61,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from joshpy.cli import JoshCLI, RunConfig, RunRemoteConfig
     from joshpy.registry import RunRegistry
+    from joshpy.strategies import SweepStrategy
 
 try:
     import numpy as np
@@ -223,9 +239,11 @@ def _normalize_values(values: Any) -> list[Any]:
 
 
 @dataclass
-class SweepParameter:
-    """A parameter to sweep over in the job expansion.
+class ConfigSweepParameter:
+    """A configuration parameter to sweep over in job expansion.
 
+    Sweeps over different values for a Jinja template variable.
+    
     Accepts values as:
     - Explicit list: [85, 90, 95]
     - NumPy array: np.arange(80, 99, 2)
@@ -265,7 +283,7 @@ class SweepParameter:
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SweepParameter:
+    def from_dict(cls, data: dict[str, Any]) -> ConfigSweepParameter:
         """Create from dict (YAML/JSON deserialization)."""
         name = data["name"]
         if "range" in data:
@@ -273,54 +291,224 @@ class SweepParameter:
         return cls(name=name, values=data.get("values", []))
 
 
+
+
+
+@dataclass
+class FileSweepParameter:
+    """A file parameter to sweep over in job expansion.
+
+    Sweeps over different file paths for a given file_mapping key.
+    Labels are derived from filename stems (e.g., "rcp45.jshd" → "rcp45").
+
+    Attributes:
+        name: Key in file_mappings (e.g., "climate").
+        paths: List of file paths to sweep over.
+    """
+
+    name: str
+    paths: list[Path] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Convert strings to Paths and validate for label collisions."""
+        # Convert strings to Paths
+        self.paths = [Path(p) if isinstance(p, str) else p for p in self.paths]
+
+        # Check for label collisions (stems must be unique)
+        stems = [p.stem for p in self.paths]
+        if len(stems) != len(set(stems)):
+            seen = set()
+            duplicates = []
+            for stem in stems:
+                if stem in seen:
+                    duplicates.append(stem)
+                seen.add(stem)
+            raise ValueError(
+                f"FileSweepParameter '{self.name}' has duplicate stems: {duplicates}. "
+                "File names must be unique for unambiguous labeling."
+            )
+
+    @property
+    def labels(self) -> list[str]:
+        """Return labels for custom tags (filename stems)."""
+        return [p.stem for p in self.paths]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for YAML/JSON serialization."""
+        return {"name": self.name, "paths": [str(p) for p in self.paths]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FileSweepParameter:
+        """Create from dict (YAML/JSON deserialization)."""
+        return cls(name=data["name"], paths=data.get("paths", []))
+
+
 @dataclass
 class SweepConfig:
     """Configuration for parameter sweep expansion.
 
+    Supports both config parameters (injected into Jinja templates) and
+    file parameters (different input data files to sweep over).
+
     Attributes:
-        parameters: List of parameters to sweep over.
+        config_parameters: Parameters injected into Jinja templates.
+        file_parameters: File paths to sweep over in file_mappings.
+        strategy: Expansion strategy (default: CartesianStrategy).
+        parameters: Deprecated alias for config_parameters (backward compat).
+    
+    Examples:
+        >>> # Default cartesian (grid search) strategy
+        >>> config = SweepConfig(
+        ...     config_parameters=[
+        ...         ConfigSweepParameter(name="a", values=[1, 2, 3]),
+        ...     ],
+        ... )
+
+        >>> # With explicit strategy
+        >>> from joshpy.strategies import OptunaStrategy
+        >>> config = SweepConfig(
+        ...     config_parameters=[
+        ...         ConfigSweepParameter(name="a", values=[1, 2, 3]),
+        ...     ],
+        ...     strategy=OptunaStrategy(n_trials=50),
+        ... )
     """
 
-    parameters: list[SweepParameter] = field(default_factory=list)
+    config_parameters: list[ConfigSweepParameter] = field(default_factory=list)
+    file_parameters: list[FileSweepParameter] = field(default_factory=list)
+    strategy: SweepStrategy | None = None  # None means CartesianStrategy (lazy default)
+
+    # Backward compatibility - used only during __init__ if old-style 'parameters' is passed
+    _legacy_parameters: list[ConfigSweepParameter] | None = field(
+        default=None, repr=False, init=False
+    )
+
+    def __post_init__(self) -> None:
+        """Set default strategy if not provided."""
+        if self.strategy is None:
+            # Import here to avoid circular imports
+            from joshpy.strategies import CartesianStrategy
+
+            self.strategy = CartesianStrategy()
+
+    @property
+    def parameters(self) -> list[ConfigSweepParameter]:
+        """Deprecated: Use config_parameters instead.
+        
+        Returns config_parameters for backward compatibility.
+        """
+        return self.config_parameters
 
     def expand(self) -> list[dict[str, Any]]:
-        """Generate cartesian product of all parameter values.
+        """Generate parameter combinations using the configured strategy.
 
         Returns a List of dicts, each representing one parameter combination.
-        For example, with parameters A=[1,2] and B=[x,y], returns:
-            [{"A": 1, "B": "x"}, {"A": 1, "B": "y"},
-             {"A": 2, "B": "x"}, {"A": 2, "B": "y"}]
+        
+        For config parameters: {"param_name": value}
+        For file parameters: {"file_name": {"path": Path, "label": str}}
+
+        For example, with config param A=[1,2] and file param F=[a.jshd, b.jshd]:
+            [{"A": 1, "F": {"path": Path("a.jshd"), "label": "a"}},
+             {"A": 1, "F": {"path": Path("b.jshd"), "label": "b"}},
+             {"A": 2, "F": {"path": Path("a.jshd"), "label": "a"}},
+             {"A": 2, "F": {"path": Path("b.jshd"), "label": "b"}}]
+
+        Raises:
+            RuntimeError: If strategy is adaptive (use run_adaptive_sweep() instead).
         """
-        if not self.parameters:
-            return [{}]
+        # Delegate to strategy
+        assert self.strategy is not None  # Set in __post_init__
+        return list(self.strategy.expand(self.config_parameters, self.file_parameters))
 
-        names = [p.name for p in self.parameters]
-        value_lists = [p.values for p in self.parameters]
-
-        combinations = []
-        for combo in itertools.product(*value_lists):
-            combinations.append(dict(zip(names, combo)))
-
-        return combinations
+    def __bool__(self) -> bool:
+        """Return True if any parameters are defined.
+        
+        This is needed because __len__ raises for adaptive strategies,
+        and Python falls back to __len__ for truthiness if __bool__ is not defined.
+        """
+        return bool(self.config_parameters or self.file_parameters)
 
     def __len__(self) -> int:
-        """Return total number of parameter combinations."""
-        if not self.parameters:
+        """Return total number of parameter combinations.
+        
+        Raises:
+            ValueError: If strategy is adaptive (length unknown upfront).
+        """
+        assert self.strategy is not None  # Set in __post_init__
+        if self.strategy.is_adaptive:
+            raise ValueError(
+                "Cannot determine length for adaptive strategies. "
+                f"Use strategy.n_trials for {type(self.strategy).__name__}."
+            )
+        if not self.config_parameters and not self.file_parameters:
             return 1
         count = 1
-        for p in self.parameters:
+        for p in self.config_parameters:
             count *= len(p.values)
+        for fp in self.file_parameters:
+            count *= len(fp.paths)
         return count
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization."""
-        return {"parameters": [p.to_dict() for p in self.parameters]}
+        result: dict[str, Any] = {}
+        
+        if self.config_parameters:
+            result["config_parameters"] = [p.to_dict() for p in self.config_parameters]
+        if self.file_parameters:
+            result["file_parameters"] = [fp.to_dict() for fp in self.file_parameters]
+        
+        # Serialize strategy (skip if default CartesianStrategy)
+        if self.strategy is not None:
+            from joshpy.strategies import CartesianStrategy
+
+            if not isinstance(self.strategy, CartesianStrategy):
+                result["strategy"] = self.strategy.to_dict()
+        
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SweepConfig:
-        """Create from dict."""
-        parameters = [SweepParameter.from_dict(p) for p in data.get("parameters", [])]
-        return cls(parameters=parameters)
+        """Create from dict.
+        
+        Supports both new-style (config_parameters, file_parameters) and
+        legacy (parameters) formats.
+        """
+        config_params: list[ConfigSweepParameter] = []
+        file_params: list[FileSweepParameter] = []
+        strategy: SweepStrategy | None = None
+        
+        # New-style: config_parameters
+        if "config_parameters" in data:
+            config_params = [
+                ConfigSweepParameter.from_dict(p) 
+                for p in data["config_parameters"]
+            ]
+        # Legacy: parameters (maps to config_parameters)
+        elif "parameters" in data:
+            config_params = [
+                ConfigSweepParameter.from_dict(p) 
+                for p in data["parameters"]
+            ]
+        
+        # New-style: file_parameters
+        if "file_parameters" in data:
+            file_params = [
+                FileSweepParameter.from_dict(fp) 
+                for fp in data["file_parameters"]
+            ]
+        
+        # Strategy
+        if "strategy" in data:
+            from joshpy.strategies import strategy_from_dict
+
+            strategy = strategy_from_dict(data["strategy"])
+        
+        return cls(
+            config_parameters=config_params,
+            file_parameters=file_params,
+            strategy=strategy,
+        )
 
 
 @dataclass
@@ -624,26 +812,49 @@ class JobExpander:
         # Generate jobs
         jobs: list[ExpandedJob] = []
         for i, params in enumerate(combinations):
-            # Render template
-            rendered = template.render(**params)
+            # Separate config params from file params
+            config_params: dict[str, Any] = {}
+            # Start with base file_mappings (preserves unswept defaults)
+            file_mappings = config.file_mappings.copy()
+            custom_tags: dict[str, str] = {}
+
+            for key, value in params.items():
+                if isinstance(value, dict) and "path" in value and "label" in value:
+                    # File parameter - override the mapping for this key
+                    file_path = value["path"]
+                    file_label = value["label"]
+                    file_mappings[key] = file_path
+
+                    # Record BOTH stem label and full filename for traceability
+                    # Stem is primary (used for grouping), filename for debugging
+                    custom_tags[key] = file_label
+                    if hasattr(file_path, "name"):
+                        custom_tags[f"{key}_file"] = file_path.name
+                    else:
+                        custom_tags[f"{key}_file"] = str(file_path).split("/")[-1]
+                else:
+                    # Config parameter
+                    config_params[key] = value
+                    custom_tags[str(key)] = str(value)
+
+            # Render template with config params only
+            rendered = template.render(**config_params)
 
             # Compute run_hash (includes josh + config + file_mappings)
             run_hash = _compute_run_hash(
                 josh_path=config.source_path,
                 config_content=rendered,
-                file_mappings=config.file_mappings if config.file_mappings else None,
+                file_mappings=file_mappings if file_mappings else None,
             )
+
+            # Add run_hash as a custom tag
+            custom_tags["run_hash"] = run_hash
 
             # Write config file
             config_subdir = output_dir / f"job_{i:04d}_{run_hash}"
             config_subdir.mkdir(parents=True, exist_ok=True)
             config_path = config_subdir / config_name
             config_path.write_text(rendered)
-
-            # Build custom tags from parameters
-            custom_tags = {str(k): str(v) for k, v in params.items()}
-            # Add run_hash as a custom tag
-            custom_tags["run_hash"] = run_hash
 
             # Extract logical config name (without .jshc extension) for --data flag
             logical_name = config_name.removesuffix(".jshc")
@@ -654,11 +865,11 @@ class JobExpander:
                 config_path=config_path,
                 config_name=logical_name,
                 run_hash=run_hash,
-                parameters=params,
+                parameters=config_params,  # Only config params here
                 simulation=config.simulation,
                 replicates=config.replicates,
                 source_path=config.source_path,
-                file_mappings=config.file_mappings.copy(),
+                file_mappings=file_mappings,
                 custom_tags=custom_tags,
                 upload_source_path=config.upload_source_path,
                 upload_config_path=config.upload_config_path,
@@ -798,6 +1009,148 @@ class SweepResult:
     job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
     succeeded: int = 0
     failed: int = 0
+
+    def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
+        """Iterate over (job, result) tuples."""
+        return iter(self.job_results)
+
+    def __len__(self) -> int:
+        """Return total number of job results."""
+        return len(self.job_results)
+
+
+@dataclass
+class AdaptiveSweepResult:
+    """Results from running an adaptive (Optuna) sweep.
+
+    Extends SweepResult with Optuna-specific fields for tracking the
+    optimization process and accessing the best results.
+
+    Attributes:
+        job_results: List of (ExpandedJob, CLIResult) tuples.
+        succeeded: Number of successful trials.
+        failed: Number of failed trials.
+        study: The Optuna study object (for advanced analysis).
+        best_params: Parameters that achieved the best objective value.
+        best_value: Best objective value found.
+
+    Examples:
+        >>> result = run_adaptive_sweep(cli, config, registry=registry, ...)
+        >>> print(f"Best params: {result.best_params}")
+        >>> print(f"Best value: {result.best_value}")
+        >>>
+        >>> # Access trial history
+        >>> for metric in result.trial_metrics:
+        ...     print(metric)
+        >>>
+        >>> # Get summary statistics
+        >>> summary = result.get_trial_summary()
+        >>> print(f"Mean: {summary['mean_value']}")
+    """
+
+    job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
+    succeeded: int = 0
+    failed: int = 0
+
+    # Optuna-specific fields
+    study: Any = None  # optuna.Study
+    best_params: dict[str, Any] | None = None
+    best_value: float | None = None
+
+    @property
+    def is_adaptive(self) -> bool:
+        """True - this result came from an adaptive strategy."""
+        return True
+
+    @property
+    def total_trials(self) -> int:
+        """Total number of trials run."""
+        if self.study is not None:
+            return len(self.study.trials)
+        return len(self.job_results)
+
+    @property
+    def trial_metrics(self) -> list[float]:
+        """List of objective values per trial.
+
+        Returns values for completed trials only (excludes failed/inf trials).
+
+        Returns:
+            List of objective values in trial order.
+        """
+        if self.study is None:
+            return []
+        return [
+            t.value
+            for t in self.study.trials
+            if t.value is not None and t.value != float("inf")
+        ]
+
+    def get_trial_summary(self) -> dict[str, Any]:
+        """Get summary statistics for the adaptive sweep.
+
+        Returns:
+            Dict with keys:
+            - n_trials: Total trials
+            - n_completed: Trials with valid metrics
+            - n_failed: Trials that failed or returned inf
+            - best_value: Best objective value
+            - best_params: Parameters that achieved best value
+            - mean_value: Mean of completed trial values
+            - std_value: Std deviation of completed trial values
+
+        Examples:
+            >>> summary = result.get_trial_summary()
+            >>> print(f"Completed: {summary['n_completed']}/{summary['n_trials']}")
+            >>> print(f"Best: {summary['best_value']}")
+        """
+        if self.study is None:
+            return {}
+
+        values = [
+            t.value
+            for t in self.study.trials
+            if t.value is not None and t.value != float("inf")
+        ]
+
+        mean_value = sum(values) / len(values) if values else None
+        std_value = None
+        if len(values) > 1 and mean_value is not None:
+            variance = sum((v - mean_value) ** 2 for v in values) / len(values)
+            std_value = variance**0.5
+
+        return {
+            "n_trials": len(self.study.trials),
+            "n_completed": len(values),
+            "n_failed": len(self.study.trials) - len(values),
+            "best_value": self.best_value,
+            "best_params": self.best_params,
+            "mean_value": mean_value,
+            "std_value": std_value,
+        }
+
+    def get_best_job(self) -> ExpandedJob | None:
+        """Get the job with best objective value.
+
+        Returns:
+            ExpandedJob with best metric, or None if no successful trials.
+
+        Examples:
+            >>> best_job = result.get_best_job()
+            >>> if best_job:
+            ...     print(f"Best config: {best_job.parameters}")
+        """
+        if self.study is None or self.study.best_trial is None:
+            return None
+
+        best_hash = self.study.best_trial.user_attrs.get("run_hash")
+        if not best_hash:
+            return None
+
+        for job, _ in self.job_results:
+            if job.run_hash == best_hash:
+                return job
+        return None
 
     def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
         """Iterate over (job, result) tuples."""

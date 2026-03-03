@@ -1,0 +1,92 @@
+# Grass-shrub fire dynamics simulation for adaptive optimization demo
+# Demonstrates balancing feedback for stability optimization
+#
+# This model creates potential for stable equilibria that depend on fire damage 
+# parameters. We can optimize to find parameters that minimize population 
+# variance (stability).
+#
+# Balancing feedback:
+# - High cover -> more fires -> reduced cover
+# - Low cover -> fewer fires -> growth recovers
+
+start simulation Main
+
+  # Small 4x4 grid for fast execution (16 patches)
+  # 5km cells with bounding box sized for 4x4 layout
+  grid.size = 5000 m
+  grid.low = 33.8 degrees latitude, -116.0 degrees longitude
+  grid.high = 33.98 degrees latitude, -115.78 degrees longitude
+  grid.patch = "Default"
+
+  # 100 steps to reach equilibrium and observe long-term stability
+  steps.low = 0 count
+  steps.high = 100 count
+
+  # Output exports to files (run_hash passed as custom-tag by joshpy)
+  exportFiles.patch = "file:///tmp/adaptive_fire_{run_hash}_{replicate}.csv"
+
+  # Fire trigger parameters (fixed)
+  fire.trigger.coverThreshold = 30 percent
+  fire.trigger.highProb = 8 percent
+  fire.trigger.typicalProb = 2 percent
+  
+  # Fire damage parameters (from config - swept by Optuna)
+  fire.damage.grass = config adaptive_config.grassDamage
+  fire.damage.shrub = config adaptive_config.shrubDamage
+
+end simulation
+
+start patch Default
+
+  # Initialize vegetation cover randomly (0-30% each type)
+  grassCover.init = sample uniform from 0 percent to 30 percent
+  shrubCover.init = sample uniform from 0 percent to 30 percent
+  
+  # Total vegetation determines fire risk
+  totalCover.step = prior.grassCover + prior.shrubCover
+  
+  # Fire probability depends on total cover
+  isHighCover.step = totalCover > meta.fire.trigger.coverThreshold
+  fireProbability.step = meta.fire.trigger.highProb if isHighCover else meta.fire.trigger.typicalProb
+  
+  # Stochastic fire occurrence
+  fireRoll.step = sample uniform from 0 percent to 100 percent
+  onFire.step = fireRoll < fireProbability
+
+  # Fire damage with some variability
+  damageGrass.step = sample normal with mean of meta.fire.damage.grass std of 5 percent
+  damageShrub.step = sample normal with mean of meta.fire.damage.shrub std of 5 percent
+
+  # Constant growth rates
+  growthGrass.step = 4 percent
+  growthShrub.step = 3 percent
+
+  # Apply growth or fire damage
+  grassCover.step = {
+    const afterFire = prior.grassCover * (100 percent - damageGrass)
+    const afterGrowth = prior.grassCover + growthGrass
+    const newValue = afterFire if onFire else afterGrowth
+    return limit newValue to [0 percent, 100 percent]
+  }
+
+  shrubCover.step = {
+    const afterFire = prior.shrubCover * (100 percent - damageShrub)
+    const afterGrowth = prior.shrubCover + growthShrub
+    const newValue = afterFire if onFire else afterGrowth
+    return limit newValue to [0 percent, 100 percent]
+  }
+
+  # Export patch-level vegetation cover
+  export.grassCover.step = grassCover
+  export.shrubCover.step = shrubCover
+  export.totalCover.step = totalCover
+  export.onFire.step = onFire
+
+end patch
+
+start unit year
+
+  alias years
+  alias yr
+
+end unit

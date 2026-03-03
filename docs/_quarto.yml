@@ -19,6 +19,10 @@ website:
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
           - text: "---"
+          - text: "Optimization"
+          - text: "Adaptive Sweeps"
+            href: tutorials/adaptive-sweep.qmd
+          - text: "---"
           - text: "Analysis"
           - text: "Analysis & Visualization"
             href: tutorials/analysis.qmd
@@ -49,6 +53,9 @@ website:
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
+        - section: "Optimization"
+          contents:
+            - tutorials/adaptive-sweep.qmd
         - section: "Analysis"
           contents:
             - tutorials/analysis.qmd
@@ -72,12 +79,22 @@ website:
           contents:
             - reference/jobs.JobConfig.qmd
             - reference/jobs.SweepConfig.qmd
-            - reference/jobs.SweepParameter.qmd
+            - reference/jobs.ConfigSweepParameter.qmd
+            - reference/jobs.FileSweepParameter.qmd
             - reference/jobs.JobExpander.qmd
             - reference/jobs.JobSet.qmd
             - reference/jobs.ExpandedJob.qmd
             - reference/jobs.run_sweep.qmd
             - reference/jobs.SweepResult.qmd
+            - reference/jobs.AdaptiveSweepResult.qmd
+        - section: "Strategies"
+          contents:
+            - reference/strategies.SweepStrategy.qmd
+            - reference/strategies.CartesianStrategy.qmd
+            - reference/strategies.OptunaStrategy.qmd
+            - reference/strategies.strategy_from_dict.qmd
+            - reference/strategies.run_adaptive_sweep.qmd
+            - reference/strategies.sample_params_from_trial.qmd
         - section: "Registry"
           contents:
             - reference/registry.RunRegistry.qmd
@@ -96,6 +113,9 @@ website:
             - reference/sweep.SweepManager.qmd
             - reference/sweep.SweepManagerBuilder.qmd
             - reference/sweep.recover_sweep_results.qmd
+            - reference/sweep.load_job_results.qmd
+            - reference/sweep.LoadConfig.qmd
+            - reference/sweep.ResultLoadError.qmd
         - section: "JAR Management"
           contents:
             - reference/jar.JarMode.qmd
@@ -152,12 +172,24 @@ quartodoc:
       contents:
         - jobs.JobConfig
         - jobs.SweepConfig
-        - jobs.SweepParameter
+        - jobs.ConfigSweepParameter
+        - jobs.FileSweepParameter
         - jobs.JobExpander
         - jobs.JobSet
         - jobs.ExpandedJob
         - jobs.run_sweep
         - jobs.SweepResult
+        - jobs.AdaptiveSweepResult
+    
+    - title: Strategies Module
+      desc: Sweep expansion strategies for parameter optimization
+      contents:
+        - strategies.SweepStrategy
+        - strategies.CartesianStrategy
+        - strategies.OptunaStrategy
+        - strategies.strategy_from_dict
+        - strategies.run_adaptive_sweep
+        - strategies.sample_params_from_trial
     
     - title: Registry Module
       desc: DuckDB-backed experiment tracking
@@ -186,6 +218,9 @@ quartodoc:
         - sweep.SweepManager
         - sweep.SweepManagerBuilder
         - sweep.recover_sweep_results
+        - sweep.load_job_results
+        - sweep.LoadConfig
+        - sweep.ResultLoadError
     
     - title: JAR Module
       desc: Josh JAR file management

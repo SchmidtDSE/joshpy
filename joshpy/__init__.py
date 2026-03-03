@@ -37,16 +37,29 @@ from joshpy.cli import (
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
-        SweepParameter,
+        ConfigSweepParameter,
+        FileSweepParameter,
         SweepConfig,
         JobConfig,
         ExpandedJob,
         JobSet,
         JobExpander,
         SweepResult,
+        AdaptiveSweepResult,
         to_run_config,
         to_run_remote_config,
         run_sweep,
+    )
+    from joshpy.strategies import (
+        SweepStrategy,
+        CartesianStrategy,
+        OptunaStrategy,
+        ObjectiveFn,
+        strategy_from_dict,
+        sample_params_from_trial,
+        run_adaptive_sweep,
+        SweepExecutionError,
+        cv_objective,
     )
     HAS_JOBS = True
 except ImportError:
@@ -78,6 +91,9 @@ try:
         SweepManager,
         SweepManagerBuilder,
         recover_sweep_results,
+        load_job_results,
+        LoadConfig,
+        ResultLoadError,
     )
     HAS_SWEEP = True
 except ImportError:
@@ -104,17 +120,29 @@ __all__ = [
     "ExportFileInfo",
     "ExportPaths",
     # Jobs (optional)
-    "SweepParameter",
+    "ConfigSweepParameter",
+    "FileSweepParameter",
     "SweepConfig",
     "JobConfig",
     "ExpandedJob",
     "JobSet",
     "JobExpander",
     "SweepResult",
+    "AdaptiveSweepResult",
     "to_run_config",
     "to_run_remote_config",
     "run_sweep",
     "HAS_JOBS",
+    # Strategies (optional, part of jobs)
+    "SweepStrategy",
+    "CartesianStrategy",
+    "OptunaStrategy",
+    "ObjectiveFn",
+    "strategy_from_dict",
+    "sample_params_from_trial",
+    "run_adaptive_sweep",
+    "SweepExecutionError",
+    "cv_objective",
     # Registry (optional)
     "RunRegistry",
     "RegistryCallback",
@@ -131,5 +159,8 @@ __all__ = [
     "SweepManager",
     "SweepManagerBuilder",
     "recover_sweep_results",
+    "load_job_results",
+    "LoadConfig",
+    "ResultLoadError",
     "HAS_SWEEP",
 ]

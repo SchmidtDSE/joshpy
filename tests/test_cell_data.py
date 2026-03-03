@@ -428,3 +428,236 @@ class TestDiagnosticQueries:
 
         assert isinstance(df, pd.DataFrame)
         assert len(df) == 0
+
+
+class TestGetReplicateCv:
+    """Tests for get_replicate_cv method."""
+
+    def setup_method(self):
+        """Set up test data with multiple replicates and steps."""
+        skip_if_no_pandas()
+        self.registry = RunRegistry(":memory:")
+        self.loader = CellDataLoader(self.registry)
+        self.queries = DiagnosticQueries(self.registry)
+
+        # Create a session and config
+        session_id = self.registry.create_session(
+            _make_config(),
+            experiment_name="test",
+        )
+        self.registry.register_run(
+            session_id=session_id,
+            run_hash="cv_test",
+            josh_path="test.josh",
+            config_content="test config",
+            file_mappings=None,
+            parameters={"maxGrowth": 10},
+        )
+        self.run_id = self.registry.start_run("cv_test")
+
+    def _load_cv_test_data(self, data_rows: list[tuple]):
+        """Helper to load test CSV data.
+
+        Args:
+            data_rows: List of (step, replicate, value) tuples
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write("step,replicate,position.longitude,position.latitude,cover\n")
+            for step, rep, val in data_rows:
+                f.write(f"{step},{rep},-116.0,34.0,{val}\n")
+            csv_path = Path(f.name)
+
+        try:
+            self.loader.load_csv(csv_path, self.run_id, "cv_test")
+        finally:
+            csv_path.unlink()
+
+    def test_computes_per_replicate_cv(self):
+        """Test that CV is computed correctly per replicate."""
+        skip_if_no_pandas()
+
+        # Create data with known CV:
+        # Replicate 0: values [10, 10, 10] -> CV = 0
+        # Replicate 1: values [10, 20, 30] -> mean=20, std=10, CV=0.5
+        data = [
+            (0, 0, 10), (1, 0, 10), (2, 0, 10),  # Rep 0: constant
+            (0, 1, 10), (1, 1, 20), (2, 1, 30),  # Rep 1: varying
+        ]
+        self._load_cv_test_data(data)
+
+        result = self.queries.get_replicate_cv(
+            variable="cover",
+            run_hash="cv_test",
+            burn_in=0,
+        )
+
+        assert result["n_replicates"] == 2
+        assert result["n_timesteps"] == 3
+        assert len(result["replicate_cvs"]) == 2
+        assert result["extinct_replicates"] == []
+
+        # Check per-replicate CVs
+        # Rep 0 should have CV = 0 (constant values)
+        assert abs(result["replicate_cvs"][0]) < 0.001
+
+        # Rep 1 should have CV = std/mean = 10/20 = 0.5
+        assert abs(result["replicate_cvs"][1] - 0.5) < 0.01
+
+        # Mean CV should be (0 + 0.5) / 2 = 0.25
+        assert abs(result["mean_cv"] - 0.25) < 0.01
+
+    def test_burn_in_filters_steps(self):
+        """Test that burn_in correctly filters early timesteps."""
+        skip_if_no_pandas()
+
+        # Create data where early steps are different from later steps
+        # Steps 0-1 have different values, steps 2-4 are constant
+        data = [
+            (0, 0, 100), (1, 0, 50),  # Burn-in period (variable)
+            (2, 0, 10), (3, 0, 10), (4, 0, 10),  # Post burn-in (constant)
+        ]
+        self._load_cv_test_data(data)
+
+        # With burn_in=2, only steps 2,3,4 should be used -> CV should be 0
+        result = self.queries.get_replicate_cv(
+            variable="cover",
+            run_hash="cv_test",
+            burn_in=2,
+        )
+
+        assert result["n_timesteps"] == 3  # Steps 2, 3, 4
+        assert abs(result["mean_cv"]) < 0.001  # Constant values -> CV = 0
+
+    def test_returns_inf_for_extinction(self):
+        """Test that extinction returns inf and warns."""
+        skip_if_no_pandas()
+        import warnings
+
+        # Create data where mean is below extinction threshold
+        data = [
+            (0, 0, 0.001), (1, 0, 0.002), (2, 0, 0.001),  # Near-zero values
+        ]
+        self._load_cv_test_data(data)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = self.queries.get_replicate_cv(
+                variable="cover",
+                run_hash="cv_test",
+                burn_in=0,
+                extinction_threshold=0.01,
+            )
+
+            # Should have extinction warning
+            extinction_warnings = [x for x in w if "Extinction" in str(x.message)]
+            assert len(extinction_warnings) == 1
+
+        assert result["mean_cv"] == float("inf")
+        assert result["extinct_replicates"] == [0]
+        assert result["replicate_cvs"] == [float("inf")]
+
+    def test_partial_extinction_returns_inf(self):
+        """Test that if ANY replicate goes extinct, mean_cv is inf."""
+        skip_if_no_pandas()
+        import warnings
+
+        # Replicate 0: healthy values
+        # Replicate 1: extinction (near-zero)
+        data = [
+            (0, 0, 10), (1, 0, 10), (2, 0, 10),  # Rep 0: healthy
+            (0, 1, 0.001), (1, 1, 0.001), (2, 1, 0.001),  # Rep 1: extinct
+        ]
+        self._load_cv_test_data(data)
+
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            result = self.queries.get_replicate_cv(
+                variable="cover",
+                run_hash="cv_test",
+                burn_in=0,
+                extinction_threshold=0.01,
+            )
+
+        # Even though rep 0 is healthy, mean_cv should be inf
+        assert result["mean_cv"] == float("inf")
+        assert 1 in result["extinct_replicates"]
+        assert 0 not in result["extinct_replicates"]
+
+    def test_warns_on_few_timesteps(self):
+        """Test warning when n_timesteps < MIN_TIMESTEPS_FOR_CV."""
+        skip_if_no_pandas()
+        import warnings
+        from joshpy.cell_data import MIN_TIMESTEPS_FOR_CV
+
+        # Create data with only 3 timesteps (less than MIN_TIMESTEPS_FOR_CV=10)
+        data = [(0, 0, 10), (1, 0, 10), (2, 0, 10)]
+        self._load_cv_test_data(data)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = self.queries.get_replicate_cv(
+                variable="cover",
+                run_hash="cv_test",
+                burn_in=0,
+            )
+
+            # Should warn about few timesteps
+            timestep_warnings = [x for x in w if "timesteps" in str(x.message).lower()]
+            assert len(timestep_warnings) == 1, f"Expected warning about timesteps, got: {[str(x.message) for x in w]}"
+
+        assert result["n_timesteps"] == 3
+        assert result["n_timesteps"] < MIN_TIMESTEPS_FOR_CV
+
+    def test_empty_data_returns_inf(self):
+        """Test that empty/no data returns inf with empty lists."""
+        skip_if_no_pandas()
+
+        # Don't load any data, just query
+        result = self.queries.get_replicate_cv(
+            variable="cover",
+            run_hash="nonexistent",
+            burn_in=0,
+        )
+
+        assert result["mean_cv"] == float("inf")
+        assert result["replicate_cvs"] == []
+        assert result["n_replicates"] == 0
+        assert result["n_timesteps"] == 0
+        assert result["extinct_replicates"] == []
+
+    def test_custom_extinction_threshold(self):
+        """Test that custom extinction_threshold is respected."""
+        skip_if_no_pandas()
+        import warnings
+
+        # Values between 0.01 and 0.1
+        data = [(0, 0, 0.05), (1, 0, 0.05), (2, 0, 0.05)]
+        self._load_cv_test_data(data)
+
+        # With default threshold 0.01, this should NOT be extinction
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result_default = self.queries.get_replicate_cv(
+                variable="cover",
+                run_hash="cv_test",
+                burn_in=0,
+                extinction_threshold=0.01,
+            )
+        assert result_default["mean_cv"] != float("inf")
+        assert result_default["extinct_replicates"] == []
+
+        # Reload data for second test
+        self.registry.conn.execute("DELETE FROM cell_data WHERE run_hash = 'cv_test'")
+        self._load_cv_test_data(data)
+
+        # With threshold 0.1, this SHOULD be extinction
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result_strict = self.queries.get_replicate_cv(
+                variable="cover",
+                run_hash="cv_test",
+                burn_in=0,
+                extinction_threshold=0.1,
+            )
+        assert result_strict["mean_cv"] == float("inf")
+        assert result_strict["extinct_replicates"] == [0]
