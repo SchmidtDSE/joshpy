@@ -66,6 +66,7 @@ abstractions:
 from pathlib import Path
 
 from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
 
 # Paths to source files (optimized for fast tutorial builds)
 SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
@@ -83,8 +84,10 @@ config = JobConfig(
         config_parameters=[
             # maxGrowth is swept - creates one job per value
             ConfigSweepParameter(name="maxGrowth", values=MAX_GROWTH_VALUES),
-            # Note: daysPerYear is a static value in the template (not swept)
-        ]
+        ],
+        # CartesianStrategy runs all parameter combinations (the default).
+        # For adaptive optimization, see OptunaStrategy in the Adaptive Sweep tutorial.
+        strategy=CartesianStrategy(),
     ),
 )
 ```
