@@ -41,8 +41,8 @@ default = { solve-group = "default" }
 dev = { features = ["dev"], solve-group = "default" }
 
 [tasks]
-install = "pip install -e '.[all]' --quiet"
-install-dev = "pip install -e '.[all,dev]' --quiet"
+install = "pip install -e '.[full]' --quiet"
+install-dev = "pip install -e '.[dev]' --quiet"
 test = { cmd = "pytest tests/ -v", depends-on = ["install-dev"] }
 lint = "ruff check joshpy/"
 typecheck = "mypy joshpy/"
@@ -50,7 +50,7 @@ format = "ruff format joshpy/"
 get-jars = "bash .devcontainer/scripts/on_build/get_fat_jar.sh"
 
 # Documentation tasks
-docs-install = "pip install -e '.[all,docs]' --quiet"
+docs-install = "pip install -e '.[full,docs]' --quiet"
 docs-api = { cmd = "python -m quartodoc build --config docs/_quarto.yml", depends-on = ["docs-install"] }
 docs-build = { cmd = "bash scripts/render-docs.sh", depends-on = ["docs-install"] }
 docs-preview = { cmd = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto preview docs", depends-on = ["docs-build"] }
