@@ -80,7 +80,8 @@ def cv_objective(
         ...     objective=cv_objective("totalCover", burn_in=50),
         ... )
     """
-    def objective(registry: "RunRegistry", run_hash: str, job: "ExpandedJob") -> float:
+
+    def objective(registry: RunRegistry, run_hash: str, job: ExpandedJob) -> float:
         from joshpy.cell_data import DiagnosticQueries
 
         queries = DiagnosticQueries(registry)
@@ -697,7 +698,6 @@ def run_adaptive_sweep(
     from joshpy.cli import InspectExportsConfig
     from joshpy.jobs import (
         AdaptiveSweepResult,
-        ExpandedJob,
         to_run_config,
         to_run_remote_config,
     )
@@ -887,7 +887,7 @@ def run_adaptive_sweep(
         registry.update_session_status(session_id, final_status)
 
         if not quiet:
-            print(f"\nAdaptive sweep complete:")
+            print("\nAdaptive sweep complete:")
             print(f"  Trials: {n_trials} ({succeeded} succeeded, {failed} failed)")
             if study.best_trial is not None:
                 print(f"  Best value: {study.best_value}")
@@ -925,7 +925,6 @@ def _create_single_job(
     Returns:
         ExpandedJob ready for execution.
     """
-    import hashlib
     import tempfile
     from pathlib import Path
 
@@ -962,6 +961,7 @@ def _create_single_job(
             file_path = value["path"]
             file_label = value["label"]
             file_mappings[key] = file_path
+            config_params[key] = file_label
             custom_tags[key] = file_label
             if hasattr(file_path, "name"):
                 custom_tags[f"{key}_file"] = file_path.name
