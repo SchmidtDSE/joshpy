@@ -825,6 +825,9 @@ class JobExpander:
                     file_label = value["label"]
                     file_mappings[key] = file_path
 
+                    # Store label as a config param for queryability in SQL
+                    config_params[key] = file_label
+
                     # Record BOTH stem label and full filename for traceability
                     # Stem is primary (used for grouping), filename for debugging
                     custom_tags[key] = file_label
