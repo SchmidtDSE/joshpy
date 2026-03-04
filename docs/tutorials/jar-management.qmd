@@ -1,0 +1,363 @@
+---
+title: "JAR Management"
+description: "Switching between production, development, and custom JAR files"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Introduction
+
+Josh simulations are executed via a Java JAR file (`joshsim-fat.jar`). joshpy 
+provides flexible JAR management with three modes:
+
+| Mode | Source | Use Case |
+|------|--------|----------|
+| **PROD** | `joshsim.org/dist/main/` | Stable releases for production |
+| **DEV** | `joshsim.org/dist/dev/` | Latest features for testing |
+| **LOCAL** | `jar/joshsim-fat.jar` | Custom builds for development |
+
+This tutorial covers:
+
+1. Quick JAR mode selection with `JarMode`
+2. Fine-grained control with `JarManager`
+3. Version tracking for reproducibility
+4. Integration with `JoshCLI` and `SweepManager`
+
+## Prerequisites
+
+Ensure joshpy is installed:
+
+```bash
+pip install joshpy[all]
+```
+
+Java 17+ must be available on your system.
+
+## Quick Start: JarMode Enum
+
+The simplest way to switch JAR modes is via the `JarMode` enum when creating
+a `JoshCLI` instance:
+
+```{python}
+from pathlib import Path
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+# Production JAR (default) - auto-downloads if missing
+cli_prod = JoshCLI(josh_jar=JarMode.PROD)
+print(f"PROD JAR: {cli_prod.josh_jar}")
+```
+
+```{python}
+# Development JAR - latest features
+cli_dev = JoshCLI(josh_jar=JarMode.DEV)
+print(f"DEV JAR: {cli_dev.josh_jar}")
+```
+
+When you specify `JarMode.PROD` or `JarMode.DEV`, joshpy automatically downloads
+the JAR if it's not already cached. The default behavior (`josh_jar=None`) uses
+`JarMode.PROD`.
+
+### Using a Custom JAR Path
+
+For local or custom JAR builds, pass a `Path` directly:
+
+```{python}
+# Using the JAR in our repository
+custom_path = Path("../../jar/joshsim-fat.jar")
+if custom_path.exists():
+    cli_custom = JoshCLI(josh_jar=custom_path)
+    print(f"Custom JAR: {cli_custom.josh_jar}")
+else:
+    print(f"Custom JAR not found at {custom_path}")
+```
+
+## JarManager for Fine-Grained Control
+
+The `JarManager` class provides more control over JAR downloads and caching.
+
+### Checking JAR Existence
+
+```{python}
+from joshpy.jar import JarManager, JarMode
+
+manager = JarManager()
+
+# Check which JARs are already downloaded
+for mode in [JarMode.PROD, JarMode.DEV]:
+    exists = manager.jar_exists(mode)
+    status = "downloaded" if exists else "not downloaded"
+    print(f"{mode.value}: {status}")
+```
+
+### Downloading JARs
+
+Download a specific JAR with progress tracking:
+
+```{python}
+def progress_callback(downloaded: int, total: int) -> None:
+    """Simple progress indicator."""
+    if total > 0:
+        pct = (downloaded / total) * 100
+        print(f"\rDownloading: {pct:.0f}%", end="", flush=True)
+
+# Download PROD JAR (skips if already exists)
+result = manager.download_jar(
+    JarMode.PROD,
+    force=False,  # Only download if missing
+    progress_callback=progress_callback,
+)
+print(f"\nJAR path: {result.jar_path}")
+print(f"Was updated: {result.was_updated}")
+```
+
+### Force Re-download for Updates
+
+To check for and download the latest version:
+
+```{python}
+# Force re-download to get latest version
+result = manager.download_jar(JarMode.PROD, force=True)
+
+if result.was_updated:
+    print(f"Updated from {result.old_version} to {result.new_version}")
+else:
+    print("Already at latest version")
+```
+
+## Version Tracking for Reproducibility
+
+For reproducible experiments, track which JAR version was used:
+
+```{python}
+from joshpy.jar import JarManager, JarMode
+
+manager = JarManager()
+
+# Get version/hash info for the PROD JAR
+info = manager.get_info(JarMode.PROD)
+
+if info:
+    print(f"Mode: {info.get('mode')}")
+    print(f"Path: {info.get('path')}")
+    print(f"Size: {info.get('size_bytes', 0) / 1024 / 1024:.1f} MB")
+    print(f"SHA256: {info.get('sha256', 'N/A')[:16]}...")
+else:
+    print("JAR info not available")
+```
+
+### Logging JAR Info for Experiments
+
+Save JAR version info alongside experiment results:
+
+```{python}
+import json
+from pathlib import Path
+from joshpy.jar import JarManager, JarMode
+
+manager = JarManager()
+info = manager.get_info(JarMode.PROD)
+
+if info:
+    # Would save to experiment directory in practice
+    print("JAR version info (for logging):")
+    print(json.dumps(info, indent=2, default=str))
+```
+
+## Using with JoshCLI
+
+### Default Behavior
+
+When no JAR is specified, `JoshCLI` uses `JarMode.PROD` with auto-download:
+
+```{python}
+from joshpy.cli import JoshCLI
+
+# Default: PROD with auto-download
+cli = JoshCLI()
+print(f"Default JAR: {cli.josh_jar}")
+```
+
+### Disabling Auto-Download
+
+In CI/CD or offline environments, disable auto-download to fail fast if
+the JAR is missing:
+
+```{python}
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+# Pre-download the JAR first
+manager = JarManager()
+manager.download_jar(JarMode.PROD, force=False)
+
+# Then use with auto_download=False
+cli = JoshCLI(josh_jar=JarMode.PROD, auto_download=False)
+print(f"JAR (no auto-download): {cli.josh_jar}")
+```
+
+### Running a Validation
+
+Let's verify the JAR works by validating a simulation:
+
+```{python}
+from pathlib import Path
+from joshpy.cli import JoshCLI, ValidateConfig
+
+cli = JoshCLI()  # Uses PROD JAR
+
+result = cli.validate(ValidateConfig(
+    script=Path("../../examples/tutorial_sweep.josh"),
+))
+
+if result.success:
+    print("Validation successful!")
+else:
+    print(f"Validation failed: {result.stderr}")
+```
+
+## Using with SweepManager
+
+The `SweepManager` builder accepts JAR configuration via `with_cli()`:
+
+```{python}
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+from joshpy.sweep import SweepManager
+from joshpy.jar import JarMode
+
+# Define a minimal sweep config
+config = JobConfig(
+    template_path=Path("../../examples/templates/sweep_config.jshc.j2"),
+    source_path=Path("../../examples/tutorial_sweep.josh"),
+    simulation="Main",
+    replicates=1,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[50]),
+        ],
+        strategy=CartesianStrategy(),
+    ),
+)
+```
+
+### With JarMode
+
+```{python}
+# Using DEV JAR via JarMode
+manager = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="jar_demo")
+    .with_cli(jar_mode=JarMode.DEV)
+    .build()
+)
+
+print(f"SweepManager using: {manager.cli.josh_jar}")
+manager.cleanup()
+manager.close()
+```
+
+### With Custom Path
+
+```{python}
+# Using explicit JAR path
+jar_path = Path("../../jar/joshsim-fat.jar")
+
+if jar_path.exists():
+    manager = (
+        SweepManager.builder(config)
+        .with_registry(":memory:", experiment_name="jar_demo")
+        .with_cli(jar_path=jar_path)
+        .build()
+    )
+    print(f"SweepManager using custom JAR: {manager.cli.josh_jar}")
+    manager.cleanup()
+    manager.close()
+else:
+    print(f"Custom JAR not found at {jar_path}")
+```
+
+## Best Practices
+
+### When to Use Each Mode
+
+| Scenario | Recommended Mode | Reason |
+|----------|-----------------|--------|
+| Production sweeps | `JarMode.PROD` | Stable, tested releases |
+| Testing new Josh features | `JarMode.DEV` | Latest updates |
+| Custom Josh builds | `Path("...")` | Your modified JAR |
+| CI/CD pipelines | `JarMode.PROD` + version logging | Reproducibility |
+| Offline environments | Pre-download, then `auto_download=False` | No network at runtime |
+
+### CI/CD Pattern
+
+```python
+# In CI setup step: pre-download JAR
+from joshpy.jar import JarManager, JarMode
+
+manager = JarManager(jar_dir=Path("./jar_cache"))
+result = manager.download_jar(JarMode.PROD, force=True)
+
+# Log version for reproducibility
+print(f"Using JAR version: {result.new_version}")
+
+# In test/run steps: use cached JAR without network
+from joshpy.cli import JoshCLI
+
+cli = JoshCLI(
+    josh_jar=Path("./jar_cache/prod/joshsim-fat.jar"),
+    auto_download=False,  # Fail if missing
+)
+```
+
+### Version Pinning
+
+For strict reproducibility, save the JAR hash and verify it:
+
+```python
+import hashlib
+from pathlib import Path
+
+def verify_jar(jar_path: Path, expected_hash: str) -> bool:
+    """Verify JAR matches expected SHA256 hash."""
+    sha256 = hashlib.sha256()
+    with open(jar_path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest() == expected_hash
+
+# In production:
+# expected = "abc123..."  # From your version control
+# if not verify_jar(jar_path, expected):
+#     raise RuntimeError("JAR version mismatch!")
+```
+
+## Summary
+
+This tutorial covered:
+
+1. **JarMode enum**: Quick switching between PROD, DEV, and LOCAL modes
+2. **JarManager**: Fine-grained control over downloads and caching
+3. **Version tracking**: SHA256 hashes and metadata for reproducibility
+4. **JoshCLI integration**: Using JAR modes with the CLI wrapper
+5. **SweepManager integration**: Configuring JAR via builder pattern
+
+**Key Points:**
+
+- Default behavior (`JarMode.PROD`) is suitable for most use cases
+- Use `JarMode.DEV` to test latest Josh features
+- Use explicit `Path` for custom JAR builds
+- Log JAR version info for reproducible experiments
+- Disable auto-download in CI/CD for faster, more predictable builds
+
+**Related Tutorials:**
+
+- [SweepManager Workflow](sweep-manager.qmd) - Using SweepManager for parameter sweeps
+- [Remote Execution](remote-execution.qmd) - Running simulations on Josh Cloud

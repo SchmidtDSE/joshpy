@@ -1,0 +1,398 @@
+---
+title: "Remote Execution"
+description: "Running simulations on Josh Cloud or local servers"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Introduction
+
+joshpy supports two execution modes for Josh simulations:
+
+| Mode | How It Works | Best For |
+|------|--------------|----------|
+| **Local** | `JoshCLI.run()` via subprocess | Development, small sweeps |
+| **Remote** | `JoshCLI.run_remote()` via HTTP | Large sweeps, distributed compute |
+
+This tutorial covers:
+
+1. Local execution (default behavior)
+2. Remote execution with Josh Cloud
+3. Remote execution with a local Josh server
+4. Best practices for API key management
+
+**Prerequisites:**
+
+- Completed [SweepManager Workflow](sweep-manager.qmd) tutorial
+- Josh Cloud API key (for cloud execution)
+
+## Setting Up the API Key
+
+Josh Cloud requires an API key for authentication. **Never hardcode API keys**
+in your code. Instead, use environment variables:
+
+```bash
+# Set before running Python
+export JOSH_API_KEY="your-api-key-here"
+```
+
+In Python, load the key from the environment:
+
+```{python}
+import os
+
+# Load API key from environment
+api_key = os.environ.get("JOSH_API_KEY")
+
+if api_key:
+    print(f"API key loaded: {api_key[:8]}...")
+else:
+    print("JOSH_API_KEY not set - cloud execution will not work")
+```
+
+## Local Execution (Default)
+
+Local execution runs simulations via subprocess, using the Josh JAR directly.
+This is the default mode and requires no API key.
+
+```{python}
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+from joshpy.sweep import SweepManager
+
+# Define sweep configuration
+config = JobConfig(
+    template_path=Path("../../examples/templates/sweep_config.jshc.j2"),
+    source_path=Path("../../examples/tutorial_sweep.josh"),
+    simulation="Main",
+    replicates=2,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[25, 75]),
+        ],
+        strategy=CartesianStrategy(),
+    ),
+)
+
+# Build manager for local execution
+manager = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="local_demo")
+    .with_cli(jar_path=Path("../../jar/joshsim-fat.jar"))
+    .build()
+)
+
+print(f"Jobs to run: {manager.job_set.total_jobs}")
+print(f"Total replicates: {manager.job_set.total_replicates}")
+```
+
+```{python}
+# Run locally (default)
+results = manager.run()
+
+print(f"Succeeded: {results.succeeded}")
+print(f"Failed: {results.failed}")
+```
+
+```{python}
+# Cleanup
+manager.cleanup()
+manager.close()
+```
+
+## Remote Execution with Josh Cloud
+
+Remote execution sends simulations to Josh Cloud for distributed processing.
+This is ideal for large parameter sweeps or when local compute is limited.
+
+### How It Works
+
+1. joshpy sends your `.josh` file and configuration to Josh Cloud
+2. Josh Cloud executes the simulation on its infrastructure
+3. Results are returned and can be loaded into the registry
+
+### Running on Josh Cloud
+
+```{python}
+import os
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+from joshpy.sweep import SweepManager
+
+# Load API key from environment
+api_key = os.environ.get("JOSH_API_KEY")
+
+if not api_key:
+    print("Skipping cloud demo - JOSH_API_KEY not set")
+else:
+    # Same config as before
+    config = JobConfig(
+        template_path=Path("../../examples/templates/sweep_config.jshc.j2"),
+        source_path=Path("../../examples/tutorial_sweep.josh"),
+        simulation="Main",
+        replicates=2,  # Fewer replicates for faster demo
+        sweep=SweepConfig(
+            config_parameters=[
+                # Smaller sweep for demo
+                ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100]),
+            ],
+            strategy=CartesianStrategy(),
+        ),
+    )
+
+    # Build manager - no JAR needed for remote execution!
+    manager = (
+        SweepManager.builder(config)
+        .with_registry("cloud_demo.duckdb", experiment_name="cloud_sweep")
+        .build()  # No .with_cli() needed for remote
+    )
+
+    print(f"Jobs to run remotely: {manager.job_set.total_jobs}")
+    print(f"Total replicates: {manager.job_set.total_replicates}")
+```
+
+```{python}
+#| label: cloud-execution
+import os
+
+api_key = os.environ.get("JOSH_API_KEY")
+
+if not api_key:
+    print("Skipping - JOSH_API_KEY not set")
+else:
+    # Execute on Josh Cloud
+    results = manager.run(
+        remote=True,
+        api_key=api_key,
+    )
+
+    print(f"Cloud execution complete!")
+    print(f"Succeeded: {results.succeeded}")
+    print(f"Failed: {results.failed}")
+```
+
+```{python}
+#| label: cloud-cleanup
+import os
+
+api_key = os.environ.get("JOSH_API_KEY")
+
+if api_key:
+    # Load results and verify
+    manager.load_results()
+    
+    summary = manager.registry.get_data_summary()
+    print(summary)
+    
+    # Cleanup
+    manager.cleanup()
+    manager.close()
+    
+    # Remove demo database
+    Path("cloud_demo.duckdb").unlink(missing_ok=True)
+```
+
+### Key Differences from Local Execution
+
+| Aspect | Local | Remote |
+|--------|-------|--------|
+| **Parameter** | `remote=False` (default) | `remote=True` |
+| **JAR Required** | Yes | No |
+| **API Key** | Not needed | Required |
+| **Parallelization** | Single machine | Cloud infrastructure |
+| **Network** | Not needed | Required |
+
+## Remote Execution with Local Server
+
+For development or testing, you can run a local Josh server and connect to it.
+This allows testing remote execution without using cloud credits.
+
+### Starting a Local Server
+
+In a separate terminal:
+
+```bash
+# Start Josh server on port 8080
+java -jar joshsim-fat.jar server --port 8080
+```
+
+### Connecting to Local Server
+
+```python
+# Connect to local server (not executed - for reference)
+results = manager.run(
+    remote=True,
+    endpoint="http://localhost:8080",
+    # api_key not needed for local servers
+)
+```
+
+The key difference is the `endpoint` parameter, which overrides the default
+Josh Cloud URL.
+
+### When to Use Local Server
+
+- Testing remote execution logic without cloud credits
+- Debugging network-related issues
+- Running on air-gapped systems with a local Josh deployment
+- Development of custom Josh server features
+
+## Error Handling
+
+Remote execution can fail due to network issues or server errors. Handle
+these gracefully:
+
+```python
+import os
+from joshpy.sweep import SweepManager
+
+api_key = os.environ.get("JOSH_API_KEY")
+
+try:
+    results = manager.run(remote=True, api_key=api_key)
+    print(f"Completed: {results.succeeded} jobs")
+except ValueError as e:
+    # Configuration errors (missing API key, invalid config)
+    print(f"Configuration error: {e}")
+except RuntimeError as e:
+    # Execution errors (network, server issues)
+    print(f"Execution error: {e}")
+except Exception as e:
+    # Unexpected errors
+    print(f"Unexpected error: {type(e).__name__}: {e}")
+```
+
+## Using run_sweep() Directly
+
+For more control, use `run_sweep()` instead of `SweepManager.run()`:
+
+```python
+from joshpy.jobs import run_sweep, JobExpander, to_run_config, to_run_remote_config
+from joshpy.cli import JoshCLI
+
+# Expand jobs
+expander = JobExpander()
+job_set = expander.expand(config)
+
+# Local execution
+cli = JoshCLI()
+results = run_sweep(cli, job_set)
+
+# Remote execution
+results = run_sweep(
+    cli,
+    job_set,
+    remote=True,
+    api_key=api_key,
+)
+
+# With custom endpoint (local server)
+results = run_sweep(
+    cli,
+    job_set,
+    remote=True,
+    endpoint="http://localhost:8080",
+)
+```
+
+## Comparison Summary
+
+| Aspect | Local | Josh Cloud | Local Server |
+|--------|-------|------------|--------------|
+| **Requirements** | JAR, Java 17+ | API key | Server setup |
+| **Speed** | Single machine | Distributed | Single machine |
+| **Cost** | Free | Usage-based | Free |
+| **Use Case** | Development | Production sweeps | Testing |
+| **API Key** | Not needed | Required | Optional |
+| **`remote` param** | `False` (default) | `True` | `True` |
+| **`endpoint` param** | N/A | Default cloud | Custom URL |
+
+## Best Practices
+
+### 1. Never Hardcode API Keys
+
+```python
+# BAD - API key in source code
+results = manager.run(remote=True, api_key="abc123xyz")
+
+# GOOD - Load from environment
+import os
+api_key = os.environ.get("JOSH_API_KEY")
+results = manager.run(remote=True, api_key=api_key)
+```
+
+### 2. Use Local Execution for Development
+
+Local execution provides:
+
+- Faster feedback loop (no network latency)
+- Easier debugging (full stack traces)
+- No API usage costs
+
+Reserve remote execution for production sweeps.
+
+### 3. Test Locally Before Remote
+
+```python
+# First: Test with a small local run
+results = manager.run()  # local, small sweep
+assert results.failed == 0, "Fix local issues first!"
+
+# Then: Scale up with remote
+results = manager.run(remote=True, api_key=api_key)
+```
+
+### 4. Handle Failures Gracefully
+
+```python
+results = manager.run(remote=True, api_key=api_key, stop_on_failure=False)
+
+if results.failed > 0:
+    print(f"Warning: {results.failed} jobs failed")
+    # Log failures, retry, or investigate
+    for job, result in results:
+        if not result.success:
+            print(f"Failed: {job.parameters}")
+            print(f"Error: {result.stderr}")
+```
+
+### 5. Use Dry Run for Large Sweeps
+
+Preview what will execute before running:
+
+```python
+# Preview the sweep plan
+results = manager.run(remote=True, api_key=api_key, dry_run=True)
+# Prints job details without executing
+```
+
+## Summary
+
+This tutorial covered:
+
+1. **Local execution**: Default mode using subprocess and JAR
+2. **Josh Cloud**: Remote execution with API key authentication
+3. **Local server**: Testing remote execution locally
+4. **Best practices**: API key management and error handling
+
+**Key Points:**
+
+- Use `remote=True` to switch to remote execution
+- API key required for Josh Cloud, optional for local servers
+- Use `endpoint` parameter for custom server URLs
+- Never hardcode API keys - use environment variables
+- Test locally before scaling up to remote execution
+
+**Related Tutorials:**
+
+- [SweepManager Workflow](sweep-manager.qmd) - Parameter sweep basics
+- [JAR Management](jar-management.qmd) - Managing JAR versions for local execution
+- [Adaptive Optimization](adaptive-sweep.qmd) - Intelligent parameter search (works with both local and remote)
