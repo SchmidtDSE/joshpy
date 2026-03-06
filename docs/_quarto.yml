@@ -13,9 +13,11 @@ project:
     - tutorials/preprocessing.qmd        # Creates .jshd files
     - tutorials/external-data-sweep.qmd  # Depends on preprocessing output
     - tutorials/adaptive-sweep.qmd
+    - tutorials/switching-versions.qmd   # Josh version switching
+    # - tutorials/remote-execution.qmd     # Josh Cloud execution
     - how-to/index.qmd
     - explanation/index.qmd
-    - reference/index.qmd
+    - reference/
 
 website:
   title: "joshpy"
@@ -33,6 +35,10 @@ website:
             href: tutorials/manual-workflow.qmd
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
+          - text: "Switching Josh Versions"
+            href: tutorials/switching-versions.qmd
+          # - text: "Running on Josh Cloud"
+            # href: tutorials/remote-execution.qmd
           - text: "---"
           - text: "External Data"
           - text: "Preprocessing"
@@ -74,6 +80,8 @@ website:
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
+            - tutorials/switching-versions.qmd
+            - tutorials/remote-execution.qmd
         - section: "External Data"
           contents:
             - tutorials/preprocessing.qmd

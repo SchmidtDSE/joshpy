@@ -39,25 +39,25 @@ Use Optuna's Bayesian optimization for intelligent parameter search:
 
 Best for: Finding optimal parameters without exhaustive grid search.
 
-### [JAR Management](jar-management.qmd)
+### [Switching Josh Versions](switching-versions.qmd)
 
-Switch between production, development, and custom JAR files:
+Switch between stable, development, and custom Josh builds:
 
-- `JarMode` enum for quick mode selection
-- `JarManager` for fine-grained control
-- Version tracking for reproducibility
+- Use stable (PROD) for reliable production runs
+- Use development (DEV) to test latest features
+- Custom builds for Josh team development
 
-Best for: Managing Josh runtime versions across environments.
+Best for: Testing new Josh features or pinning versions for reproducibility.
 
-### [Remote Execution](remote-execution.qmd)
+### [Running on Josh Cloud](remote-execution.qmd)
 
-Run simulations on Josh Cloud or local servers:
+Distribute simulations across Josh Cloud for parallel execution:
 
-- Toggle between local and remote execution
-- API key management with environment variables
-- Comparison of execution modes
+- Free community infrastructure from DSE
+- Replicates run in parallel on cloud workers
+- Local JAR coordinates, cloud does computation
 
-Best for: Scaling up to distributed compute for large sweeps.
+Best for: Large sweeps where local execution would be too slow.
 
 ## External Data
 
@@ -117,8 +117,8 @@ All tutorials assume:
 
 **Advanced Topics:**
 
-4. [JAR Management](jar-management.qmd) - manage Josh runtime versions
-5. [Remote Execution](remote-execution.qmd) - run on Josh Cloud
+4. [Switching Josh Versions](switching-versions.qmd) - use stable vs development builds
+5. [Running on Josh Cloud](remote-execution.qmd) - parallel cloud execution
 6. [Preprocessing](preprocessing.qmd) - work with external geospatial data
 7. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
 8. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
