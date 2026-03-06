@@ -24,6 +24,7 @@ r-dplyr = ">=1.1"
 conda = "*"
 scipy = ">=1.17.1,<2"
 optuna = ">=4.7.0,<5"
+python-dotenv = ">=1.2.2,<2"
 
 [target.linux-64.dependencies]
 r-dbi = ">=1.2"
