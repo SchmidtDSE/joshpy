@@ -1002,13 +1002,10 @@ def _create_single_job(
     config_path = config_subdir / config_name
     config_path.write_text(rendered)
 
-    # Extract logical config name (without .jshc extension) for --data flag
-    logical_name = config_name.removesuffix(".jshc")
-
     return ExpandedJob(
         config_content=rendered,
         config_path=config_path,
-        config_name=logical_name,
+        config_name=config_name,
         run_hash=run_hash,
         parameters=config_params,
         simulation=config.simulation,
