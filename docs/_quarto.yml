@@ -1,6 +1,23 @@
 project:
   type: website
   output-dir: _site
+  render:
+    # Render in dependency order - some tutorials create data for others
+    - getting-started/index.qmd
+    - getting-started/installation.qmd
+    - getting-started/quickstart.qmd
+    - tutorials/index.qmd
+    - tutorials/manual-workflow.qmd      # Creates demo_registry.duckdb
+    - tutorials/sweep-manager.qmd        # Also creates demo_registry.duckdb
+    - tutorials/analysis.qmd             # Depends on demo_registry.duckdb
+    - tutorials/preprocessing.qmd        # Creates .jshd files
+    - tutorials/external-data-sweep.qmd  # Depends on preprocessing output
+    - tutorials/adaptive-sweep.qmd
+    - tutorials/switching-versions.qmd   # Josh version switching
+    # - tutorials/remote-execution.qmd     # Josh Cloud execution
+    - how-to/index.qmd
+    - explanation/index.qmd
+    - reference/
 
 website:
   title: "joshpy"
@@ -18,6 +35,10 @@ website:
             href: tutorials/manual-workflow.qmd
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
+          - text: "Switching Josh Versions"
+            href: tutorials/switching-versions.qmd
+          # - text: "Running on Josh Cloud"
+            # href: tutorials/remote-execution.qmd
           - text: "---"
           - text: "External Data"
           - text: "Preprocessing"
@@ -59,6 +80,8 @@ website:
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
+            - tutorials/switching-versions.qmd
+            - tutorials/remote-execution.qmd
         - section: "External Data"
           contents:
             - tutorials/preprocessing.qmd

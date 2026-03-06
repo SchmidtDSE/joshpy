@@ -24,6 +24,7 @@ r-dplyr = ">=1.1"
 conda = "*"
 scipy = ">=1.17.1,<2"
 optuna = ">=4.7.0,<5"
+python-dotenv = ">=1.2.2,<2"
 
 [target.linux-64.dependencies]
 r-dbi = ">=1.2"
@@ -50,9 +51,13 @@ format = "ruff format joshpy/"
 get-jars = "bash .devcontainer/scripts/on_build/get_fat_jar.sh"
 
 # Documentation tasks
+# - docs-build: Full clean build (removes _freeze, re-runs all tutorials)
+# - docs-preview: Full clean build + live preview
+# - docs-preview-fast: Uses cached _freeze results (fast iteration on content)
+# - docs-clean: Manual cleanup if needed
 docs-install = "pip install -e '.[full,docs]' --quiet"
 docs-api = { cmd = "python -m quartodoc build --config docs/_quarto.yml", depends-on = ["docs-install"] }
 docs-build = { cmd = "bash scripts/render-docs.sh", depends-on = ["docs-install"] }
 docs-preview = { cmd = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto preview docs", depends-on = ["docs-build"] }
 docs-preview-fast = { cmd = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto preview docs", depends-on = ["docs-api"] }
-docs-clean = "rm -rf docs/_site docs/_freeze docs/reference/*.qmd docs/tutorials/demo_registry.duckdb docs/tutorials/external_sweep.duckdb* docs/tutorials/adaptive_demo.duckdb*"
+docs-clean = "rm -rf docs/_site docs/_freeze docs/reference/*.qmd && rm -f docs/tutorials/*.duckdb docs/tutorials/*.duckdb.wal"

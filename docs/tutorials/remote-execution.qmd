@@ -1,0 +1,279 @@
+---
+title: "Running on Josh Cloud"
+description: "Distribute simulations across Josh Cloud for parallel execution"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Introduction
+
+**Josh Cloud** is free community infrastructure for running Josh simulations at scale.
+When you have large parameter sweeps with many replicates, Josh Cloud can run them
+in parallel - significantly faster than running everything locally.
+
+### How It Works
+
+1. Your local machine runs Josh as a **coordinator**
+2. Replicates are distributed across Josh Cloud infrastructure  
+3. Results are collected and returned to your local machine
+4. The computation happens in the cloud - very resource-light locally
+
+This is especially useful for sweeps with many replicates, where each replicate
+can run independently on different cloud workers.
+
+### Getting an API Key
+
+Josh Cloud is a **free service** provided by the Eric and Wendy Schmidt Center
+for Data Science and Environment. To request access:
+
+**[Contact DSE for an API key](https://dse-disturbance-toolbox.org/contact/)**
+
+## Setup
+
+### Prerequisites
+
+- Completed [SweepManager Workflow](sweep-manager.qmd) tutorial
+- Josh Cloud API key (see above)
+- **Josh installed locally** - the local JAR coordinates cloud execution
+
+### Loading Your API Key
+
+Store your API key in a `.env` file in your project root:
+
+```
+# .env
+JOSH_API_KEY=your-api-key-here
+```
+
+Then load it using `python-dotenv`:
+
+```{python}
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
+api_key = os.environ.get("JOSH_API_KEY")
+
+if api_key:
+    print(f"API key loaded: {api_key[:8]}...")
+else:
+    print("JOSH_API_KEY not set - see setup instructions above")
+```
+
+## Local vs Cloud Execution
+
+### Local Execution (Default)
+
+By default, simulations run locally. All replicates execute sequentially on your machine:
+
+```{python}
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+from joshpy.sweep import SweepManager
+
+# Define sweep configuration
+config = JobConfig(
+    template_path=Path("../../examples/templates/sweep_config.jshc.j2"),
+    source_path=Path("../../examples/tutorial_sweep.josh"),
+    simulation="Main",
+    replicates=2,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[25, 75]),
+        ],
+        strategy=CartesianStrategy(),
+    ),
+)
+
+# Build manager for local execution
+manager = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="local_demo")
+    .with_cli(jar_path=Path("../../jar/joshsim-fat.jar"))
+    .build()
+)
+
+print(f"Jobs: {manager.job_set.total_jobs}")
+print(f"Total replicates: {manager.job_set.total_replicates}")
+```
+
+```{python}
+# Run locally (default)
+results = manager.run()
+
+print(f"Succeeded: {results.succeeded}")
+print(f"Failed: {results.failed}")
+```
+
+```{python}
+manager.cleanup()
+manager.close()
+```
+
+### Cloud Execution
+
+With `remote=True`, replicates are distributed across Josh Cloud:
+
+
+
+```{python}
+from dotenv import load_dotenv
+import os
+from pathlib import Path
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+from joshpy.sweep import SweepManager
+
+load_dotenv()
+api_key = os.environ.get("JOSH_API_KEY")
+
+if not api_key:
+    print("Skipping cloud demo - JOSH_API_KEY not set")
+    print("Contact DSE for an API key: https://dse-disturbance-toolbox.org/contact/")
+else:
+    config = JobConfig(
+        template_path=Path("../../examples/templates/sweep_config.jshc.j2"),
+        source_path=Path("../../examples/tutorial_sweep.josh"),
+        simulation="Main",
+        replicates=2,
+        sweep=SweepConfig(
+            config_parameters=[
+                ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100]),
+            ],
+            strategy=CartesianStrategy(),
+        ),
+    )
+
+    # Use DEV JAR - it coordinates cloud execution and points to DEV cloud
+    cli = JoshCLI(josh_jar=JarMode.DEV)
+    
+    manager = (
+        SweepManager.builder(config)
+        .with_registry("cloud_demo.duckdb", experiment_name="cloud_sweep")
+        .with_cli(cli)
+        .build()
+    )
+
+    print(f"Jobs to run: {manager.job_set.total_jobs}")
+    print(f"Total replicates: {manager.job_set.total_replicates}")
+```
+
+```{python}
+#| label: cloud-execution
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+api_key = os.environ.get("JOSH_API_KEY")
+dev_endpoint = os.environ.get("JOSH_DEV_ENDPOINT")
+
+if not api_key:
+    print("Skipping - JOSH_API_KEY not set")
+else:
+    # Execute on Josh Cloud (continue even if some jobs fail)
+    results = manager.run(
+        remote=True,
+        api_key=api_key,
+        endpoint=dev_endpoint,
+        stop_on_failure=False,
+    )
+
+    print(f"Cloud execution complete!")
+    print(f"Succeeded: {results.succeeded}")
+    print(f"Failed: {results.failed}")
+```
+
+```{python}
+#| label: cloud-cleanup
+from dotenv import load_dotenv
+import os
+from pathlib import Path
+
+load_dotenv()
+api_key = os.environ.get("JOSH_API_KEY")
+
+if api_key:
+    # Load results (handles partial results if some jobs failed)
+    if results.succeeded > 0:
+        manager.load_results()
+        summary = manager.registry.get_data_summary()
+        print(summary)
+    else:
+        print("No successful jobs to load results from")
+    
+    # Cleanup
+    manager.cleanup()
+    manager.close()
+    
+    # Remove demo database
+    Path("cloud_demo.duckdb").unlink(missing_ok=True)
+```
+
+## Best Practices
+
+### Never Hardcode API Keys
+
+Always load from environment variables or `.env` files:
+
+```python
+# Good
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+api_key = os.environ.get("JOSH_API_KEY")
+results = manager.run(remote=True, api_key=api_key)
+```
+
+### Test Locally First
+
+Before running large cloud sweeps, verify your simulation works locally:
+
+```python
+# First: small local test
+results = manager.run()  # local execution
+assert results.failed == 0, "Fix issues before scaling to cloud"
+
+# Then: scale up with cloud execution
+results = manager.run(remote=True, api_key=api_key)
+```
+
+### Use Dry Run for Large Sweeps
+
+Preview what will execute before committing to a large run:
+
+```python
+results = manager.run(remote=True, api_key=api_key, dry_run=True)
+# Shows job details without executing
+```
+
+## Custom Server Deployments
+
+Josh can also run as an HTTP server for organizations that want to deploy their
+own infrastructure. If you're interested in setting up a custom Josh server:
+
+**[Contact DSE for guidance](https://dse-disturbance-toolbox.org/contact/)**
+
+## Summary
+
+- **Josh Cloud is free** - [contact DSE](https://dse-disturbance-toolbox.org/contact/) for an API key
+- Use `remote=True` to distribute replicates across cloud workers
+- The local JAR acts as coordinator - cloud does the heavy computation
+- Always load API keys from environment variables, never hardcode them
+- Test locally before scaling to cloud execution
+
+**Related Tutorials:**
+
+- [SweepManager Workflow](sweep-manager.qmd) - Parameter sweep basics
+- [Switching Josh Versions](switching-versions.qmd) - Using stable vs development builds

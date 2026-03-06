@@ -39,6 +39,26 @@ Use Optuna's Bayesian optimization for intelligent parameter search:
 
 Best for: Finding optimal parameters without exhaustive grid search.
 
+### [Switching Josh Versions](switching-versions.qmd)
+
+Switch between stable, development, and custom Josh builds:
+
+- Use stable (PROD) for reliable production runs
+- Use development (DEV) to test latest features
+- Custom builds for Josh team development
+
+Best for: Testing new Josh features or pinning versions for reproducibility.
+
+### [Running on Josh Cloud](remote-execution.qmd)
+
+Distribute simulations across Josh Cloud for parallel execution:
+
+- Free community infrastructure from DSE
+- Replicates run in parallel on cloud workers
+- Local JAR coordinates, cloud does computation
+
+Best for: Large sweeps where local execution would be too slow.
+
 ## External Data
 
 Tutorials for working with external geospatial data.
@@ -97,6 +117,8 @@ All tutorials assume:
 
 **Advanced Topics:**
 
-4. [Preprocessing](preprocessing.qmd) - work with external geospatial data
-5. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
-6. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
+4. [Switching Josh Versions](switching-versions.qmd) - use stable vs development builds
+5. [Running on Josh Cloud](remote-execution.qmd) - parallel cloud execution
+6. [Preprocessing](preprocessing.qmd) - work with external geospatial data
+7. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
+8. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search

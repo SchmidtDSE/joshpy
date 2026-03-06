@@ -15,11 +15,7 @@ library(dplyr)
 
 ## Introduction
 
-In ecological modeling, you often need to run the same simulation with **different
-input data** - for example, comparing climate scenarios (RCP 2.6 vs 4.5 vs 8.5) or
-testing sensitivity to soil maps from different sources.
-
-joshpy's `FileSweepParameter` enables **sweeping over external data files**,
+`joshpy`'s `FileSweepParameter` enables **sweeping over external data files**,
 running one simulation job per input file. This is similar to sweeping over
 configuration parameters, but the variation comes from `.jshd` data files rather
 than `.jshc` configuration values.
@@ -318,23 +314,23 @@ plt.show()
 
 ## Direct SQL Queries
 
-For custom analysis, query the registry directly:
+For custom analysis, query the registry directly. File parameter labels are stored
+in `config_parameters` just like config params, making them easy to query:
 
 ```{python}
 #| label: sql-analysis
 # Compare mean height by soil pattern
-# File parameters are stored as JSON in job_configs.file_mappings
-# We extract the filename to identify the pattern
-result = manager.registry.query(r"""
+# File parameter labels are stored in config_parameters, just like config params
+result = manager.registry.query("""
     SELECT 
-        regexp_extract(jc.file_mappings, 'soil_quality_([a-z]+)\.jshd', 1) as pattern,
+        cp.soil_quality as pattern,
         cd.step,
         AVG(cd.average_height) as mean_height,
         STDDEV(cd.average_height) as std_height
     FROM cell_data cd
-    JOIN job_configs jc ON cd.run_hash = jc.run_hash
-    GROUP BY pattern, cd.step
-    ORDER BY pattern, cd.step
+    JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+    GROUP BY cp.soil_quality, cd.step
+    ORDER BY cp.soil_quality, cd.step
 """)
 result.df().head(15)
 ```
@@ -353,9 +349,8 @@ This tutorial demonstrated the **file sweep workflow**:
 | Aspect | ConfigSweepParameter | FileSweepParameter |
 |--------|---------------------|-------------------|
 | **Variation source** | Jinja template values | External data files |
-| **Storage** | `job.parameters` dict | `job.file_mappings` dict |
+| **Storage** | `job.parameters` dict | `job.file_mappings` (paths) + `job.parameters` (labels) |
 | **Josh reference** | `config name.variable` | `external variable` |
-| **CLI flag** | `--custom-tag` | `--data` |
 | **Hash includes** | Rendered config content | File content hash |
 
 ### When to Use File Sweeps
