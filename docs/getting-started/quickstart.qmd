@@ -35,7 +35,8 @@ result = cli.run(RunConfig(
 print(f"Success: {result.success}")
 print(f"Exit code: {result.exit_code}")
 if not result.success:
-    print(f"Error: {result.stderr}")
+    error_msg = result.stderr.strip() if result.stderr else "No error message"
+    raise RuntimeError(f"Simulation failed:\n{error_msg}")
 ```
 
 ## 3. Load and Plot Results

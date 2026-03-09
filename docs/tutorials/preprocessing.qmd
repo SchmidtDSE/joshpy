@@ -298,7 +298,7 @@ for pattern in patterns:
     if result.success:
         print(f"  -> {jshd_file.name} created successfully")
     else:
-        print(f"  -> FAILED: {result.stderr}")
+        raise RuntimeError(f"Preprocessing failed for {nc_file.name}: {result.stderr}")
 ```
 
 ### PreprocessConfig Options

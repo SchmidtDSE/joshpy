@@ -10,8 +10,9 @@ project:
     - tutorials/manual-workflow.qmd      # Creates demo_registry.duckdb
     - tutorials/sweep-manager.qmd        # Also creates demo_registry.duckdb
     - tutorials/analysis.qmd             # Depends on demo_registry.duckdb
-    - tutorials/preprocessing.qmd        # Creates .jshd files
-    - tutorials/external-data-sweep.qmd  # Depends on preprocessing output
+    - tutorials/preprocessing.qmd           # Creates .jshd files
+    - tutorials/external-data-sweep.qmd     # Depends on preprocessing output
+    - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
     - tutorials/switching-versions.qmd   # Josh version switching
     - tutorials/remote-execution.qmd     # Josh Cloud execution
@@ -45,6 +46,8 @@ website:
             href: tutorials/preprocessing.qmd
           - text: "External Data Sweeps"
             href: tutorials/external-data-sweep.qmd
+          - text: "Timestep Interventions"
+            href: tutorials/timestep-interventions.qmd
           - text: "---"
           - text: "Optimization"
           - text: "Adaptive Sweeps"
@@ -86,6 +89,7 @@ website:
           contents:
             - tutorials/preprocessing.qmd
             - tutorials/external-data-sweep.qmd
+            - tutorials/timestep-interventions.qmd
         - section: "Optimization"
           contents:
             - tutorials/adaptive-sweep.qmd
