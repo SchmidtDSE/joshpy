@@ -18,8 +18,28 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 ## Get Started
 
 - [Installation](getting-started/installation.qmd) - Install joshpy
-- [Quickstart](getting-started/quickstart.qmd) - Run your first sweep
+- [Quickstart](getting-started/quickstart.qmd) - Run your first simulation
 - [Tutorials](tutorials/index.qmd) - Step-by-step guides
+
+## Tutorials
+
+### Orchestration
+
+- [Manual Workflow](tutorials/manual-workflow.qmd) - Step-by-step parameter sweep using individual components for maximum control
+- [SweepManager Workflow](tutorials/sweep-manager.qmd) - Simplified workflow using high-level `SweepManager` class
+- [Switching Josh Versions](tutorials/switching-versions.qmd) - Use stable, development, or custom Josh builds
+- [Remote Runs in Parallel](tutorials/remote-execution.qmd) - Distribute simulations across Josh Cloud
+
+### External Data
+
+- [Preprocessing](tutorials/preprocessing.qmd) - Convert geospatial data to Josh's `.jshd` format
+- [External Data Sweeps](tutorials/external-data-sweep.qmd) - Sweep over different input data files
+- [Timestep Interventions](tutorials/timestep-interventions.qmd) - Single-time data for initialization and discrete events
+
+### Optimization & Analysis
+
+- [Adaptive Optimization](tutorials/adaptive-sweep.qmd) - Bayesian parameter optimization with Optuna
+- [Analysis & Visualization](tutorials/analysis.qmd) - Explore results with queries, plots, and R/ggplot2
 
 ## Links
 
