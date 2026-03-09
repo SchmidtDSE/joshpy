@@ -39,7 +39,7 @@ each with 3 replicates, then load, query, and visualize the results.
 
 ## Prerequisites
 
-Ensure the Josh JAR is available at `jar/joshsim-fat.jar` and joshpy is installed:
+Ensure joshpy is installed (the Josh JAR is auto-downloaded on first use):
 
 ```bash
 pip install -e '.[all]'
@@ -173,10 +173,11 @@ function handles execution and automatically records runs in the registry when
 
 ```{python}
 from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
 from joshpy.jobs import run_sweep
 
-# Create CLI targeting the local fat JAR
-cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+# Create CLI (auto-downloads JAR if needed)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 
 # Run all jobs with automatic tracking
 # Note: run_sweep() now automatically manages session status:

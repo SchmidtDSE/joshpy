@@ -14,7 +14,7 @@ project:
     - tutorials/external-data-sweep.qmd  # Depends on preprocessing output
     - tutorials/adaptive-sweep.qmd
     - tutorials/switching-versions.qmd   # Josh version switching
-    # - tutorials/remote-execution.qmd     # Josh Cloud execution
+    - tutorials/remote-execution.qmd     # Josh Cloud execution
     - how-to/index.qmd
     - explanation/index.qmd
     - reference/
@@ -37,8 +37,8 @@ website:
             href: tutorials/sweep-manager.qmd
           - text: "Switching Josh Versions"
             href: tutorials/switching-versions.qmd
-          # - text: "Running on Josh Cloud"
-            # href: tutorials/remote-execution.qmd
+          - text: "Remote Runs in Parallel"
+            href: tutorials/remote-execution.qmd
           - text: "---"
           - text: "External Data"
           - text: "Preprocessing"

@@ -7,7 +7,7 @@ platforms = ["linux-64", "osx-arm64", "osx-64"]
 
 [dependencies]
 python = ">=3.10"
-openjdk = ">=17"
+openjdk = ">=21,<22"
 pip = "*"
 wget = "*"
 gh = ">=2.86.0,<3"

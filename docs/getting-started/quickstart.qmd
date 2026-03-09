@@ -19,9 +19,10 @@ joshpy wraps the Josh CLI to run simulations. Here's a minimal example:
 ```{python}
 from pathlib import Path
 from joshpy.cli import JoshCLI, RunConfig
+from joshpy.jar import JarMode
 
 # Create CLI (auto-downloads Josh JAR if needed)
-cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+cli = JoshCLI(josh_jar=JarMode.DEV)
 
 # Run the quickstart simulation
 # Note: The .josh file defines the output path as /tmp/quickstart_output.csv
