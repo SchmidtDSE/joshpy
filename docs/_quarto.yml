@@ -37,12 +37,18 @@ website:
             href: tutorials/manual-workflow.qmd
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
+          - text: "Switching Josh Versions"
+            href: tutorials/switching-versions.qmd
+          - text: "Remote Runs in Parallel"
+            href: tutorials/remote-execution.qmd
           - text: "---"
           - text: "External Data"
           - text: "Preprocessing"
             href: tutorials/preprocessing.qmd
           - text: "External Data Sweeps"
             href: tutorials/external-data-sweep.qmd
+          - text: "Timestep Interventions"
+            href: tutorials/timestep-interventions.qmd
           - text: "---"
           - text: "Optimization"
           - text: "Adaptive Sweeps"
@@ -78,10 +84,13 @@ website:
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
+            - tutorials/switching-versions.qmd
+            - tutorials/remote-execution.qmd
         - section: "External Data"
           contents:
             - tutorials/preprocessing.qmd
             - tutorials/external-data-sweep.qmd
+            - tutorials/timestep-interventions.qmd
         - section: "Optimization"
           contents:
             - tutorials/adaptive-sweep.qmd

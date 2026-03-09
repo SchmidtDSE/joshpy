@@ -1,0 +1,609 @@
+---
+title: "Timestep Interventions"
+description: "Using single-time external data for initialization and mid-simulation events"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+Many ecological simulations need external spatial data at **specific moments** rather
+than as continuously varying inputs:
+
+| Use Case | Example | When Applied |
+|----------|---------|--------------|
+| **Initial populations** | Tree density from forest inventory COG | Step 0 (init) |
+| **Disturbance events** | Fire severity from satellite imagery | Specific timestep |
+| **Management actions** | Planting density from restoration plan | Scheduled timestep |
+
+This tutorial demonstrates **"flat time" external data** - single-timestep spatial
+rasters applied at specific moments. We'll create:
+
+1. **Initial density data** - Spatially variable tree density for initialization
+2. **Fire severity data** - Burn severity map applied at step 5
+
+**Prerequisites**:
+
+- Complete [Preprocessing External Data](preprocessing.qmd) to understand `.jshd` basics
+- joshpy installed with `pip install joshpy[all]`
+
+## The Simulation
+
+Our simulation demonstrates both patterns:
+
+- **At init**: Each patch reads `initial_density` to determine how many trees to create
+- **At step 5**: A fire event applies spatially-variable mortality based on `fire_severity`
+
+::: {.callout-note collapse="true"}
+## View Simulation File (timestep_intervention.josh)
+
+```{python}
+#| label: show-simulation
+#| code-fold: true
+from pathlib import Path
+
+SOURCE_PATH = Path("../../examples/timestep_intervention.josh")
+print(SOURCE_PATH.read_text())
+```
+:::
+
+### Key Josh Patterns
+
+**Pattern 1: Init-time external data**
+```josh
+# Read once at patch creation
+initial_density.init = external initial_density
+
+# Use to create variable populations (density/5 gives 0-20 trees)
+ForeverTree.init = create (initial_density / 5 percent) of ForeverTree
+```
+
+**Pattern 2: Conditional timestep events**
+```josh
+# Read severity at init (flat-time data), persist through steps
+fire_severity.init = external fire_severity
+fire_severity.step = prior.fire_severity
+
+# Detect fire step using meta.stepCount
+is_fire_step.step = meta.stepCount == meta.fire.eventStep
+
+# Apply damage conditionally - organism marks itself as dead
+dies_in_fire.step = is_fire_step and (survival_roll < here.fire_damage)
+dead.step = prior.dead or dies_in_fire
+```
+
+**Pattern 3: Organism removal via patch filtering**
+```josh
+# In the PATCH - filter out dead organisms at start of each step
+ForeverTree.start = prior.ForeverTree[prior.ForeverTree.dead == false]
+```
+
+::: {.callout-note}
+## Organism Removal Pattern
+
+Josh has no `remove()`, `destroy()`, or `die()` function. Instead, organism removal 
+uses a two-step pattern:
+
+1. **Organism** sets a boolean flag: `dead.step = prior.dead or dies_in_fire`
+2. **Patch** filters at `.start`: `ForeverTree.start = prior.ForeverTree[prior.ForeverTree.dead == false]`
+
+The filtering happens at `.start` so dead organisms are removed before the next step begins.
+:::
+
+## Step 1: Create Synthetic External Data
+
+We create two NetCDF files with distinct spatial patterns:
+
+| File | Pattern | Purpose |
+|------|---------|---------|
+| `initial_density.nc` | High in center, low at edges | More trees in center patches |
+| `fire_severity.nc` | Diagonal gradient (SW to NE) | Variable mortality across landscape |
+
+```{python}
+#| label: create-external-data
+
+from pathlib import Path
+import numpy as np
+from scipy.io import netcdf_file
+
+OUTPUT_DIR = Path("../../examples/external_data")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Grid specification (matches timestep_intervention.josh)
+LAT_MIN, LAT_MAX = 33.7, 34.0
+LON_MIN, LON_MAX = -116.4, -115.4
+RESOLUTION = 0.05  # Coarser resolution for faster execution
+
+lats = np.arange(LAT_MIN, LAT_MAX + RESOLUTION, RESOLUTION)
+lons = np.arange(LON_MIN, LON_MAX + RESOLUTION, RESOLUTION)
+times = np.array([0.0])  # Single timestep
+
+print(f"Grid size: {len(lats)} x {len(lons)} = {len(lats) * len(lons)} cells")
+
+def create_netcdf_flat_time(filepath, data, var_name, lats, lons, times):
+    """Create a NetCDF file with a single timestep (flat time)."""
+    data_3d = data[np.newaxis, :, :]  # Add time dimension
+    
+    with netcdf_file(str(filepath), 'w') as f:
+        f.createDimension('time', len(times))
+        f.createDimension('lat', len(lats))
+        f.createDimension('lon', len(lons))
+        
+        time_var = f.createVariable('time', 'f8', ('time',))
+        time_var[:] = times
+        time_var.units = 'steps'
+        
+        lat_var = f.createVariable('lat', 'f8', ('lat',))
+        lat_var[:] = lats
+        lat_var.units = 'degrees_north'
+        
+        lon_var = f.createVariable('lon', 'f8', ('lon',))
+        lon_var[:] = lons
+        lon_var.units = 'degrees_east'
+        
+        data_var = f.createVariable(var_name, 'f4', ('time', 'lat', 'lon'))
+        data_var[:] = data_3d
+        data_var.units = 'percent'
+
+# Create meshgrid for calculations
+lon_grid, lat_grid = np.meshgrid(lons, lats)
+
+# Pattern 1: Initial density - high in center, low at edges (radial)
+center_lon = (LON_MIN + LON_MAX) / 2
+center_lat = (LAT_MIN + LAT_MAX) / 2
+max_dist = np.sqrt((LON_MAX - center_lon)**2 + (LAT_MAX - center_lat)**2)
+dist_from_center = np.sqrt((lon_grid - center_lon)**2 + (lat_grid - center_lat)**2)
+initial_density_data = np.maximum(0, (1 - dist_from_center / max_dist)) * 100
+
+create_netcdf_flat_time(
+    OUTPUT_DIR / "initial_density.nc",
+    initial_density_data,
+    "initial_density",
+    lats, lons, times
+)
+
+# Pattern 2: Fire severity - diagonal gradient (SW=low, NE=high)
+# Normalize both lat and lon to 0-1, then average for diagonal
+lat_norm = (lat_grid - LAT_MIN) / (LAT_MAX - LAT_MIN)
+lon_norm = (lon_grid - LON_MIN) / (LON_MAX - LON_MIN)
+fire_severity_data = ((lat_norm + lon_norm) / 2) * 100
+
+create_netcdf_flat_time(
+    OUTPUT_DIR / "fire_severity.nc",
+    fire_severity_data,
+    "fire_severity",
+    lats, lons, times
+)
+
+print(f"Created: initial_density.nc, fire_severity.nc")
+```
+
+### Visualize Input Patterns
+
+```{python}
+#| label: fig-input-patterns
+#| fig-cap: "Flat-time external data patterns for initialization and fire event"
+#| fig-width: 10
+#| fig-height: 4
+
+import matplotlib.pyplot as plt
+from scipy.io import netcdf_file
+
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+patterns = [
+    ("initial_density.nc", "initial_density", "Initial Density\n(Trees per patch)"),
+    ("fire_severity.nc", "fire_severity", "Fire Severity\n(Applied at step 5)"),
+]
+
+for ax, (filename, varname, title) in zip(axes, patterns):
+    with netcdf_file(str(OUTPUT_DIR / filename), 'r') as f:
+        data = f.variables[varname][0, :, :].copy()
+        file_lats = f.variables['lat'][:].copy()
+        file_lons = f.variables['lon'][:].copy()
+    
+    im = ax.imshow(data, extent=[file_lons.min(), file_lons.max(), 
+                                  file_lats.min(), file_lats.max()],
+                   origin='lower', cmap='YlOrRd', vmin=0, vmax=100, aspect='auto')
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(title)
+    plt.colorbar(im, ax=ax, label='%', shrink=0.8)
+
+plt.tight_layout()
+plt.show()
+```
+
+## Step 2: Preprocess to JSHD Format
+
+Convert NetCDF files to Josh's optimized `.jshd` format:
+
+```{python}
+#| label: preprocess-data
+
+from joshpy.cli import JoshCLI, PreprocessConfig
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+SOURCE_PATH = Path("../../examples/timestep_intervention.josh")
+DATA_DIR = Path("../../examples/external_data")
+
+datasets = [
+    ("initial_density.nc", "initial_density", "initial_density.jshd"),
+    ("fire_severity.nc", "fire_severity", "fire_severity.jshd"),
+]
+
+for nc_name, var_name, jshd_name in datasets:
+    print(f"Preprocessing {nc_name}...")
+    
+    result = cli.preprocess(PreprocessConfig(
+        script=SOURCE_PATH,
+        simulation="Main",
+        data_file=DATA_DIR / nc_name,
+        variable=var_name,
+        units="percent",
+        output=DATA_DIR / jshd_name,
+        x_coord="lon",
+        y_coord="lat",
+        time_coord="time",
+    ))
+    
+    if result.success:
+        print(f"  -> {jshd_name} created")
+    else:
+        raise RuntimeError(f"Preprocessing failed for {nc_name}: {result.stderr}")
+```
+
+## Step 3: Configure and Run with SweepManager
+
+We use `SweepManager` with fixed `file_mappings` (no sweep parameters - just 
+demonstrating the timestep intervention patterns):
+
+```{python}
+#| label: configure-sweep
+
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig
+from joshpy.strategies import CartesianStrategy
+
+SOURCE_PATH = Path("../../examples/timestep_intervention.josh")
+TEMPLATE_PATH = Path("../../examples/templates/external_config.jshc.j2")
+DATA_DIR = Path("../../examples/external_data")
+
+config = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=3,
+    # Fixed file mappings - both files used for every run
+    file_mappings={
+        "initial_density": DATA_DIR / "initial_density.jshd",
+        "fire_severity": DATA_DIR / "fire_severity.jshd",
+    },
+    # Empty sweep config - just one job with the fixed file mappings
+    sweep=SweepConfig(strategy=CartesianStrategy()),
+)
+
+print(f"Replicates: {config.replicates}")
+print(f"File mappings: {list(config.file_mappings.keys())}")
+```
+
+```{python}
+#| label: build-manager
+
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+REGISTRY_PATH = "timestep_intervention.duckdb"
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry(REGISTRY_PATH, experiment_name="timestep_intervention")
+    .with_cli(JoshCLI(josh_jar=JarMode.DEV))
+    .build()
+)
+
+print(f"Session ID: {manager.session_id}")
+print(f"Total jobs: {manager.job_set.total_jobs}")
+print(f"Total replicates: {manager.job_set.total_replicates}")
+```
+
+```{python}
+#| label: run-sweep
+
+results = manager.run()
+
+print(f"\nSimulation complete!")
+print(f"Succeeded: {results.succeeded}")
+print(f"Failed: {results.failed}")
+
+# Fail the tutorial if any jobs failed - include actual error details
+if results.failed > 0:
+    # Extract error details from failed jobs
+    errors = []
+    for job, result in results:
+        if not result.success:
+            error_msg = result.stderr.strip() if result.stderr else "No error message"
+            errors.append(f"Job {job.run_hash}: {error_msg[:500]}")
+    error_detail = "\n".join(errors)
+    raise RuntimeError(f"Sweep failed: {results.failed} job(s) failed\n\n{error_detail}")
+```
+
+## Step 4: Load and Analyze Results
+
+```{python}
+#| label: load-results
+
+manager.load_results()
+
+summary = manager.registry.get_data_summary()
+print(summary)
+```
+
+```{python}
+print("Export variables:", manager.registry.list_export_variables())
+```
+
+### Verify Initial Populations
+
+The initial density pattern should create more trees in the center:
+
+```{python}
+#| label: fig-initial-populations
+#| fig-cap: "Initial tree counts reflect the radial density pattern"
+
+from joshpy.cell_data import DiagnosticQueries
+import matplotlib.pyplot as plt
+
+queries = DiagnosticQueries(manager.registry)
+
+# Get the run_hash for our single job
+job = manager.job_set.jobs[0]
+
+# Get initial state (step 0)
+df_init = queries.get_spatial_snapshot(
+    step=0,
+    variable="tree_count",
+    run_hash=job.run_hash,
+    replicate=0,
+)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+scatter = ax.scatter(
+    df_init['longitude'],
+    df_init['latitude'],
+    c=df_init['value'],
+    cmap='Greens',
+    s=50,
+    alpha=0.8,
+)
+ax.set_xlabel('Longitude')
+ax.set_ylabel('Latitude')
+ax.set_title('Initial Tree Count per Patch (Step 0)\nHigher in center from initial_density data')
+plt.colorbar(scatter, ax=ax, label='Tree Count')
+plt.tight_layout()
+plt.show()
+```
+
+### Visualize Fire Event Impact
+
+Compare tree counts before and after the fire event at step 5:
+
+```{python}
+#| label: fig-fire-impact
+#| fig-cap: "Tree counts before (step 4) and after (step 6) fire event"
+#| fig-width: 12
+#| fig-height: 5
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 5))
+
+steps = [4, 6]
+titles = ["Before Fire (Step 4)", "After Fire (Step 6)"]
+max_trees = df_init['value'].max()
+
+for ax, step, title in zip(axes[:2], steps, titles):
+    df = queries.get_spatial_snapshot(
+        step=step,
+        variable="tree_count",
+        run_hash=job.run_hash,
+        replicate=0,
+    )
+    
+    scatter = ax.scatter(
+        df['longitude'],
+        df['latitude'],
+        c=df['value'],
+        cmap='Greens',
+        vmin=0,
+        vmax=max_trees,
+        s=50,
+        alpha=0.8,
+    )
+    ax.set_xlabel('Longitude')
+    ax.set_ylabel('Latitude')
+    ax.set_title(title)
+    plt.colorbar(scatter, ax=ax, label='Tree Count')
+
+# Show fire severity pattern for comparison
+df_severity = queries.get_spatial_snapshot(
+    step=5,
+    variable="fire_severity",
+    run_hash=job.run_hash,
+    replicate=0,
+)
+
+scatter = axes[2].scatter(
+    df_severity['longitude'],
+    df_severity['latitude'],
+    c=df_severity['value'],
+    cmap='YlOrRd',
+    s=50,
+    alpha=0.8,
+)
+axes[2].set_xlabel('Longitude')
+axes[2].set_ylabel('Latitude')
+axes[2].set_title('Fire Severity (%)\nHigher = more mortality')
+plt.colorbar(scatter, ax=axes[2], label='Severity %')
+
+plt.tight_layout()
+plt.show()
+```
+
+### Time Series: Population Dynamics
+
+```{python}
+#| label: fig-timeseries
+#| fig-cap: "Tree population over time with fire event at step 5"
+
+# Get replicate uncertainty for tree count
+df_ts = queries.get_replicate_uncertainty(
+    variable="tree_count",
+    run_hash=job.run_hash,
+)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+ax.fill_between(
+    df_ts['step'],
+    df_ts['mean'] - df_ts['std'],
+    df_ts['mean'] + df_ts['std'],
+    alpha=0.3,
+    color='green'
+)
+ax.plot(df_ts['step'], df_ts['mean'], 'g-', linewidth=2, label='Mean tree count')
+ax.axvline(5, color='red', linestyle='--', linewidth=2, label='Fire event (step 5)')
+
+ax.set_xlabel('Timestep')
+ax.set_ylabel('Trees per Patch')
+ax.set_title('Population Dynamics with Fire Intervention')
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+### Mortality by Location
+
+Higher fire severity in the NE should cause greater mortality there:
+
+```{python}
+#| label: fig-mortality-pattern
+#| fig-cap: "Mortality rate correlates with fire severity pattern"
+
+# Calculate mortality per patch
+df_before = queries.get_spatial_snapshot(step=4, variable="tree_count", 
+                                          run_hash=job.run_hash, replicate=0)
+df_after = queries.get_spatial_snapshot(step=6, variable="tree_count",
+                                         run_hash=job.run_hash, replicate=0)
+
+# Merge and calculate mortality
+df_before = df_before.rename(columns={'value': 'before'})
+df_after = df_after.rename(columns={'value': 'after'})
+df_mortality = df_before.merge(df_after[['longitude', 'latitude', 'after']], 
+                                on=['longitude', 'latitude'])
+df_mortality['mortality_pct'] = (
+    (df_mortality['before'] - df_mortality['after']) / df_mortality['before'].clip(lower=1) * 100
+)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+scatter = ax.scatter(
+    df_mortality['longitude'],
+    df_mortality['latitude'],
+    c=df_mortality['mortality_pct'],
+    cmap='YlOrRd',
+    s=50,
+    alpha=0.8,
+)
+ax.set_xlabel('Longitude')
+ax.set_ylabel('Latitude')
+ax.set_title('Fire Mortality Rate (%)\nHigher in NE matches fire severity gradient')
+plt.colorbar(scatter, ax=ax, label='Mortality %')
+plt.tight_layout()
+plt.show()
+```
+
+## Key Takeaways
+
+### Flat-Time Data Patterns
+
+| Pattern | Event | Josh Syntax |
+|---------|-------|-------------|
+| **Init-time** | `*.init` | `density.init = external initial_density` |
+| **Conditional step** | `*.step` with guard | `is_fire.step = meta.stepCount == 5 count` |
+
+### Organism Removal Pattern
+
+| Component | Role | Josh Syntax |
+|-----------|------|-------------|
+| **Organism flag** | Marks itself for removal | `dead.step = prior.dead or condition` |
+| **Patch filter** | Removes flagged organisms | `Trees.start = prior.Trees[prior.Trees.dead == false]` |
+
+The patch owns the collection and rebuilds it by filtering at each step.
+
+### When to Use Flat-Time vs Time-Varying Data
+
+| Data Type | Time Dimension | Use Case |
+|-----------|---------------|----------|
+| **Flat-time** | Single timestep | Initial conditions, discrete events |
+| **Time-varying** | Multiple timesteps | Climate projections, seasonal cycles |
+
+### Best Practices
+
+1. **Use `meta.stepCount`** for timestep-conditional logic
+2. **Separate concerns**: Load data every step, apply conditionally
+3. **Validate spatial patterns**: Export and visualize intermediate values
+4. **Consider stochasticity**: Fire mortality uses random rolls for realistic variation
+5. **Use patch-level filtering** to remove organisms (not `end.step` or similar)
+6. **Watch unit consistency**: Josh stores percentages as decimals (0-1), so use `count` units for raw 0-100 comparisons
+
+## Summary
+
+This tutorial demonstrated:
+
+1. **Creating flat-time NetCDF data** with single timestep for specific events
+2. **Init-time patterns** for spatially-variable population initialization
+3. **Conditional step patterns** using `meta.stepCount` for mid-simulation interventions
+4. **Organism removal** via patch-level collection filtering (the only mechanism in Josh)
+5. **Visualization** confirming that spatial patterns propagate correctly
+
+The combination of spatial external data with timestep-conditional logic enables
+realistic scenarios like:
+
+- Initializing from forest inventory data
+- Applying historical fire perimeters
+- Simulating management interventions
+- Modeling disturbance-recovery dynamics
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+
+import os
+
+manager.cleanup()
+manager.close()
+
+# Remove temporary registry
+for f in [REGISTRY_PATH, f"{REGISTRY_PATH}.wal"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+## Learn More
+
+- [Preprocessing External Data](preprocessing.qmd) - Basic external data workflow
+- [Sweeping Over External Data](external-data-sweep.qmd) - Compare multiple input files
+- [Adaptive Fire](adaptive-sweep.qmd) - Optimization with fire dynamics
+- [Josh Data Guide](https://joshsim.org/guides/data.html) - Josh documentation on external data

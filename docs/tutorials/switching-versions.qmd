@@ -1,0 +1,216 @@
+---
+title: "Switching Josh Versions"
+description: "Using stable, development, or custom Josh builds"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Introduction
+
+Josh is in active development, with new features and improvements released regularly.
+joshpy supports three version modes:
+
+| Version | Description | When to Use |
+|---------|-------------|-------------|
+| **Stable (PROD)** | Tested, reliable releases | Default choice for most users |
+| **Development (DEV)** | Latest features, may have rough edges | Testing new Josh capabilities |
+| **Custom** | Your own Josh build | Josh team development only |
+
+**If you're not sure which to use, stick with the default (Stable).** It (should) just work.
+
+## Switching Versions in SweepManager
+
+Most users interact with Josh through `SweepManager`. Here's how to switch versions.
+
+### Using the Stable Version (Default)
+
+No extra configuration needed - joshpy uses the stable version by default:
+
+```{python}
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+from joshpy.sweep import SweepManager
+
+# Define a simple sweep
+config = JobConfig(
+    template_path=Path("../../examples/templates/sweep_config.jshc.j2"),
+    source_path=Path("../../examples/tutorial_sweep.josh"),
+    simulation="Main",
+    replicates=1,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[50]),
+        ],
+        strategy=CartesianStrategy(),
+    ),
+)
+
+# Uses stable (PROD) version automatically
+manager = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="version_demo")
+    .build()
+)
+
+print(f"Using Josh version: {manager.cli.josh_jar}")
+manager.cleanup()
+manager.close()
+```
+
+### Using the Development Version
+
+To test the latest Josh features, create a `JoshCLI` with `JarMode.DEV`:
+
+```{python}
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+# Create CLI with development version
+cli_dev = JoshCLI(josh_jar=JarMode.DEV)
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="dev_demo")
+    .with_cli(cli_dev)
+    .build()
+)
+
+print(f"Using Josh version: {manager.cli.josh_jar}")
+manager.cleanup()
+manager.close()
+```
+
+::: {.callout-note}
+The development version contains the latest features but may be less stable than
+the production release. Use it when you want to try new Josh capabilities or
+help test upcoming features.
+:::
+
+### Using a Custom Build
+
+For Josh team members testing local builds:
+
+```{python}
+#| eval: false
+from pathlib import Path
+from joshpy.cli import JoshCLI
+
+# Point to your custom build
+cli_custom = JoshCLI(josh_jar=Path("path/to/your/joshsim-fat.jar"))
+
+manager = (
+    SweepManager.builder(config)
+    .with_cli(cli_custom)
+    .build()
+)
+```
+
+This is primarily useful when developing Josh itself and testing changes through
+joshpy's orchestration capabilities.
+
+## Switching Versions with JoshCLI
+
+If you're using `JoshCLI` directly (without `SweepManager`), the same patterns apply:
+
+```{python}
+from pathlib import Path
+from joshpy.cli import JoshCLI, ValidateConfig
+from joshpy.jar import JarMode
+
+# Stable version (default)
+cli = JoshCLI()
+print(f"Default: {cli.josh_jar}")
+
+# Development version
+cli_dev = JoshCLI(josh_jar=JarMode.DEV)
+print(f"Development: {cli_dev.josh_jar}")
+
+# Verify it works
+result = cli.validate(ValidateConfig(
+    script=Path("../../examples/tutorial_sweep.josh"),
+))
+print(f"Validation: {'passed' if result.success else 'failed'}")
+```
+
+::: {.callout-tip collapse="true"}
+## Advanced: Version Management for CI/CD
+
+For automated pipelines and reproducible experiments, you may want more control
+over version management.
+
+### Checking Available Versions
+
+```{python}
+from joshpy.jar import JarManager, JarMode
+
+manager = JarManager()
+
+# Check which versions are downloaded
+for mode in [JarMode.PROD, JarMode.DEV]:
+    exists = manager.jar_exists(mode)
+    print(f"{mode.value}: {'available' if exists else 'not downloaded'}")
+```
+
+### Version Information for Reproducibility
+
+Track which version was used in your experiments:
+
+```{python}
+from joshpy.jar import JarManager, JarMode
+
+manager = JarManager()
+info = manager.get_info(JarMode.PROD)
+
+if info.get("exists"):
+    print(f"Path: {info.get('path')}")
+    print(f"Version: {info.get('version')}")
+    print(f"Hash: {info.get('hash')}")
+```
+
+### Pre-downloading for Offline Use
+
+In CI/CD environments, you may want to download versions ahead of time:
+
+```{python}
+from joshpy.jar import JarManager, JarMode
+
+manager = JarManager()
+
+# Download if not already present
+result = manager.download_jar(JarMode.PROD, force=False)
+print(f"Path: {result.jar_path}")
+print(f"Already existed: {not result.was_updated}")
+```
+
+### Disabling Auto-Download
+
+For strict environments where you want to fail fast if the version isn't available:
+
+```{python}
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+# This will raise an error if the JAR isn't already downloaded
+cli = JoshCLI(josh_jar=JarMode.PROD, auto_download=False)
+```
+
+:::
+
+## Summary
+
+- **Default (Stable)** is the right choice for most users - no configuration needed
+- **Development** version lets you test latest features, but may be less stable
+- **Custom** builds are for Josh team development workflows
+- joshpy automatically downloads the requested version if needed
+
+**Related Tutorials:**
+
+- [SweepManager Workflow](sweep-manager.qmd) - Parameter sweep basics
+- [Remote Execution](remote-execution.qmd) - Running simulations on Josh Cloud

@@ -34,22 +34,39 @@ pip install joshpy[all]
 
 ```
 joshpy/
-├── __init__.py      # Public API exports and Josh HTTP client
+├── __init__.py      # Public API exports
 ├── cli.py           # CLI wrapper (JoshCLI, RunConfig, etc.)
-├── jobs.py          # Parameter sweep orchestration
-├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy)
-├── sweep.py         # SweepManager for orchestration
-├── registry.py      # DuckDB experiment tracking
-├── cell_data.py     # Spatiotemporal data loading and queries
+├── jobs.py          # Parameter sweep orchestration (JobConfig, JobExpander, etc.)
+├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy, cv_objective)
+├── sweep.py         # SweepManager for high-level orchestration
+├── registry.py      # DuckDB experiment tracking (RunRegistry)
+├── cell_data.py     # Spatiotemporal data loading (CellDataLoader, DiagnosticQueries)
 ├── diagnostics.py   # Diagnostic plotting (SimulationDiagnostics)
-├── jar.py           # JAR file management
-├── metadata.py      # Simulation metadata
+├── jar.py           # JAR file management (JarManager, JarMode)
+├── metadata.py      # Simulation metadata parsing
 ├── parse.py         # Response parsing utilities
 ├── remote.py        # Remote HTTP backend
-├── strategy.py      # Backend interface (HTTP vs local)
 ├── geocode.py       # Coordinate conversion
 └── definitions.py   # Type definitions
 ```
+
+### Key Exports by Module
+
+**Always available:**
+- `jar.py`: `JarMode`, `JarManager`, `get_jar`, `download_jars`, `get_jar_hash`, `get_jar_version`
+- `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `PreprocessConfig`, `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
+
+**Requires joshpy[jobs]:**
+- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`
+- `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `SweepExecutionError`, `cv_objective`
+
+**Requires joshpy[registry]:**
+- `registry.py`: `RunRegistry`, `RegistryCallback`, `SessionInfo`, `ConfigInfo`, `RunInfo`, `SessionSummary`, `DataSummary`
+- `cell_data.py`: `CellDataLoader`, `DiagnosticQueries`
+- `diagnostics.py`: `SimulationDiagnostics`
+
+**Requires joshpy[all] (jobs + registry):**
+- `sweep.py`: `SweepManager`, `SweepManagerBuilder`, `recover_sweep_results`, `load_job_results`, `LoadConfig`, `ResultLoadError`
 
 ---
 
@@ -393,7 +410,7 @@ config = JobConfig(
         config_parameters=[
             ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100]),
             ConfigSweepParameter(name="mortality", values=[0.1, 0.2]),
-        ]
+        ],
     ),
 )
 
@@ -432,9 +449,9 @@ config = JobConfig(
         ],
         file_parameters=[
             FileSweepParameter(name="climate", paths=[
-                "data/climate_rcp26.jshd",
-                "data/climate_rcp45.jshd",
-                "data/climate_rcp85.jshd",
+                Path("data/climate_rcp26.jshd"),
+                Path("data/climate_rcp45.jshd"),
+                Path("data/climate_rcp85.jshd"),
             ]),
         ],
     ),
@@ -534,6 +551,16 @@ config = JobConfig.from_yaml_file(Path("sweep_config.yaml"))
 job_set = JobExpander().expand(config)
 ```
 
+### SweepConfig Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `config_parameters` | list[ConfigSweepParameter] | Parameters injected into Jinja templates |
+| `file_parameters` | list[FileSweepParameter] | File paths to sweep over in file_mappings |
+| `strategy` | SweepStrategy | Expansion strategy (default: CartesianStrategy) |
+
+Note: `parameters` is a deprecated alias for `config_parameters`.
+
 ### JobConfig Options
 
 | Parameter | Type | Description |
@@ -558,13 +585,17 @@ Each expanded job contains:
 job.config_content   # Rendered configuration text
 job.config_path      # Path to written .jshc file
 job.config_name      # Logical name for --data flag
-job.config_hash      # MD5 hash (12 chars) for identification
+job.run_hash         # MD5 hash (12 chars) of josh + config + file_mappings
 job.parameters       # Dict of parameter values
 job.simulation       # Simulation name
 job.replicates       # Number of replicates
 job.source_path      # Path to .josh file
 job.file_mappings    # Additional data files
 job.custom_tags      # Tags for CLI (derived from parameters)
+job.output_steps     # Step range to output (optional)
+job.seed             # Random seed (optional)
+job.crs              # Coordinate reference system (optional)
+job.use_float64      # Use double precision (optional)
 ```
 
 ### Converting Jobs to CLI Configs
@@ -598,7 +629,7 @@ from joshpy.registry import RunRegistry
 # Setup
 cli = JoshCLI()
 registry = RunRegistry("experiment.duckdb")
-session_id = registry.create_session(experiment_name="my_sweep")
+session_id = registry.create_session(config=config, experiment_name="my_sweep")
 
 # Register job configs
 for job in job_set:
@@ -631,11 +662,12 @@ for job, result in results:
 | `job_set` | JobSet | Expanded jobs to run (required) |
 | `registry` | RunRegistry | Optional registry for automatic run tracking |
 | `session_id` | str | Session ID for registry (required if registry provided) |
+| `manage_status` | bool | If True, automatically manage session status (default: True) |
 | `remote` | bool | If True, use run_remote() for remote execution (default: False) |
-| `api_key` | str | API key for remote execution (optional, not needed for local servers) |
+| `api_key` | str | API key for remote execution (required if remote=True) |
 | `endpoint` | str | Custom endpoint URL for remote execution (optional) |
 | `on_complete` | Callable | Optional callback invoked after each job (for progress, logging, etc.) |
-| `stop_on_failure` | bool | If True, stop on first failure (default: False) |
+| `stop_on_failure` | bool | If True, stop on first failure (default: True) |
 | `dry_run` | bool | If True, print plan without executing (default: False) |
 | `quiet` | bool | If True, suppress progress output (default: False) |
 
@@ -823,6 +855,132 @@ optuna.visualization.plot_optimization_history(study)
 
 ---
 
+## SweepManager
+
+`SweepManager` provides high-level orchestration for parameter sweeps, combining job expansion, execution, and result loading in a single interface.
+
+### Builder Pattern
+
+```python
+from pathlib import Path
+from joshpy.sweep import SweepManager
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+
+config = JobConfig(
+    template_path=Path("templates/config.jshc.j2"),
+    source_path=Path("simulation.josh"),
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100]),
+        ],
+    ),
+)
+
+# Build with registry and CLI
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiment.duckdb", experiment_name="my_sweep")
+    .with_cli(jar_path=Path("joshsim-fat.jar"))
+    .build()
+)
+
+# Or use context manager for automatic cleanup
+with SweepManager.from_config(config, registry=":memory:") as manager:
+    results = manager.run()
+    manager.load_results()
+```
+
+### Running Sweeps
+
+```python
+# Local execution (default)
+results = manager.run()
+
+# Remote execution (Josh Cloud)
+results = manager.run(remote=True, api_key="your-api-key")
+
+# Custom endpoint
+results = manager.run(remote=True, endpoint="http://localhost:8080")
+
+# Dry run to preview plan
+results = manager.run(dry_run=True)
+```
+
+### SweepManager.run() Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `remote` | bool | Use run_remote() for cloud execution (default: False) |
+| `api_key` | str | API key for remote execution |
+| `endpoint` | str | Custom endpoint URL |
+| `stop_on_failure` | bool | Stop on first job failure (default: True) |
+| `dry_run` | bool | Print plan without executing (default: False) |
+| `quiet` | bool | Suppress progress output (default: False) |
+| `on_complete` | Callable | Callback after each job |
+| `objective` | ObjectiveFn | Objective function for adaptive strategies |
+
+### Loading Results
+
+```python
+# Load CSV outputs into registry
+rows_loaded = manager.load_results()
+print(f"Loaded {rows_loaded} rows")
+
+# Specify export type
+rows_loaded = manager.load_results(export_type="patch")
+```
+
+### Querying Results
+
+```python
+# Convenience query method
+df = manager.query("averageHeight", group_by="maxGrowth")
+
+# Filter by step
+df = manager.query("averageHeight", group_by="maxGrowth", step=100)
+
+# Additional filters
+df = manager.query("averageHeight", scenario="baseline")
+```
+
+### LoadConfig for Retry Behavior
+
+Control retry behavior when loading results:
+
+```python
+from joshpy.sweep import SweepManager, LoadConfig
+
+load_config = LoadConfig(
+    max_retries=3,        # Retry attempts for missing files
+    retry_delay=0.5,      # Seconds between retries
+    settle_delay=0.2,     # Delay before first attempt (filesystem settle)
+    raise_on_missing=False,  # If False, warn and continue on missing files
+)
+
+# Use with run or load_results
+results = manager.run(load_config=load_config)
+```
+
+### Recovery After Failure
+
+If a sweep is interrupted, recover results from existing CSV files:
+
+```python
+from joshpy.sweep import recover_sweep_results
+
+# Recover results from a previous run
+rows_loaded = recover_sweep_results(
+    cli,
+    job_set,
+    registry,
+    export_type="patch",
+)
+```
+
+---
+
 ## Experiment Registry
 
 The `registry` module provides DuckDB-backed tracking for experiments.
@@ -873,18 +1031,22 @@ registry.to_csv("results.csv")
 Use context managers to filter all queries:
 
 ```python
-# Spatial filter with bounding box
+# Spatial filter with bounding box (min_lon, max_lon, min_lat, max_lat)
 with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
-    df = queries.get_timeseries("height", config_hash="abc123")
+    df = queries.get_cell_timeseries(-115.5, 33.8, "height", run_hash="abc123def456")
+
+# Spatial filter with GeoJSON
+with registry.spatial_filter(geojson=park_boundary):
+    df = queries.get_cell_timeseries(-115.5, 33.8, "height", run_hash="abc123def456")
 
 # Temporal filter
 with registry.time_filter(step_range=(0, 50)):
-    df = queries.get_timeseries("height", config_hash="abc123")
+    df = queries.get_cell_timeseries(-115.5, 33.8, "height", run_hash="abc123def456")
 
 # Nested filters
 with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
     with registry.time_filter(step_range=(10, 20)):
-        df = queries.get_comparison("height", group_by="maxGrowth")
+        df = queries.get_parameter_comparison("height", "maxGrowth")
 ```
 
 ### Session Management
@@ -892,12 +1054,11 @@ with registry.spatial_filter(bbox=(-116, -115, 33.5, 34.0)):
 Sessions group related job runs:
 
 ```python
-# Create a session (total_jobs/total_replicates are computed from JobSet)
+# Create a session (total_jobs/total_replicates are computed from config)
 session_id = registry.create_session(
+    config=config,  # JobConfig instance
     experiment_name="jotr_sensitivity",
-    simulation="JoshuaTreeSim",
-    template_path="templates/config.jshc.j2",
-    metadata={"description": "Sensitivity analysis"}
+    session_id=None,  # Optional: provide custom session ID
 )
 
 # Update session status
@@ -915,10 +1076,12 @@ summary = registry.get_session_summary(session_id)
 ```python
 # Register job configurations
 for job in job_set:
-    registry.register_config(
+    registry.register_run(
         session_id=session_id,
-        config_hash=job.config_hash,
+        run_hash=job.run_hash,
+        josh_path=str(job.source_path),
         config_content=job.config_content,
+        file_mappings=job.file_mappings,
         parameters=job.parameters,
     )
 
@@ -932,10 +1095,10 @@ config = registry.get_config_by_hash("abc123def456")
 ```python
 # Start a run
 run_id = registry.start_run(
-    config_hash=job.config_hash,
+    run_hash=job.run_hash,
     replicate=0,
     output_path="/tmp/results",
-    metadata={"parameters": job.parameters}
+    metadata={"parameters": job.parameters},
 )
 
 # Complete the run
@@ -946,7 +1109,7 @@ registry.complete_run(
 )
 
 # Query runs
-runs = registry.get_runs_for_config(config_hash)
+runs = registry.get_runs_for_hash(run_hash)
 run = registry.get_run(run_id)
 ```
 
@@ -966,11 +1129,13 @@ callback = RegistryCallback(registry, session_id)
 cli = JoshCLI()
 
 for job in job_set:
-    # Register config
-    registry.register_config(
+    # Register run
+    registry.register_run(
         session_id=session_id,
-        config_hash=job.config_hash,
+        run_hash=job.run_hash,
+        josh_path=str(job.source_path),
         config_content=job.config_content,
+        file_mappings=job.file_mappings,
         parameters=job.parameters,
     )
     
@@ -1019,7 +1184,7 @@ loader = CellDataLoader(registry)
 rows_loaded = loader.load_csv(
     csv_path=Path("output.csv"),
     run_id="abc123",
-    config_hash="def456",
+    run_hash="def456789012",
     entity_type="patch",
 )
 print(f"Loaded {rows_loaded} rows")
@@ -1044,13 +1209,22 @@ df = queries.get_cell_timeseries(
     longitude=-116.1,
     latitude=33.9,
     variable="treeCount",
+    run_hash="abc123def456",  # Optional filter
+)
+
+# Spatial snapshot at a timestep
+df = queries.get_spatial_snapshot(
+    step=50,
+    variable="treeCount",
+    run_hash="abc123def456",
+    replicate=0,
 )
 
 # Parameter comparison
 df = queries.get_parameter_comparison(
     variable="totalBiomass",
     param_name="maxGrowth",
-    session_id=session_id,
+    step=100,  # Optional: specific timestep (creates bar chart)
 )
 
 # Show SQL for learning and debugging
@@ -1066,16 +1240,10 @@ df = queries.get_cell_timeseries(
 #           SELECT step, replicate, ...
 #       ''', [-116.1, 33.9]).df()
 
-df = queries.get_parameter_comparison(
-    variable="totalBiomass",
-    param_name="maxGrowth",
-    show_sql=True,  # Prints the SQL query
-)
-
 # Per-replicate coefficient of variation (for stability analysis)
 result = queries.get_replicate_cv(
     variable="totalCover",
-    run_hash="abc123",
+    run_hash="abc123def456",
     burn_in=50,                # Skip first 50 timesteps
     extinction_threshold=0.01, # Mean below this = extinction
 )
@@ -1087,6 +1255,13 @@ print(result)
 #     'n_timesteps': 50,         # Timesteps after burn-in
 #     'extinct_replicates': [],  # Replicates that went extinct
 # }
+
+# Replicate uncertainty with confidence intervals
+df = queries.get_replicate_uncertainty(
+    variable="treeCount",
+    run_hash="abc123def456",
+    confidence=0.95,
+)
 ```
 
 ---
@@ -1164,19 +1339,19 @@ diag = SimulationDiagnostics(registry)
 
 ```python
 # Basic time series (spatially aggregated mean with replicate uncertainty)
-diag.plot_timeseries("averageAge", config_hash="abc123")
+diag.plot_timeseries("averageAge", run_hash="abc123def456")
 
 # Different aggregation modes
-diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="sum")
-diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="min")
-diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="max")
+diag.plot_timeseries("treeCount", run_hash="abc123def456", aggregate="sum")
+diag.plot_timeseries("treeCount", run_hash="abc123def456", aggregate="min")
+diag.plot_timeseries("treeCount", run_hash="abc123def456", aggregate="max")
 
 # Per-patch time series (one line per spatial cell, low alpha)
 # Warning: can be busy for large grids
-diag.plot_timeseries("treeCount", config_hash="abc123", aggregate="none")
+diag.plot_timeseries("treeCount", run_hash="abc123def456", aggregate="none")
 
 # Filter by step range
-diag.plot_timeseries("averageAge", config_hash="abc123", step_range=(0, 50))
+diag.plot_timeseries("averageAge", run_hash="abc123def456", step_range=(0, 50))
 
 # Filter by arbitrary parameters
 diag.plot_timeseries("averageAge", maxGrowth=10, survivalProb=0.9)
@@ -1185,10 +1360,10 @@ diag.plot_timeseries("averageAge", maxGrowth=10, survivalProb=0.9)
 diag.plot_timeseries("averageAge", session_id="...")
 
 # Custom title
-diag.plot_timeseries("averageAge", config_hash="abc123", title="Tree Age Over Time")
+diag.plot_timeseries("averageAge", run_hash="abc123def456", title="Tree Age Over Time")
 
 # Save to file instead of showing inline
-fig = diag.plot_timeseries("averageAge", config_hash="abc123", show=False)
+fig = diag.plot_timeseries("averageAge", run_hash="abc123def456", show=False)
 fig.savefig("diagnostic.png", dpi=150)
 ```
 
@@ -1197,7 +1372,7 @@ fig.savefig("diagnostic.png", dpi=150)
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `variable` | str | Variable name to plot (required) |
-| `config_hash` | str | Filter to specific config |
+| `run_hash` | str | Filter to specific run |
 | `session_id` | str | Filter to specific session |
 | `aggregate` | str | Spatial aggregation: "mean" (default), "sum", "min", "max", "none" |
 | `show_replicates` | bool | Show uncertainty band across replicates (default: True) |
@@ -1254,13 +1429,13 @@ consider binning in a custom SQL query.
 
 ```python
 # Scatter plot colored by value at a specific timestep
-diag.plot_spatial("treeCount", step=50, config_hash="abc123")
+diag.plot_spatial("treeCount", step=50, run_hash="abc123def456")
 
 # Specific replicate
-diag.plot_spatial("treeCount", step=50, config_hash="abc123", replicate=2)
+diag.plot_spatial("treeCount", step=50, run_hash="abc123def456", replicate=2)
 
 # Save to file
-fig = diag.plot_spatial("treeCount", step=50, config_hash="abc123", show=False)
+fig = diag.plot_spatial("treeCount", step=50, run_hash="abc123def456", show=False)
 fig.savefig("spatial_snapshot.png")
 ```
 
@@ -1270,7 +1445,7 @@ fig.savefig("spatial_snapshot.png")
 |-----------|------|-------------|
 | `variable` | str | Variable name to plot (required) |
 | `step` | int | Timestep to visualize (required) |
-| `config_hash` | str | Config hash to filter by (required) |
+| `run_hash` | str | Run hash to filter by (required) |
 | `replicate` | int | Replicate number (default: 0) |
 | `title` | str | Custom plot title |
 | `show` | bool | Display inline (default: True) |
@@ -1281,7 +1456,7 @@ Methods raise `ValueError` with helpful messages:
 
 ```python
 # Variable not found
-diag.plot_timeseries("nonexistent", config_hash="abc123")
+diag.plot_timeseries("nonexistent", run_hash="abc123def456")
 # ValueError: Variable 'nonexistent' not found. Available: averageAge, averageHeight
 
 # Parameter not found
@@ -1289,8 +1464,8 @@ diag.plot_comparison("averageAge", group_by="nonexistent")
 # ValueError: Parameter 'nonexistent' not found. Available: maxGrowth, survivalProb
 
 # No matching data
-diag.plot_timeseries("averageAge", config_hash="invalid")
-# ValueError: No data found matching filters. Check session_id/config_hash/parameters.
+diag.plot_timeseries("averageAge", run_hash="invalid")
+# ValueError: No data found matching filters. Check session_id/run_hash/parameters.
 ```
 
 ### Warnings
@@ -1298,12 +1473,12 @@ diag.plot_timeseries("averageAge", config_hash="invalid")
 The module emits warnings in certain situations:
 
 ```python
-# Multiple configs match - warns but still plots with legend
+# Multiple runs match - warns but still plots with legend
 diag.plot_timeseries("averageAge", session_id="...")
-# UserWarning: Matched 5 configs. Consider filtering by config_hash for clarity.
+# UserWarning: Matched 5 runs. Consider filtering by run_hash for clarity.
 
 # Per-patch plotting - warns about potential busy plot
-diag.plot_timeseries("averageAge", config_hash="abc123", aggregate="none")
+diag.plot_timeseries("averageAge", run_hash="abc123def456", aggregate="none")
 # UserWarning: aggregate='none' plots one line per patch, which may be busy for large grids.
 ```
 
@@ -1421,10 +1596,12 @@ survivalProb = {{ survivalProb }} percent
     source_path=Path("joshua_tree.josh"),
     simulation="JoshuaTreeSim",
     replicates=5,
-    sweep=SweepConfig(config_parameters=[
-        ConfigSweepParameter(name="maxGrowth", values=[5, 10, 20]),
-        ConfigSweepParameter(name="survivalProb", values={"start": 80, "stop": 100, "step": 5}),
-    ]),
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[5, 10, 20]),
+            ConfigSweepParameter(name="survivalProb", values={"start": 80, "stop": 100, "step": 5}),
+        ],
+    ),
 )
 
 # Expand jobs - computed properties available
@@ -1434,8 +1611,8 @@ print(f"Will run {job_set.total_jobs} jobs ({job_set.total_replicates} replicate
 
 # Create session
 session_id = registry.create_session(
+    config=config,
     experiment_name="jotr_sensitivity",
-    simulation=config.simulation,
 )
 
 # Register job configs
@@ -1533,12 +1710,22 @@ SimulationResults = List[List[Dict]]
 - `requests ~= 2.32.3`
 
 ### Optional (via extras)
-- `jinja2>=3.0` - Template rendering ([jobs])
-- `pyyaml>=6.0` - YAML configuration ([jobs])
-- `numpy>=1.24` - Range specifications ([numpy])
-- `duckdb>=0.9` - Experiment registry ([registry])
-- `pydantic>=2.0` - Data validation ([registry])
-- `pandas>=2.0` - DataFrame exports ([registry])
+
+**[jobs]** - Job templating:
+- `jinja2>=3.0` - Template rendering
+- `pyyaml>=6.0` - YAML configuration
+- `numpy>=1.24` - Range specifications
+
+**[registry]** - Experiment tracking (includes [jobs]):
+- `duckdb>=0.9` - DuckDB database
+- `pandas>=2.0` - DataFrame exports
+- `matplotlib>=3.5` - Diagnostic plotting
+- `scipy>=1.10` - Statistical functions
+
+**[adaptive]** - Intelligent search (includes [registry]):
+- `optuna>=3.0` - Bayesian optimization
+
+**[full]** - All features (includes [adaptive])
 
 ---
 

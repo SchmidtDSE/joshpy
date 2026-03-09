@@ -1,0 +1,200 @@
+---
+title: "Remote Runs in Parallel"
+description: "Speed up simulations by distributing replicates across Josh Cloud"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Introduction
+
+**Josh Cloud** is free community infrastructure for running Josh simulations at scale.
+When you have sweeps with many replicates, Josh Cloud runs them in parallel -
+significantly faster than sequential local execution.
+
+### How It Works
+
+1. Your local machine runs Josh as a **coordinator**
+2. Replicates are distributed across Josh Cloud workers
+3. Results are collected and returned to your local machine
+4. The computation happens in the cloud - very resource-light locally
+
+### Getting an API Key
+
+Josh Cloud is a **free service** provided by the Eric and Wendy Schmidt Center
+for Data Science and Environment. To request access:
+
+**[Contact DSE for an API key](https://dse-disturbance-toolbox.org/contact/)**
+
+## Setup
+
+Store your API key in a `.env` file in your project root:
+
+```
+# .env
+JOSH_API_KEY=your-api-key-here
+```
+
+```{python}
+from dotenv import load_dotenv
+import os
+import time
+from pathlib import Path
+
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+from joshpy.sweep import SweepManager
+
+# Load API key from .env file
+load_dotenv()
+api_key = os.environ["JOSH_API_KEY"]  # Fails fast if not set
+dev_endpoint = os.environ.get("JOSH_DEV_ENDPOINT")
+
+print(f"API key loaded: {api_key[:8]}...")
+
+# Shared CLI instance
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+# Use maxGrowth=42 - a unique value not used by other tutorials
+# This ensures output files don't collide with other tutorial runs
+PARAM_VALUE = 42
+```
+
+## Local vs Cloud: Speed Comparison
+
+Let's compare execution time for a sweep with **100 replicates**.
+
+### Local Execution (Sequential)
+
+Running locally, all 100 replicates execute one after another:
+
+```{python}
+#| label: local-execution
+
+# Clean up any stale files from this tutorial
+for f in Path("/tmp").glob(f"tutorial_sweep_{PARAM_VALUE}_*.csv"):
+    f.unlink()
+
+config = JobConfig(
+    template_path=Path("../../examples/templates/sweep_config.jshc.j2"),
+    source_path=Path("../../examples/tutorial_sweep.josh"),
+    simulation="Main",
+    replicates=100,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[PARAM_VALUE]),
+        ],
+        strategy=CartesianStrategy(),
+    ),
+)
+
+manager_local = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="local_benchmark")
+    .with_cli(cli)
+    .build()
+)
+
+print(f"Running {config.replicates} replicates locally...")
+start_time = time.time()
+results_local = manager_local.run()
+local_duration = time.time() - start_time
+
+print(f"\nLocal execution: {local_duration:.1f} seconds")
+print(f"Succeeded: {results_local.succeeded}, Failed: {results_local.failed}")
+
+manager_local.cleanup()
+manager_local.close()
+```
+
+### Cloud Execution (Parallel)
+
+With `remote=True`, replicates are distributed across cloud workers:
+
+```{python}
+#| label: cloud-execution
+
+# Clean up before cloud run
+for f in Path("/tmp").glob(f"tutorial_sweep_{PARAM_VALUE}_*.csv"):
+    f.unlink()
+
+manager_cloud = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="cloud_benchmark")
+    .with_cli(cli)
+    .build()
+)
+
+print(f"Running {config.replicates} replicates on cloud...")
+start_time = time.time()
+results_cloud = manager_cloud.run(
+    remote=True,
+    api_key=api_key,
+    endpoint=dev_endpoint,
+)
+cloud_duration = time.time() - start_time
+
+print(f"\nCloud execution: {cloud_duration:.1f} seconds")
+print(f"Succeeded: {results_cloud.succeeded}, Failed: {results_cloud.failed}")
+
+manager_cloud.cleanup()
+manager_cloud.close()
+```
+
+### Results
+
+```{python}
+#| label: results
+if results_cloud.succeeded > 0 and local_duration > 0:
+    speedup = local_duration / cloud_duration
+    print(f"Local:  {local_duration:.1f}s (sequential)")
+    print(f"Cloud:  {cloud_duration:.1f}s (parallel)")
+    print(f"Speedup: {speedup:.1f}x faster with cloud execution")
+```
+
+## Best Practices
+
+### Never Hardcode API Keys
+
+Always load from environment variables or `.env` files:
+
+```python
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+api_key = os.environ["JOSH_API_KEY"]
+results = manager.run(remote=True, api_key=api_key)
+```
+
+### Test Locally First
+
+Before running large cloud sweeps, verify your simulation works locally:
+
+```python
+# First: small local test
+results = manager.run()  # local execution
+assert results.failed == 0, "Fix issues before scaling to cloud"
+
+# Then: scale up with cloud execution
+results = manager.run(remote=True, api_key=api_key)
+```
+
+## Summary
+
+- **Josh Cloud is free** - [contact DSE](https://dse-disturbance-toolbox.org/contact/) for an API key
+- Use `remote=True` to distribute replicates across cloud workers
+- Cloud execution provides significant speedup for many-replicate sweeps
+- The local JAR acts as coordinator - cloud does the heavy computation
+
+**Related Tutorials:**
+
+- [SweepManager Workflow](sweep-manager.qmd) - Parameter sweep basics
+- [Switching Josh Versions](switching-versions.qmd) - Using stable vs development builds

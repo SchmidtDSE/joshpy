@@ -39,7 +39,7 @@ each with 3 replicates, then load, query, and visualize the results.
 
 ## Prerequisites
 
-Ensure the Josh JAR is available at `jar/joshsim-fat.jar` and joshpy is installed:
+Ensure joshpy is installed (the Josh JAR is auto-downloaded on first use):
 
 ```bash
 pip install -e '.[all]'
@@ -173,10 +173,11 @@ function handles execution and automatically records runs in the registry when
 
 ```{python}
 from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
 from joshpy.jobs import run_sweep
 
-# Create CLI targeting the local fat JAR
-cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+# Create CLI (auto-downloads JAR if needed)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 
 # Run all jobs with automatic tracking
 # Note: run_sweep() now automatically manages session status:
@@ -184,6 +185,16 @@ cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
 #   - Sets status to "completed" if all jobs succeed
 #   - Sets status to "failed" if any job fails
 results = run_sweep(cli, job_set, registry=registry, session_id=session_id)
+
+# Fail the tutorial if any jobs failed - include actual error details
+if results.failed > 0:
+    errors = []
+    for job, result in results:
+        if not result.success:
+            error_msg = result.stderr.strip() if result.stderr else "No error message"
+            errors.append(f"Job {job.run_hash}: {error_msg[:500]}")
+    error_detail = "\n".join(errors)
+    raise RuntimeError(f"Sweep failed: {results.failed} job(s) failed\n\n{error_detail}")
 ```
 
 ## Step 4: Load Cell Data from CSVs

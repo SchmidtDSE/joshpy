@@ -40,7 +40,7 @@ each with 3 replicates, then load, query, and visualize the results.
 
 ## Prerequisites
 
-Ensure the Josh JAR is available at `jar/joshsim-fat.jar` and joshpy is installed:
+Ensure joshpy is installed (the Josh JAR is auto-downloaded on first use):
 
 ```bash
 pip install -e '.[all]'
@@ -132,6 +132,9 @@ pattern for flexible configuration:
 ```{python}
 from joshpy.sweep import SweepManager
 
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
 # Registry path - saved to disk for use in analysis tutorial
 REGISTRY_PATH = "demo_registry.duckdb"
 
@@ -139,7 +142,7 @@ REGISTRY_PATH = "demo_registry.duckdb"
 manager = (
     SweepManager.builder(config)
     .with_registry(REGISTRY_PATH, experiment_name="growth_rate_sweep")
-    .with_cli(jar_path=Path("../../jar/joshsim-fat.jar"))
+    .with_cli(JoshCLI(josh_jar=JarMode.DEV))
     .build()
 )
 ```
@@ -151,6 +154,16 @@ The `run()` method executes all jobs with automatic registry tracking:
 ```{python}
 # Run all jobs
 results = manager.run()
+
+# Fail the tutorial if any jobs failed - include actual error details
+if results.failed > 0:
+    errors = []
+    for job, result in results:
+        if not result.success:
+            error_msg = result.stderr.strip() if result.stderr else "No error message"
+            errors.append(f"Job {job.run_hash}: {error_msg[:500]}")
+    error_detail = "\n".join(errors)
+    raise RuntimeError(f"Sweep failed: {results.failed} job(s) failed\n\n{error_detail}")
 ```
 
 ## Step 4: Load Results

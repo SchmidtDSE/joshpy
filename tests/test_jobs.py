@@ -578,12 +578,16 @@ class TestJobExpander(unittest.TestCase):
                 self.assertEqual(job_a.file_mappings["climate"], file_a)
                 self.assertEqual(job_a.custom_tags["climate"], "scenario_a")
                 self.assertEqual(job_a.custom_tags["climate_file"], "scenario_a.jshd")
+                # File label should also be in parameters for SQL queryability
+                self.assertEqual(job_a.parameters["climate"], "scenario_a")
 
                 # Second job should have file_b in file_mappings
                 job_b = job_set.jobs[1]
                 self.assertEqual(job_b.file_mappings["climate"], file_b)
                 self.assertEqual(job_b.custom_tags["climate"], "scenario_b")
                 self.assertEqual(job_b.custom_tags["climate_file"], "scenario_b.jshd")
+                # File label should also be in parameters for SQL queryability
+                self.assertEqual(job_b.parameters["climate"], "scenario_b")
             finally:
                 job_set.cleanup()
 
@@ -648,11 +652,56 @@ class TestJobExpander(unittest.TestCase):
             try:
                 self.assertEqual(len(job_set), 4)  # 2 x 2
 
-                # Jobs should only have config params in parameters dict
-                # (file params affect file_mappings, not parameters)
+                # Jobs should have both config params and file labels in parameters
                 for job in job_set:
                     self.assertIn("x", job.parameters)
-                    self.assertNotIn("data", job.parameters)
+                    # File parameter labels should now be in parameters
+                    self.assertIn("data", job.parameters)
+                    # The value should be the filename stem (label)
+                    self.assertIn(job.parameters["data"], ["a", "b"])
+            finally:
+                job_set.cleanup()
+
+    def test_multiple_file_params_in_parameters(self):
+        """Multiple file parameter labels should all appear in parameters."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test files for two different file parameters
+            precip_low = Path(tmpdir) / "precip_low.jshd"
+            precip_high = Path(tmpdir) / "precip_high.jshd"
+            temp_cool = Path(tmpdir) / "temp_cool.jshd"
+            temp_warm = Path(tmpdir) / "temp_warm.jshd"
+            for f in [precip_low, precip_high, temp_cool, temp_warm]:
+                f.write_bytes(b"test data")
+
+            config = JobConfig(
+                template_string="# config",
+                sweep=SweepConfig(
+                    file_parameters=[
+                        FileSweepParameter(name="precip", paths=[precip_low, precip_high]),
+                        FileSweepParameter(name="temp", paths=[temp_cool, temp_warm]),
+                    ],
+                ),
+                source_path=Path(tmpdir) / "sim.josh",
+            )
+            config.source_path.write_text("simulation")
+
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                # 2 x 2 = 4 jobs
+                self.assertEqual(len(job_set), 4)
+
+                for job in job_set:
+                    # Both file parameter labels should be in parameters
+                    self.assertIn("precip", job.parameters)
+                    self.assertIn("temp", job.parameters)
+                    self.assertIn(job.parameters["precip"], ["precip_low", "precip_high"])
+                    self.assertIn(job.parameters["temp"], ["temp_cool", "temp_warm"])
+
+                    # Also verify they're still in file_mappings
+                    self.assertIn("precip", job.file_mappings)
+                    self.assertIn("temp", job.file_mappings)
             finally:
                 job_set.cleanup()
 

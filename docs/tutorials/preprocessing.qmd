@@ -266,9 +266,10 @@ with `--data soil_quality=soil_quality_gradient.jshd`.
 #| label: preprocess-all
 from pathlib import Path
 from joshpy.cli import JoshCLI, PreprocessConfig
+from joshpy.jar import JarMode
 
-# Setup CLI
-cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+# Setup CLI (auto-downloads JAR if needed)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 
 SOURCE_PATH = Path("../../examples/external_sweep.josh")
 DATA_DIR = Path("../../examples/external_data")
@@ -297,7 +298,7 @@ for pattern in patterns:
     if result.success:
         print(f"  -> {jshd_file.name} created successfully")
     else:
-        print(f"  -> FAILED: {result.stderr}")
+        raise RuntimeError(f"Preprocessing failed for {nc_file.name}: {result.stderr}")
 ```
 
 ### PreprocessConfig Options
@@ -324,9 +325,10 @@ spot-checking values at known coordinates.
 ```{python}
 #| label: inspect-jshd
 from joshpy.cli import JoshCLI, InspectJshdConfig
+from joshpy.jar import JarMode
 from pathlib import Path
 
-cli = JoshCLI(josh_jar=Path("../../jar/joshsim-fat.jar"))
+cli = JoshCLI(josh_jar=JarMode.DEV)
 DATA_DIR = Path("../../examples/external_data")
 
 # Test coordinates (grid space, not lat/lon)

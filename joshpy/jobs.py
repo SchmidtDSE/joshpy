@@ -825,6 +825,9 @@ class JobExpander:
                     file_label = value["label"]
                     file_mappings[key] = file_path
 
+                    # Store label as a config param for queryability in SQL
+                    config_params[key] = file_label
+
                     # Record BOTH stem label and full filename for traceability
                     # Stem is primary (used for grouping), filename for debugging
                     custom_tags[key] = file_label
@@ -856,14 +859,12 @@ class JobExpander:
             config_path = config_subdir / config_name
             config_path.write_text(rendered)
 
-            # Extract logical config name (without .jshc extension) for --data flag
-            logical_name = config_name.removesuffix(".jshc")
-
             # Create expanded job
+            # Note: config_name must include .jshc extension for --data flag
             job = ExpandedJob(
                 config_content=rendered,
                 config_path=config_path,
-                config_name=logical_name,
+                config_name=config_name,
                 run_hash=run_hash,
                 parameters=config_params,  # Only config params here
                 simulation=config.simulation,
