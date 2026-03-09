@@ -234,13 +234,15 @@ config = JobConfig(
 
 ```{python}
 from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
 
 REGISTRY_PATH = "adaptive_demo.duckdb"
 
 manager = (
     SweepManager.builder(config)
     .with_registry(REGISTRY_PATH, experiment_name="fire_stability")
-    .with_cli(jar_path=Path("../../jar/joshsim-fat.jar"))
+    .with_cli(JoshCLI(josh_jar=JarMode.DEV))
     .build()
 )
 
