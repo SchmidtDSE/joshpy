@@ -1,0 +1,138 @@
+# Timestep intervention simulation - demonstrates single-time external data
+# 
+# This simulation shows two patterns for using external spatial data at
+# specific timesteps:
+#
+# 1. INITIAL POPULATIONS: Tree density loaded from external data at init
+#    - Uses `external initial_density` in the patch's init event
+#    - Creates variable number of trees per patch based on spatial data
+#
+# 2. FIRE INTERVENTION: Fire severity applied at a specific timestep
+#    - Uses `external fire_severity` with `meta.stepCount` conditional
+#    - Applies damage only when the fire event occurs (step 5)
+#
+# Both patterns use "flat time" data - single-timestep spatial rasters
+# that are applied at specific moments rather than varying continuously.
+
+start simulation Main
+
+  # Grid extent matching the external data tutorials
+  grid.size = 5000 m
+  grid.low = 34.0 degrees latitude, -116.4 degrees longitude
+  grid.high = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.patch = "Default"
+
+  # 10 timesteps to observe pre-fire growth, fire event, and recovery
+  steps.low = 0 count
+  steps.high = 10 count
+
+  # Output exports to files (run_hash passed as custom-tag by joshpy)
+  exportFiles.patch = "file:///tmp/timestep_intervention_{run_hash}_{replicate}.csv"
+
+  # Fire event occurs at step 5 (configurable via meta parameter)
+  fire.eventStep = 5 count
+
+end simulation
+
+start patch Default
+
+  # =========================================================================
+  # PATTERN 1: Initial populations from external data
+  # =========================================================================
+  # Read initial tree density from preprocessed spatial data at init time.
+  # This value is read once at patch creation and determines tree creation.
+  initial_density.init = external initial_density
+  
+  # Create trees based on the spatial initial density data
+  # Density is 0-100%, we create trees proportional to density
+  # Using a simple scaling: density/5 gives 0-20 trees per patch
+  ForeverTree.init = create (initial_density / 5 percent) of ForeverTree
+
+  # =========================================================================
+  # ORGANISM REMOVAL PATTERN: Filter out dead organisms at start of step
+  # =========================================================================
+  # Josh does NOT have a built-in organism removal mechanism. Instead:
+  # 1. Organism sets a `dead` flag when it should be removed
+  # 2. Patch filters the collection at .start to exclude dead organisms
+  # 
+  # This is the ONLY way to reduce organism counts in Josh!
+  ForeverTree.start = prior.ForeverTree[prior.ForeverTree.dead == false]
+
+  # =========================================================================
+  # PATTERN 2: Fire severity from external data at specific timestep
+  # =========================================================================
+  # Read fire severity from external data at INIT time (flat-time data)
+  # This loads the spatial pattern once, then we use it when fire occurs
+  fire_severity.init = external fire_severity
+  fire_severity.step = prior.fire_severity
+  
+  # Detect when fire event should occur
+  is_fire_step.step = meta.stepCount == meta.fire.eventStep
+  
+  # Calculate damage to apply (only meaningful during fire step)
+  # Severity 0-100% maps to 0-80% mortality
+  fire_damage.step = map fire_severity from [0 percent, 100 percent] to [0 percent, 80 percent] linear
+
+  # Track total tree count for exports
+  tree_count.step = count(ForeverTree)
+  
+  # Export patch-level metrics
+  export.tree_count.step = tree_count
+  export.average_height.step = mean(ForeverTree.height) if tree_count > 0 count else 0 meters
+  export.average_age.step = mean(ForeverTree.age) if tree_count > 0 count else 0 years
+  export.fire_severity.step = fire_severity
+  export.fire_damage.step = fire_damage
+  export.is_fire_step.step = is_fire_step
+  export.step_count.step = meta.stepCount
+
+end patch
+
+start organism ForeverTree
+
+  # =========================================================================
+  # Dead flag - the ONLY mechanism for organism removal in Josh
+  # =========================================================================
+  # The patch filters out dead organisms at .start of each step.
+  # Once dead, stay dead (use prior.dead to persist the state).
+  dead.init = false
+
+  age.init = 0 years
+  age.step = prior.age + 1 year
+
+  height.init = sample uniform from 0 meters to 2 meters
+  
+  # Normal growth
+  growth_rate.step = sample uniform from 0.5 meters to 1.5 meters
+  height.step = prior.height + growth_rate
+
+  # =========================================================================
+  # Fire mortality based on patch fire severity
+  # =========================================================================
+  # During fire step, trees have a chance to die based on severity
+  # Access patch-level fire info via 'here' keyword
+  # 
+  # IMPORTANT: Josh represents percentages as decimals internally (0-1 range)
+  # even when specified with "percent" units. So we use count for the roll
+  # to get raw 0-100 values that match fire_damage.
+  survival_roll.step = sample uniform from 0 count to 100 count
+  
+  # Check fire step directly in organism
+  is_fire_step.step = meta.stepCount == meta.fire.eventStep
+  
+  # Tree dies if fire is active AND survival roll is less than damage
+  # Both values are now 0-100 scale
+  dies_in_fire.step = is_fire_step and (survival_roll < here.fire_damage)
+  
+  # Mark tree as dead if it dies in fire, otherwise preserve prior state
+  # This flag is read by the patch at .start to filter out dead trees
+  dead.step = prior.dead or dies_in_fire
+
+end organism
+
+start unit year
+
+  alias years
+  alias yr
+  alias yrs
+
+end unit

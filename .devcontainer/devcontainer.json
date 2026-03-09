@@ -15,7 +15,7 @@
     "updateRemoteUserUID": true,
     "remoteUser": "root",
     "containerUser": "root",
-    "postCreateCommand": "ln -sfn /home/vscode/.pixi-env .pixi && pixi install && pixi run install-dev && pixi run get-jars",
+    "postCreateCommand": "ln -sfn /home/vscode/.pixi-env .pixi && pixi install && pixi run install-dev && pixi run get-jars && pixi run configure-reticulate",
     "features": {
         "ghcr.io/devcontainers/features/github-cli:1": {},
         "ghcr.io/devcontainers/features/common-utils:2.5.3": {
