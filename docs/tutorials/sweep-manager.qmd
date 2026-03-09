@@ -154,6 +154,16 @@ The `run()` method executes all jobs with automatic registry tracking:
 ```{python}
 # Run all jobs
 results = manager.run()
+
+# Fail the tutorial if any jobs failed - include actual error details
+if results.failed > 0:
+    errors = []
+    for job, result in results:
+        if not result.success:
+            error_msg = result.stderr.strip() if result.stderr else "No error message"
+            errors.append(f"Job {job.run_hash}: {error_msg[:500]}")
+    error_detail = "\n".join(errors)
+    raise RuntimeError(f"Sweep failed: {results.failed} job(s) failed\n\n{error_detail}")
 ```
 
 ## Step 4: Load Results

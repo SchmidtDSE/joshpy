@@ -83,6 +83,16 @@ Run simulations with different input data files:
 
 Best for: Comparing climate scenarios, sensitivity to input data.
 
+### [Timestep Interventions](timestep-interventions.qmd)
+
+Use single-time external data for initialization and discrete events:
+
+- Initialize populations from spatial inventory data (init-time)
+- Apply disturbance events at specific timesteps (fire severity)
+- Conditional logic with `meta.stepCount`
+
+Best for: Initial conditions from COGs, discrete disturbance events.
+
 ## Analysis
 
 Tutorials for exploring and visualizing results.
@@ -121,4 +131,5 @@ All tutorials assume:
 5. [Running on Josh Cloud](remote-execution.qmd) - parallel cloud execution
 6. [Preprocessing](preprocessing.qmd) - work with external geospatial data
 7. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
-8. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
+8. [Timestep Interventions](timestep-interventions.qmd) - init-time and discrete event data
+9. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
