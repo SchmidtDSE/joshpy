@@ -663,10 +663,12 @@ class TestSweepExecutionError(unittest.TestCase):
             job=job, result=result, trial_num=5, succeeded_before=3
         )
 
-        self.assertIn("exit_code=1", str(error))
-        self.assertIn("Trial 6", str(error))  # trial_num is 0-indexed
-        self.assertIn("3 trial(s) succeeded", str(error))
+        self.assertIn("Exit code: 1", str(error))
+        self.assertIn("Job 6", str(error))  # trial_num is 0-indexed
+        self.assertIn("3 job(s) succeeded", str(error))
         self.assertIn("abc123", str(error))
+        self.assertIn("General error", str(error))  # diagnostic for exit code 1
+        self.assertIn("Suggestion:", str(error))
 
     def test_error_message_includes_stderr(self):
         """Error message should include stderr when present."""
@@ -709,6 +711,98 @@ class TestSweepExecutionError(unittest.TestCase):
         self.assertIs(error.result, result)
         self.assertEqual(error.trial_num, 7)
         self.assertEqual(error.succeeded_before, 5)
+
+    def test_oom_exit_code_137_diagnostic(self):
+        """Exit code 137 (SIGKILL/OOM) should have helpful diagnostic."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 137
+        result.stderr = ""
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=0, succeeded_before=0
+        )
+
+        self.assertIn("out of memory", str(error).lower())
+        self.assertIn("--use-float-64", str(error))
+        self.assertEqual(error.diagnostic, "Process killed (SIGKILL) - likely out of memory")
+
+    def test_sigterm_exit_code_143_diagnostic(self):
+        """Exit code 143 (SIGTERM) should have helpful diagnostic."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 143
+        result.stderr = ""
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=0, succeeded_before=0
+        )
+
+        self.assertIn("terminated", str(error).lower())
+        self.assertIn("--use-float-64", str(error))
+        self.assertEqual(
+            error.diagnostic,
+            "Process terminated (SIGTERM) - likely out of memory or system timeout"
+        )
+
+    def test_unknown_exit_code_has_generic_message(self):
+        """Unknown exit codes should still have a message."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 255
+        result.stderr = ""
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=0, succeeded_before=0
+        )
+
+        self.assertIn("Exit code: 255", str(error))
+        self.assertIn("signal 127", str(error).lower())  # 255 - 128 = 127
+
+
+class TestGetExitCodeDiagnostic(unittest.TestCase):
+    """Tests for get_exit_code_diagnostic function."""
+
+    def test_known_exit_code(self):
+        """Known exit codes should return specific messages."""
+        from joshpy.strategies import get_exit_code_diagnostic
+
+        desc, suggestion = get_exit_code_diagnostic(137)
+        self.assertIn("memory", desc.lower())
+        self.assertIn("float-64", suggestion)
+
+    def test_signal_based_exit_code(self):
+        """Signal-based codes (> 128) should mention signal number."""
+        from joshpy.strategies import get_exit_code_diagnostic
+
+        desc, suggestion = get_exit_code_diagnostic(130)  # 128 + 2 = SIGINT
+        self.assertIn("signal 2", desc.lower())
+
+    def test_unknown_exit_code(self):
+        """Unknown exit codes should return generic message."""
+        from joshpy.strategies import get_exit_code_diagnostic
+
+        desc, suggestion = get_exit_code_diagnostic(42)
+        self.assertIn("42", desc)
+        self.assertIn("stderr", suggestion.lower())
 
 
 class TestStopOnFailureBehavior(unittest.TestCase):

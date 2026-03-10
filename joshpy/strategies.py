@@ -101,26 +101,80 @@ def cv_objective(
     return objective
 
 
+# Exit code to human-readable diagnostic mapping
+EXIT_CODE_DIAGNOSTICS: dict[int, tuple[str, str]] = {
+    # (short_description, suggestion)
+    137: (
+        "Process killed (SIGKILL) - likely out of memory",
+        "Try reducing grid size, number of replicates, or using --use-float-64 for lower memory usage.",
+    ),
+    143: (
+        "Process terminated (SIGTERM) - likely out of memory or system timeout",
+        "Try reducing grid size, number of replicates, or using --use-float-64 for lower memory usage.",
+    ),
+    # Josh-specific exit codes (from JoshSimCommander)
+    1: ("General error", "Check stderr for details."),
+    2: ("Invalid arguments", "Check your command-line arguments and configuration."),
+    3: ("Compilation error", "Check your .josh script for syntax errors."),
+    4: ("Runtime error", "Check stderr for simulation runtime errors."),
+    100: ("Missing required argument", "Check required arguments in your configuration."),
+    101: ("File not found", "Check that all input files exist and paths are correct."),
+    102: ("Invalid configuration", "Check your .jshc configuration file for errors."),
+    103: ("Validation failed", "Check your .josh script for validation errors."),
+    404: ("Simulation not found", "Check that the simulation name matches one defined in your .josh file."),
+}
+
+
+def get_exit_code_diagnostic(exit_code: int) -> tuple[str, str]:
+    """Get human-readable diagnostic for an exit code.
+
+    Args:
+        exit_code: The process exit code.
+
+    Returns:
+        Tuple of (description, suggestion). Returns generic messages for unknown codes.
+    """
+    if exit_code in EXIT_CODE_DIAGNOSTICS:
+        return EXIT_CODE_DIAGNOSTICS[exit_code]
+
+    # Check for signal-based exit codes (128 + signal_number)
+    if exit_code > 128:
+        signal_num = exit_code - 128
+        return (
+            f"Process killed by signal {signal_num}",
+            "The process was terminated by a system signal. Check system logs for details.",
+        )
+
+    return (
+        f"Process exited with code {exit_code}",
+        "Check stderr for details.",
+    )
+
+
 class SweepExecutionError(Exception):
     """Raised when a sweep trial fails and stop_on_failure=True.
 
     This exception provides detailed information about the failed trial,
     including the job parameters, run hash, and stderr output from the
-    CLI execution.
+    CLI execution. Exit codes are mapped to human-readable diagnostics
+    with actionable suggestions.
 
     Attributes:
         job: The ExpandedJob that failed.
         result: The CLIResult with exit code and stderr.
         trial_num: Zero-indexed trial number that failed.
         succeeded_before: Number of trials that succeeded before this failure.
+        diagnostic: Human-readable description of the exit code.
+        suggestion: Actionable suggestion for resolving the error.
 
     Examples:
         >>> try:
         ...     result = manager.run(objective=my_objective)
         ... except SweepExecutionError as e:
         ...     print(f"Trial {e.trial_num + 1} failed")
+        ...     print(f"Diagnostic: {e.diagnostic}")
+        ...     print(f"Suggestion: {e.suggestion}")
         ...     print(f"Parameters: {e.job.parameters}")
-        ...     print(f"Error: {e.result.stderr}")
     """
 
     def __init__(
@@ -135,12 +189,19 @@ class SweepExecutionError(Exception):
         self.trial_num = trial_num
         self.succeeded_before = succeeded_before
 
+        # Get human-readable diagnostic
+        self.diagnostic, self.suggestion = get_exit_code_diagnostic(result.exit_code)
+
         # Build informative message
         message = (
-            f"Trial {trial_num + 1} failed with exit_code={result.exit_code}. "
-            f"{succeeded_before} trial(s) succeeded before this failure.\n"
+            f"Job {trial_num + 1} failed: {self.diagnostic}\n"
+            f"{succeeded_before} job(s) succeeded before this failure.\n"
+            f"\n"
+            f"Suggestion: {self.suggestion}\n"
+            f"\n"
             f"Parameters: {job.parameters}\n"
-            f"Run hash: {job.run_hash}"
+            f"Run hash: {job.run_hash}\n"
+            f"Exit code: {result.exit_code}"
         )
         if result.stderr:
             message += f"\n\nSTDERR:\n{result.stderr}"

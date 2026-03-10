@@ -60,6 +60,8 @@ try:
         sample_params_from_trial,
         run_adaptive_sweep,
         SweepExecutionError,
+        EXIT_CODE_DIAGNOSTICS,
+        get_exit_code_diagnostic,
         cv_objective,
     )
     HAS_JOBS = True
@@ -144,6 +146,8 @@ __all__ = [
     "sample_params_from_trial",
     "run_adaptive_sweep",
     "SweepExecutionError",
+    "EXIT_CODE_DIAGNOSTICS",
+    "get_exit_code_diagnostic",
     "cv_objective",
     # Registry (optional)
     "RunRegistry",
