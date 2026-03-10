@@ -57,7 +57,7 @@ joshpy/
 - `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `PreprocessConfig`, `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
 
 **Requires joshpy[jobs]:**
-- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`
+- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`
 - `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `SweepExecutionError`, `cv_objective`
 
 **Requires joshpy[registry]:**
@@ -468,6 +468,82 @@ for job in job_set:
 File parameter labels are derived from filename stems (e.g., "climate_rcp45.jshd" → "climate_rcp45").
 These labels are added to custom_tags for tracking.
 
+### Compound Parameter Sweeps
+
+When multiple parameters should vary together (not independently), use `CompoundSweepParameter`.
+This is common for climate scenarios where temperature and precipitation files from the same
+SSP/RCP scenario should be used together.
+
+```python
+from joshpy.jobs import CompoundSweepParameter, FileSweepParameter, ConfigSweepParameter
+
+# Compound file parameters - temp and precip from same scenario
+config = JobConfig(
+    template_path=Path("templates/config.jshc.j2"),
+    source_path=Path("simulation.josh"),
+    simulation="Main",
+    replicates=3,
+    sweep=SweepConfig(
+        compound_parameters=[
+            CompoundSweepParameter(
+                name="climate_scenario",  # Stored in parameters for SQL queries
+                parameters=[
+                    FileSweepParameter(name="temp", paths=[
+                        Path("data/temp_ssp126.jshd"),
+                        Path("data/temp_ssp245.jshd"),
+                        Path("data/temp_ssp585.jshd"),
+                    ]),
+                    FileSweepParameter(name="precip", paths=[
+                        Path("data/precip_ssp126.jshd"),
+                        Path("data/precip_ssp245.jshd"),
+                        Path("data/precip_ssp585.jshd"),
+                    ]),
+                ],
+                labels=["ssp126", "ssp245", "ssp585"],
+            ),
+        ],
+    ),
+)
+
+# Creates 3 jobs (NOT 9), each with matching temp/precip files
+job_set = JobExpander().expand(config)
+for job in job_set:
+    print(f"Scenario: {job.parameters['climate_scenario']}")
+    print(f"  Temp: {job.file_mappings['temp']}")
+    print(f"  Precip: {job.file_mappings['precip']}")
+```
+
+Compound parameters can also mix config and file parameters:
+
+```python
+# Mixed config + file parameters that co-vary
+CompoundSweepParameter(
+    name="scenario",
+    parameters=[
+        FileSweepParameter(name="climate", paths=["rcp26.jshd", "rcp85.jshd"]),
+        ConfigSweepParameter(name="adaptation", values=["none", "aggressive"]),
+    ],
+    labels=["optimistic", "pessimistic"],
+)
+
+# Compound config parameters for correlated variables
+CompoundSweepParameter(
+    name="growth_regime",
+    parameters=[
+        ConfigSweepParameter(name="growthRate", values=[0.1, 0.5, 1.0]),
+        ConfigSweepParameter(name="mortalityRate", values=[0.05, 0.1, 0.2]),
+    ],
+    labels=["slow", "medium", "fast"],
+)
+```
+
+Key behaviors:
+- Parameters inside a compound are **zipped** together (same index used for all)
+- The compound itself participates in **cartesian** product with other parameters
+- The compound `name` is stored in `parameters` for SQL queryability
+- All inner parameters populate their normal spots (`file_mappings`, `custom_tags`)
+- Labels auto-generate as ["0", "1", "2", ...] if not provided
+
 ### Template File (config.jshc.j2)
 
 Jinja template for configuration:
@@ -557,6 +633,7 @@ job_set = JobExpander().expand(config)
 |-----------|------|-------------|
 | `config_parameters` | list[ConfigSweepParameter] | Parameters injected into Jinja templates |
 | `file_parameters` | list[FileSweepParameter] | File paths to sweep over in file_mappings |
+| `compound_parameters` | list[CompoundSweepParameter] | Groups of parameters that vary together (zipped) |
 | `strategy` | SweepStrategy | Expansion strategy (default: CartesianStrategy) |
 
 Note: `parameters` is a deprecated alias for `config_parameters`.
