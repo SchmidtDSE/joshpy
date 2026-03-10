@@ -63,6 +63,8 @@ if TYPE_CHECKING:
     from joshpy.registry import RunRegistry
     from joshpy.strategies import SweepStrategy
 
+from joshpy.strategies import SweepExecutionError
+
 try:
     import numpy as np
 
@@ -1354,7 +1356,7 @@ def run_sweep(
     api_key: str | None = None,
     endpoint: str | None = None,
     on_complete: Callable[[ExpandedJob, Any], None] | None = None,
-    stop_on_failure: bool = False,
+    stop_on_failure: bool = True,
     dry_run: bool = False,
     quiet: bool = False,
 ) -> SweepResult:
@@ -1381,7 +1383,9 @@ def run_sweep(
         on_complete: Optional callback invoked after each job completes.
             Signature: callback(job, result) -> None. Called after registry
             recording (if enabled). Use for progress reporting, logging, etc.
-        stop_on_failure: If True, stop on first failure.
+        stop_on_failure: If True (default), stop on first failure and raise
+            SweepExecutionError with details about the failed job. If False,
+            continue running remaining jobs and return partial results.
         dry_run: If True, print plan without executing.
         quiet: If True, suppress progress output.
 
@@ -1389,6 +1393,9 @@ def run_sweep(
         SweepResult with all job outcomes.
 
     Raises:
+        SweepExecutionError: If stop_on_failure=True and a job fails. Contains
+            the failed job, CLI result with exit code/stderr, job index, and
+            count of jobs that succeeded before the failure.
         ValueError: If remote=True but api_key is not provided.
         ValueError: If registry provided but session_id is not.
 
@@ -1494,9 +1501,15 @@ def run_sweep(
                 on_complete(job, result)
 
             if stop_on_failure and not result.success:
-                if not quiet:
-                    print("Stopping due to failure (stop_on_failure=True)")
-                break
+                # Set status to "failed" before raising
+                if manage_status and registry is not None and session_id is not None:
+                    registry.update_session_status(session_id, "failed")
+                raise SweepExecutionError(
+                    job=job,
+                    result=result,
+                    trial_num=i,
+                    succeeded_before=succeeded,
+                )
 
         if not quiet:
             print(f"Completed: {succeeded} succeeded, {failed} failed")

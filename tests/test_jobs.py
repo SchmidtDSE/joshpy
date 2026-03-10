@@ -21,6 +21,7 @@ from joshpy.jobs import (
     to_run_remote_config,
     run_sweep,
 )
+from joshpy.strategies import SweepExecutionError
 
 
 class TestRunHash(unittest.TestCase):
@@ -1227,15 +1228,15 @@ class TestRunSweep(unittest.TestCase):
         self.assertEqual(result.failed, 0)
         self.assertEqual(callback.call_count, 1)
 
-    def test_stop_on_failure(self):
-        """Should stop on first failure when stop_on_failure=True."""
+    def test_stop_on_failure_raises_error(self):
+        """Should raise SweepExecutionError on first failure when stop_on_failure=True."""
         from unittest.mock import MagicMock
 
         cli = MagicMock()
         # First call succeeds, second fails
         cli.run.side_effect = [
             MagicMock(success=True, exit_code=0),
-            MagicMock(success=False, exit_code=1),
+            MagicMock(success=False, exit_code=143, stderr="Process killed"),
             MagicMock(success=True, exit_code=0),
         ]
 
@@ -1253,11 +1254,47 @@ class TestRunSweep(unittest.TestCase):
             for i in range(3)
         ])
 
-        result = run_sweep(cli, job_set, stop_on_failure=True, quiet=True)
+        # Should raise SweepExecutionError on failure
+        with self.assertRaises(SweepExecutionError) as ctx:
+            run_sweep(cli, job_set, stop_on_failure=True, quiet=True)
 
-        # Should stop after the second job (which failed)
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result.succeeded, 1)
+        # Check exception details
+        self.assertEqual(ctx.exception.trial_num, 1)  # Second job (index 1)
+        self.assertEqual(ctx.exception.succeeded_before, 1)
+        self.assertEqual(ctx.exception.result.exit_code, 143)
+        self.assertEqual(ctx.exception.job.parameters, {"i": 1})
+
+    def test_stop_on_failure_false_continues(self):
+        """Should continue and return results when stop_on_failure=False."""
+        from unittest.mock import MagicMock
+
+        cli = MagicMock()
+        # First call succeeds, second fails, third succeeds
+        cli.run.side_effect = [
+            MagicMock(success=True, exit_code=0),
+            MagicMock(success=False, exit_code=1, stderr="Error"),
+            MagicMock(success=True, exit_code=0),
+        ]
+
+        job_set = JobSet(jobs=[
+            ExpandedJob(
+                config_content=f"test{i}",
+                config_path=Path(f"/tmp/test{i}.jshc"),
+                config_name="test",
+                run_hash=f"hash{i}",
+                parameters={"i": i},
+                simulation="Main",
+                replicates=1,
+                source_path=Path("/tmp/source.josh"),
+            )
+            for i in range(3)
+        ])
+
+        result = run_sweep(cli, job_set, stop_on_failure=False, quiet=True)
+
+        # Should complete all jobs
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result.succeeded, 2)
         self.assertEqual(result.failed, 1)
 
 
@@ -1337,7 +1374,36 @@ class TestRunSweepStatusManagement(unittest.TestCase):
         registry = MagicMock()
         job_set = self._make_test_job_set(num_jobs=2)
         
-        run_sweep(cli, job_set, registry=registry, session_id="test-session", quiet=True)
+        # With stop_on_failure=True (default), an exception is raised
+        with self.assertRaises(SweepExecutionError):
+            run_sweep(cli, job_set, registry=registry, session_id="test-session", quiet=True)
+        
+        # Check final status is "failed"
+        calls = registry.update_session_status.call_args_list
+        self.assertEqual(calls[-1], call("test-session", "failed"))
+    
+    def test_sets_failed_status_on_job_failure_stop_false(self):
+        """run_sweep should set status to 'failed' when any job fails with stop_on_failure=False."""
+        from unittest.mock import MagicMock, call
+        
+        cli = MagicMock()
+        # First job succeeds, second job fails
+        cli.run.side_effect = [
+            self._make_cli_result(success=True, exit_code=0),
+            self._make_cli_result(success=False, exit_code=1),
+        ]
+        
+        registry = MagicMock()
+        job_set = self._make_test_job_set(num_jobs=2)
+        
+        # With stop_on_failure=False, no exception - just returns with status
+        run_sweep(
+            cli, job_set, 
+            registry=registry, 
+            session_id="test-session", 
+            stop_on_failure=False,
+            quiet=True
+        )
         
         # Check final status is "failed"
         calls = registry.update_session_status.call_args_list
