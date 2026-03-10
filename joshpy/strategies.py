@@ -42,7 +42,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from joshpy.jobs import ConfigSweepParameter, ExpandedJob, FileSweepParameter
+    from joshpy.jobs import (
+        CompoundSweepParameter,
+        ConfigSweepParameter,
+        ExpandedJob,
+        FileSweepParameter,
+    )
     from joshpy.registry import RunRegistry
 
 # Type alias for objective functions
@@ -219,6 +224,7 @@ class SweepStrategy(ABC):
         self,
         config_params: list[ConfigSweepParameter],
         file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Yield parameter combinations to try.
 
@@ -228,11 +234,13 @@ class SweepStrategy(ABC):
         Args:
             config_params: Configuration parameters to sweep over.
             file_params: File parameters to sweep over.
+            compound_params: Groups of parameters that should co-vary (zipped internally).
 
         Returns:
             Iterator of dicts, each containing parameter values for one combination.
             Config params: {"name": value}
             File params: {"name": {"path": Path, "label": str}}
+            Compound params: {"group_name": label, plus all inner param entries}
         """
         ...
 
@@ -266,6 +274,10 @@ class CartesianStrategy(SweepStrategy):
     For N parameters with values [v1, v2, ...], generates:
     - Total combinations = len(v1) * len(v2) * ... * len(vN)
 
+    Compound parameters are handled specially: their internal parameters are
+    zipped together (not cartesian), but the compound as a whole participates
+    in the cartesian product with other parameters.
+
     Examples:
         >>> strategy = CartesianStrategy()
         >>> config = SweepConfig(
@@ -276,6 +288,22 @@ class CartesianStrategy(SweepStrategy):
         ...     strategy=strategy,
         ... )
         >>> # Generates: [{a:1, b:10}, {a:1, b:20}, {a:2, b:10}, {a:2, b:20}]
+
+        >>> # With compound parameters:
+        >>> config = SweepConfig(
+        ...     config_parameters=[ConfigSweepParameter(name="a", values=[1, 2])],
+        ...     compound_parameters=[
+        ...         CompoundSweepParameter(
+        ...             name="scenario",
+        ...             parameters=[
+        ...                 FileSweepParameter(name="temp", paths=["t1.jshd", "t2.jshd"]),
+        ...                 FileSweepParameter(name="precip", paths=["p1.jshd", "p2.jshd"]),
+        ...             ],
+        ...             labels=["low", "high"],
+        ...         ),
+        ...     ],
+        ... )
+        >>> # Generates 2 * 2 = 4 combinations (a × scenario), NOT 2 * 2 * 2 = 8
     """
 
     @property
@@ -287,30 +315,46 @@ class CartesianStrategy(SweepStrategy):
         self,
         config_params: list[ConfigSweepParameter],
         file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Generate cartesian product of all parameter values.
 
         Args:
             config_params: Configuration parameters to sweep over.
             file_params: File parameters to sweep over.
+            compound_params: Groups of parameters that should co-vary.
 
         Returns:
             Iterator of dicts, one for each parameter combination.
         """
-        # Build all param names and value lists
+        if compound_params is None:
+            compound_params = []
+
+        # Build all param names and value lists for cartesian product
         names: list[str] = []
         value_lists: list[list[Any]] = []
         file_param_names: set[str] = set()
+        compound_param_names: set[str] = set()
 
+        # Config parameters
         for cp in config_params:
             names.append(cp.name)
             value_lists.append(cp.values)
 
+        # File parameters
         for fp in file_params:
             names.append(fp.name)
             # (path, label) tuples for file params
             value_lists.append(list(zip(fp.paths, fp.labels)))
             file_param_names.add(fp.name)
+
+        # Compound parameters - each compound becomes one "axis" in the cartesian product
+        for compound in compound_params:
+            names.append(compound.name)
+            compound_param_names.add(compound.name)
+            # Build list of zipped scenario dicts
+            scenarios = self._expand_compound(compound)
+            value_lists.append(scenarios)
 
         if not names:
             yield {}
@@ -319,12 +363,55 @@ class CartesianStrategy(SweepStrategy):
         for combo in itertools.product(*value_lists):
             result: dict[str, Any] = {}
             for name, value in zip(names, combo):
-                if name in file_param_names:
+                if name in compound_param_names:
+                    # Compound: value is a dict with label + all inner params
+                    # Merge the compound dict into result
+                    result.update(value)
+                elif name in file_param_names:
                     path, label = value
                     result[name] = {"path": path, "label": label}
                 else:
                     result[name] = value
             yield result
+
+    def _expand_compound(self, compound: CompoundSweepParameter) -> list[dict[str, Any]]:
+        """Expand a compound parameter into a list of scenario dicts.
+
+        Each scenario dict contains:
+        - The compound's name mapped to its label (for SQL queries)
+        - All inner parameters with their values for that scenario index
+
+        Args:
+            compound: The compound parameter to expand.
+
+        Returns:
+            List of dicts, one per scenario (zipped index).
+        """
+        from joshpy.jobs import ConfigSweepParameter, FileSweepParameter
+
+        scenarios: list[dict[str, Any]] = []
+        n_scenarios = len(compound)
+
+        for i in range(n_scenarios):
+            scenario: dict[str, Any] = {}
+
+            # Add the compound label
+            assert compound.labels is not None  # Set in __post_init__
+            scenario[compound.name] = compound.labels[i]
+
+            # Add each inner parameter's value at this index
+            for param in compound.parameters:
+                if isinstance(param, ConfigSweepParameter):
+                    scenario[param.name] = param.values[i]
+                elif isinstance(param, FileSweepParameter):
+                    scenario[param.name] = {
+                        "path": param.paths[i],
+                        "label": param.labels[i],
+                    }
+
+            scenarios.append(scenario)
+
+        return scenarios
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization."""
@@ -453,6 +540,7 @@ class OptunaStrategy(SweepStrategy):
         self,
         config_params: list[ConfigSweepParameter],
         file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
     ) -> Iterator[dict[str, Any]]:
         """Not supported for adaptive strategies, because, during a given run,
         the next parameters depend on the results of previous runs.
@@ -573,6 +661,7 @@ def sample_params_from_trial(
     trial: Any,  # optuna.Trial
     config_params: list[ConfigSweepParameter],
     file_params: list[FileSweepParameter],
+    compound_params: list[CompoundSweepParameter] | None = None,
 ) -> dict[str, Any]:
     """Sample parameters from an Optuna trial.
 
@@ -582,10 +671,16 @@ def sample_params_from_trial(
         trial: Optuna trial object.
         config_params: Configuration parameters to sample.
         file_params: File parameters to sample.
+        compound_params: Compound parameters to sample (picks one scenario per compound).
 
     Returns:
         Dict of sampled parameter values, matching the format from expand().
     """
+    from joshpy.jobs import ConfigSweepParameter, FileSweepParameter
+
+    if compound_params is None:
+        compound_params = []
+
     params: dict[str, Any] = {}
 
     for cp in config_params:
@@ -596,6 +691,25 @@ def sample_params_from_trial(
         # Files are categorical choices
         idx = trial.suggest_categorical(f"_file_{fp.name}", list(range(len(fp.paths))))
         params[fp.name] = {"path": fp.paths[idx], "label": fp.labels[idx]}
+
+    for compound in compound_params:
+        # Compound parameters: select one scenario index
+        n_scenarios = len(compound)
+        idx = trial.suggest_categorical(f"_compound_{compound.name}", list(range(n_scenarios)))
+
+        # Add the compound's label
+        assert compound.labels is not None  # Set in __post_init__
+        params[compound.name] = compound.labels[idx]
+
+        # Add each inner parameter's value at this index
+        for inner_param in compound.parameters:
+            if isinstance(inner_param, ConfigSweepParameter):
+                params[inner_param.name] = inner_param.values[idx]
+            elif isinstance(inner_param, FileSweepParameter):
+                params[inner_param.name] = {
+                    "path": inner_param.paths[idx],
+                    "label": inner_param.labels[idx],
+                }
 
     return params
 
@@ -758,6 +872,7 @@ def run_adaptive_sweep(
                 trial,
                 config.sweep.config_parameters,
                 config.sweep.file_parameters,
+                config.sweep.compound_parameters,
             )
 
             if not quiet:

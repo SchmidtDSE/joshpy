@@ -344,15 +344,163 @@ class FileSweepParameter:
 
 
 @dataclass
+class CompoundSweepParameter:
+    """A group of parameters that vary together (zipped, not cartesian).
+
+    Use this when multiple parameters should co-vary across scenarios rather
+    than being combined independently. For example, temperature and precipitation
+    files from the same climate scenario should be used together.
+
+    The compound parameter itself participates in cartesian product with other
+    sweep parameters, but its internal parameters are zipped together.
+
+    Attributes:
+        name: Group label stored in parameters for SQL queries (e.g., "climate_scenario").
+        parameters: List of ConfigSweepParameter and/or FileSweepParameter to zip together.
+        labels: Optional explicit labels for each scenario. If not provided,
+            uses index numbers ["0", "1", "2", ...].
+
+    Examples:
+        >>> # Compound file parameters (e.g., climate scenarios)
+        >>> CompoundSweepParameter(
+        ...     name="climate_scenario",
+        ...     parameters=[
+        ...         FileSweepParameter(name="temp", paths=["temp_ssp126.jshd", "temp_ssp245.jshd"]),
+        ...         FileSweepParameter(name="precip", paths=["precip_ssp126.jshd", "precip_ssp245.jshd"]),
+        ...     ],
+        ...     labels=["ssp126", "ssp245"],
+        ... )
+
+        >>> # Compound config parameters (correlated params)
+        >>> CompoundSweepParameter(
+        ...     name="growth_regime",
+        ...     parameters=[
+        ...         ConfigSweepParameter(name="growthRate", values=[0.1, 0.5, 1.0]),
+        ...         ConfigSweepParameter(name="mortalityRate", values=[0.05, 0.1, 0.2]),
+        ...     ],
+        ...     labels=["slow", "medium", "fast"],
+        ... )
+
+        >>> # Mixed file + config parameters
+        >>> CompoundSweepParameter(
+        ...     name="scenario",
+        ...     parameters=[
+        ...         FileSweepParameter(name="climate", paths=["rcp26.jshd", "rcp85.jshd"]),
+        ...         ConfigSweepParameter(name="adaptation", values=["none", "aggressive"]),
+        ...     ],
+        ...     labels=["optimistic", "pessimistic"],
+        ... )
+    """
+
+    name: str
+    parameters: list[ConfigSweepParameter | FileSweepParameter] = field(default_factory=list)
+    labels: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        """Validate that all parameters have the same length."""
+        if not self.parameters:
+            return
+
+        # Get lengths of all parameters
+        lengths = []
+        for p in self.parameters:
+            if isinstance(p, ConfigSweepParameter):
+                lengths.append(len(p.values))
+            elif isinstance(p, FileSweepParameter):
+                lengths.append(len(p.paths))
+            else:
+                raise TypeError(
+                    f"CompoundSweepParameter only accepts ConfigSweepParameter or "
+                    f"FileSweepParameter, got {type(p).__name__}"
+                )
+
+        # Check all lengths match
+        if len(set(lengths)) > 1:
+            param_info = []
+            for p, length in zip(self.parameters, lengths):
+                param_info.append(f"{p.name}={length}")
+            raise ValueError(
+                f"All parameters in CompoundSweepParameter '{self.name}' must have "
+                f"the same number of values. Got: {', '.join(param_info)}"
+            )
+
+        # Validate labels length if provided
+        expected_len = lengths[0] if lengths else 0
+        if self.labels is not None:
+            if len(self.labels) != expected_len:
+                raise ValueError(
+                    f"CompoundSweepParameter '{self.name}' has {expected_len} scenarios "
+                    f"but {len(self.labels)} labels were provided"
+                )
+        else:
+            # Auto-generate numeric labels
+            self.labels = [str(i) for i in range(expected_len)]
+
+    def __len__(self) -> int:
+        """Return number of scenarios (zipped combinations)."""
+        if not self.parameters:
+            return 0
+        p = self.parameters[0]
+        if isinstance(p, ConfigSweepParameter):
+            return len(p.values)
+        else:
+            return len(p.paths)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for YAML/JSON serialization."""
+        result: dict[str, Any] = {
+            "name": self.name,
+            "parameters": [],
+        }
+
+        for p in self.parameters:
+            param_dict = p.to_dict()
+            # Add type hint for deserialization
+            if isinstance(p, ConfigSweepParameter):
+                param_dict["_type"] = "config"
+            else:
+                param_dict["_type"] = "file"
+            result["parameters"].append(param_dict)
+
+        # Only include labels if they're not just numeric indices
+        if self.labels and not all(label == str(i) for i, label in enumerate(self.labels)):
+            result["labels"] = self.labels
+
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CompoundSweepParameter:
+        """Create from dict (YAML/JSON deserialization)."""
+        parameters: list[ConfigSweepParameter | FileSweepParameter] = []
+
+        for p_data in data.get("parameters", []):
+            p_type = p_data.pop("_type", None)
+            if p_type == "file" or "paths" in p_data:
+                parameters.append(FileSweepParameter.from_dict(p_data))
+            else:
+                parameters.append(ConfigSweepParameter.from_dict(p_data))
+
+        return cls(
+            name=data["name"],
+            parameters=parameters,
+            labels=data.get("labels"),
+        )
+
+
+@dataclass
 class SweepConfig:
     """Configuration for parameter sweep expansion.
 
-    Supports both config parameters (injected into Jinja templates) and
-    file parameters (different input data files to sweep over).
+    Supports three types of sweep parameters:
+    - config_parameters: Values injected into Jinja templates (cartesian product)
+    - file_parameters: Different input data files (cartesian product)
+    - compound_parameters: Groups of parameters that vary together (zipped internally,
+      cartesian with other parameters)
 
     Attributes:
         config_parameters: Parameters injected into Jinja templates.
         file_parameters: File paths to sweep over in file_mappings.
+        compound_parameters: Groups of parameters that should co-vary.
         strategy: Expansion strategy (default: CartesianStrategy).
         parameters: Deprecated alias for config_parameters (backward compat).
     
@@ -361,6 +509,20 @@ class SweepConfig:
         >>> config = SweepConfig(
         ...     config_parameters=[
         ...         ConfigSweepParameter(name="a", values=[1, 2, 3]),
+        ...     ],
+        ... )
+
+        >>> # With compound parameters (files that should stay together)
+        >>> config = SweepConfig(
+        ...     compound_parameters=[
+        ...         CompoundSweepParameter(
+        ...             name="climate_scenario",
+        ...             parameters=[
+        ...                 FileSweepParameter(name="temp", paths=["t_ssp126.jshd", "t_ssp245.jshd"]),
+        ...                 FileSweepParameter(name="precip", paths=["p_ssp126.jshd", "p_ssp245.jshd"]),
+        ...             ],
+        ...             labels=["ssp126", "ssp245"],
+        ...         ),
         ...     ],
         ... )
 
@@ -376,6 +538,7 @@ class SweepConfig:
 
     config_parameters: list[ConfigSweepParameter] = field(default_factory=list)
     file_parameters: list[FileSweepParameter] = field(default_factory=list)
+    compound_parameters: list[CompoundSweepParameter] = field(default_factory=list)
     strategy: SweepStrategy | None = None  # None means CartesianStrategy (lazy default)
 
     # Backward compatibility - used only during __init__ if old-style 'parameters' is passed
@@ -406,6 +569,7 @@ class SweepConfig:
         
         For config parameters: {"param_name": value}
         For file parameters: {"file_name": {"path": Path, "label": str}}
+        For compound parameters: {"group_name": label, "inner_param": value, ...}
 
         For example, with config param A=[1,2] and file param F=[a.jshd, b.jshd]:
             [{"A": 1, "F": {"path": Path("a.jshd"), "label": "a"}},
@@ -418,7 +582,11 @@ class SweepConfig:
         """
         # Delegate to strategy
         assert self.strategy is not None  # Set in __post_init__
-        return list(self.strategy.expand(self.config_parameters, self.file_parameters))
+        return list(
+            self.strategy.expand(
+                self.config_parameters, self.file_parameters, self.compound_parameters
+            )
+        )
 
     def __bool__(self) -> bool:
         """Return True if any parameters are defined.
@@ -426,7 +594,7 @@ class SweepConfig:
         This is needed because __len__ raises for adaptive strategies,
         and Python falls back to __len__ for truthiness if __bool__ is not defined.
         """
-        return bool(self.config_parameters or self.file_parameters)
+        return bool(self.config_parameters or self.file_parameters or self.compound_parameters)
 
     def __len__(self) -> int:
         """Return total number of parameter combinations.
@@ -440,13 +608,15 @@ class SweepConfig:
                 "Cannot determine length for adaptive strategies. "
                 f"Use strategy.n_trials for {type(self.strategy).__name__}."
             )
-        if not self.config_parameters and not self.file_parameters:
+        if not self.config_parameters and not self.file_parameters and not self.compound_parameters:
             return 1
         count = 1
         for p in self.config_parameters:
             count *= len(p.values)
         for fp in self.file_parameters:
             count *= len(fp.paths)
+        for cp in self.compound_parameters:
+            count *= len(cp)
         return count
 
     def to_dict(self) -> dict[str, Any]:
@@ -457,6 +627,8 @@ class SweepConfig:
             result["config_parameters"] = [p.to_dict() for p in self.config_parameters]
         if self.file_parameters:
             result["file_parameters"] = [fp.to_dict() for fp in self.file_parameters]
+        if self.compound_parameters:
+            result["compound_parameters"] = [cp.to_dict() for cp in self.compound_parameters]
         
         # Serialize strategy (skip if default CartesianStrategy)
         if self.strategy is not None:
@@ -471,11 +643,12 @@ class SweepConfig:
     def from_dict(cls, data: dict[str, Any]) -> SweepConfig:
         """Create from dict.
         
-        Supports both new-style (config_parameters, file_parameters) and
-        legacy (parameters) formats.
+        Supports both new-style (config_parameters, file_parameters, compound_parameters)
+        and legacy (parameters) formats.
         """
         config_params: list[ConfigSweepParameter] = []
         file_params: list[FileSweepParameter] = []
+        compound_params: list[CompoundSweepParameter] = []
         strategy: SweepStrategy | None = None
         
         # New-style: config_parameters
@@ -498,6 +671,13 @@ class SweepConfig:
                 for fp in data["file_parameters"]
             ]
         
+        # New-style: compound_parameters
+        if "compound_parameters" in data:
+            compound_params = [
+                CompoundSweepParameter.from_dict(cp)
+                for cp in data["compound_parameters"]
+            ]
+        
         # Strategy
         if "strategy" in data:
             from joshpy.strategies import strategy_from_dict
@@ -507,6 +687,7 @@ class SweepConfig:
         return cls(
             config_parameters=config_params,
             file_parameters=file_params,
+            compound_parameters=compound_params,
             strategy=strategy,
         )
 
