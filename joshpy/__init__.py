@@ -39,6 +39,7 @@ try:
     from joshpy.jobs import (
         ConfigSweepParameter,
         FileSweepParameter,
+        CompoundSweepParameter,
         SweepConfig,
         JobConfig,
         ExpandedJob,
@@ -122,6 +123,7 @@ __all__ = [
     # Jobs (optional)
     "ConfigSweepParameter",
     "FileSweepParameter",
+    "CompoundSweepParameter",
     "SweepConfig",
     "JobConfig",
     "ExpandedJob",
