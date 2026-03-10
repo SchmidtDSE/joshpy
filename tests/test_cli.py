@@ -17,6 +17,7 @@ from joshpy.cli import (
     RunRemoteConfig,
     ValidateConfig,
 )
+from joshpy.jar import JarMode
 
 
 class TestCLIResult(unittest.TestCase):
@@ -202,13 +203,14 @@ class TestInspectJshdConfig(unittest.TestCase):
 class TestJoshCLI(unittest.TestCase):
     """Tests for JoshCLI class."""
 
-    # Use the local jar that exists in the repo
-    JAR_PATH = Path(__file__).parent.parent / "jar" / "joshsim-fat.jar"
+    # Use the DEV jar mode for tests
+    JAR_MODE = JarMode.DEV
 
     def test_init_with_path(self):
-        """CLI should accept explicit jar path."""
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
-        self.assertEqual(cli._resolved_jar, self.JAR_PATH.resolve())
+        """CLI should accept JarMode."""
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        # Just verify it resolved to a path that exists
+        self.assertTrue(cli._resolved_jar.exists())
 
     def test_init_with_missing_jar_raises(self):
         """CLI should raise FileNotFoundError for missing jar."""
@@ -224,7 +226,7 @@ class TestJoshCLI(unittest.TestCase):
             stderr="",
         )
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -246,7 +248,7 @@ class TestJoshCLI(unittest.TestCase):
         """run() should include --replicates when > 1."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -264,7 +266,7 @@ class TestJoshCLI(unittest.TestCase):
         """run() should include --data flags for data files."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -284,7 +286,7 @@ class TestJoshCLI(unittest.TestCase):
         """run() should include --custom-tag flags."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -304,7 +306,7 @@ class TestJoshCLI(unittest.TestCase):
         """run() should include all optional flags."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -339,7 +341,7 @@ class TestJoshCLI(unittest.TestCase):
         """run_remote() should build correct command."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunRemoteConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -362,7 +364,7 @@ class TestJoshCLI(unittest.TestCase):
         """preprocess() should build correct command."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = PreprocessConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -390,7 +392,7 @@ class TestJoshCLI(unittest.TestCase):
         """validate() should build correct command."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = ValidateConfig(
             script=Path("/path/to/simulation.josh"),
             verbose=True,
@@ -408,7 +410,7 @@ class TestJoshCLI(unittest.TestCase):
         """discover_config() should build correct command."""
         mock_run.return_value = MagicMock(returncode=0, stdout="configVar1\nconfigVar2", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = DiscoverConfigConfig(script=Path("/path/to/simulation.josh"))
 
         result = cli.discover_config(config)
@@ -422,7 +424,7 @@ class TestJoshCLI(unittest.TestCase):
         """inspect_jshd() should build correct command."""
         mock_run.return_value = MagicMock(returncode=0, stdout="value: 25.5", stderr="")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = InspectJshdConfig(
             jshd_file=Path("/path/to/data.jshd"),
             variable="temperature",
@@ -448,7 +450,7 @@ class TestJoshCLI(unittest.TestCase):
 
         mock_run.side_effect = subprocess.TimeoutExpired(cmd=["java"], timeout=30)
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -465,7 +467,7 @@ class TestJoshCLI(unittest.TestCase):
         """CLI should handle exceptions gracefully."""
         mock_run.side_effect = OSError("Java not found")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = RunConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -597,8 +599,8 @@ class TestExportPaths(unittest.TestCase):
 class TestInspectExports(unittest.TestCase):
     """Tests for JoshCLI.inspect_exports method."""
 
-    # Use the local jar that exists in the repo
-    JAR_PATH = Path(__file__).parent.parent / "jar" / "joshsim-fat.jar"
+    # Use the DEV jar mode for tests
+    JAR_MODE = JarMode.DEV
     EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 
     @patch("subprocess.run")
@@ -630,7 +632,7 @@ class TestInspectExports(unittest.TestCase):
             stderr="",
         )
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = InspectExportsConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -662,7 +664,7 @@ class TestInspectExports(unittest.TestCase):
             stderr="",
         )
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = InspectExportsConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -688,7 +690,7 @@ class TestInspectExports(unittest.TestCase):
             stderr="",
         )
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = InspectExportsConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -713,7 +715,7 @@ class TestInspectExports(unittest.TestCase):
             stderr="Error: Simulation not found",
         )
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = InspectExportsConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="NonExistent",
@@ -748,7 +750,7 @@ class TestInspectExports(unittest.TestCase):
             stderr="",
         )
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH)
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
         config = InspectExportsConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
@@ -766,8 +768,8 @@ class TestInspectExports(unittest.TestCase):
 class TestInspectExportsIntegration(unittest.TestCase):
     """Integration tests for inspect_exports using local jar."""
 
-    # Use the local jar that exists in the repo
-    JAR_PATH = Path(__file__).parent.parent / "jar" / "joshsim-fat.jar"
+    # Use the DEV jar mode for tests
+    JAR_MODE = JarMode.DEV
     EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
     JAVA_PATH = Path(__file__).parent.parent / ".pixi" / "envs" / "default" / "bin" / "java"
 
@@ -779,7 +781,7 @@ class TestInspectExportsIntegration(unittest.TestCase):
         if not self.JAVA_PATH.exists():
             self.skipTest(f"Java not found at: {self.JAVA_PATH}")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH, java_path=str(self.JAVA_PATH))
+        cli = JoshCLI(josh_jar=self.JAR_MODE, java_path=str(self.JAVA_PATH))
         config = InspectExportsConfig(
             script=script_path,
             simulation="Main",
@@ -802,7 +804,7 @@ class TestInspectExportsIntegration(unittest.TestCase):
         if not self.JAVA_PATH.exists():
             self.skipTest(f"Java not found at: {self.JAVA_PATH}")
 
-        cli = JoshCLI(josh_jar=self.JAR_PATH, java_path=str(self.JAVA_PATH))
+        cli = JoshCLI(josh_jar=self.JAR_MODE, java_path=str(self.JAVA_PATH))
         config = InspectExportsConfig(
             script=script_path,
             simulation="NonExistentSimulation",

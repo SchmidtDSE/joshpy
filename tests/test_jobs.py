@@ -7,6 +7,7 @@ from pathlib import Path
 from joshpy.jobs import (
     ConfigSweepParameter,
     FileSweepParameter,
+    CompoundSweepParameter,
     SweepConfig,
     JobConfig,
     ExpandedJob,
@@ -1411,6 +1412,473 @@ class TestRunSweepStatusManagement(unittest.TestCase):
         
         self.assertEqual(result.succeeded, 1)
         # No registry means no status updates (no error)
+
+
+class TestCompoundSweepParameter(unittest.TestCase):
+    """Tests for CompoundSweepParameter class."""
+
+    def test_basic_creation_with_config_params(self):
+        """Basic compound creation with config parameters."""
+        compound = CompoundSweepParameter(
+            name="growth_regime",
+            parameters=[
+                ConfigSweepParameter(name="growthRate", values=[0.1, 0.5, 1.0]),
+                ConfigSweepParameter(name="mortalityRate", values=[0.05, 0.1, 0.2]),
+            ],
+            labels=["slow", "medium", "fast"],
+        )
+        self.assertEqual(compound.name, "growth_regime")
+        self.assertEqual(len(compound), 3)
+        self.assertEqual(compound.labels, ["slow", "medium", "fast"])
+
+    def test_basic_creation_with_file_params(self):
+        """Basic compound creation with file parameters."""
+        compound = CompoundSweepParameter(
+            name="climate_scenario",
+            parameters=[
+                FileSweepParameter(name="temp", paths=["temp_ssp126.jshd", "temp_ssp245.jshd"]),
+                FileSweepParameter(name="precip", paths=["precip_ssp126.jshd", "precip_ssp245.jshd"]),
+            ],
+            labels=["ssp126", "ssp245"],
+        )
+        self.assertEqual(compound.name, "climate_scenario")
+        self.assertEqual(len(compound), 2)
+
+    def test_mixed_config_and_file_params(self):
+        """Compound with mixed config and file parameters."""
+        compound = CompoundSweepParameter(
+            name="scenario",
+            parameters=[
+                FileSweepParameter(name="climate", paths=["rcp26.jshd", "rcp85.jshd"]),
+                ConfigSweepParameter(name="adaptation", values=["none", "aggressive"]),
+            ],
+            labels=["optimistic", "pessimistic"],
+        )
+        self.assertEqual(len(compound), 2)
+        self.assertEqual(len(compound.parameters), 2)
+
+    def test_auto_labels_when_not_provided(self):
+        """Labels should auto-generate as indices when not provided."""
+        compound = CompoundSweepParameter(
+            name="test",
+            parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2, 3]),
+            ],
+        )
+        self.assertEqual(compound.labels, ["0", "1", "2"])
+
+    def test_mismatched_lengths_raises(self):
+        """Mismatched parameter lengths should raise ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            CompoundSweepParameter(
+                name="test",
+                parameters=[
+                    ConfigSweepParameter(name="a", values=[1, 2, 3]),
+                    ConfigSweepParameter(name="b", values=[10, 20]),  # Different length
+                ],
+            )
+        self.assertIn("same number of values", str(ctx.exception))
+
+    def test_wrong_labels_count_raises(self):
+        """Wrong number of labels should raise ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            CompoundSweepParameter(
+                name="test",
+                parameters=[
+                    ConfigSweepParameter(name="x", values=[1, 2, 3]),
+                ],
+                labels=["a", "b"],  # Only 2 labels for 3 values
+            )
+        self.assertIn("3 scenarios", str(ctx.exception))
+        self.assertIn("2 labels", str(ctx.exception))
+
+    def test_invalid_parameter_type_raises(self):
+        """Invalid parameter types should raise TypeError."""
+        with self.assertRaises(TypeError) as ctx:
+            CompoundSweepParameter(
+                name="test",
+                parameters=["not a parameter"],  # type: ignore
+            )
+        self.assertIn("ConfigSweepParameter or FileSweepParameter", str(ctx.exception))
+
+    def test_to_dict(self):
+        """to_dict should serialize correctly."""
+        compound = CompoundSweepParameter(
+            name="regime",
+            parameters=[
+                ConfigSweepParameter(name="a", values=[1, 2]),
+                FileSweepParameter(name="data", paths=["x.jshd", "y.jshd"]),
+            ],
+            labels=["low", "high"],
+        )
+        result = compound.to_dict()
+        
+        self.assertEqual(result["name"], "regime")
+        self.assertEqual(result["labels"], ["low", "high"])
+        self.assertEqual(len(result["parameters"]), 2)
+        self.assertEqual(result["parameters"][0]["_type"], "config")
+        self.assertEqual(result["parameters"][1]["_type"], "file")
+
+    def test_to_dict_skips_numeric_labels(self):
+        """to_dict should skip auto-generated numeric labels."""
+        compound = CompoundSweepParameter(
+            name="test",
+            parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2]),
+            ],
+        )
+        result = compound.to_dict()
+        
+        self.assertNotIn("labels", result)
+
+    def test_from_dict(self):
+        """from_dict should deserialize correctly."""
+        data = {
+            "name": "regime",
+            "parameters": [
+                {"_type": "config", "name": "a", "values": [1, 2]},
+                {"_type": "file", "name": "data", "paths": ["x.jshd", "y.jshd"]},
+            ],
+            "labels": ["low", "high"],
+        }
+        compound = CompoundSweepParameter.from_dict(data)
+        
+        self.assertEqual(compound.name, "regime")
+        self.assertEqual(compound.labels, ["low", "high"])
+        self.assertEqual(len(compound.parameters), 2)
+        self.assertIsInstance(compound.parameters[0], ConfigSweepParameter)
+        self.assertIsInstance(compound.parameters[1], FileSweepParameter)
+
+    def test_from_dict_infers_type_from_paths(self):
+        """from_dict should infer file type from paths key."""
+        data = {
+            "name": "test",
+            "parameters": [
+                {"name": "a", "values": [1, 2]},  # No _type, but has values
+                {"name": "data", "paths": ["x.jshd", "y.jshd"]},  # No _type, but has paths
+            ],
+        }
+        compound = CompoundSweepParameter.from_dict(data)
+        
+        self.assertIsInstance(compound.parameters[0], ConfigSweepParameter)
+        self.assertIsInstance(compound.parameters[1], FileSweepParameter)
+
+
+class TestSweepConfigWithCompoundParams(unittest.TestCase):
+    """Tests for SweepConfig with compound_parameters."""
+
+    def test_expand_compound_only(self):
+        """Compound parameters should expand to zipped combinations."""
+        config = SweepConfig(
+            compound_parameters=[
+                CompoundSweepParameter(
+                    name="regime",
+                    parameters=[
+                        ConfigSweepParameter(name="a", values=[1, 2, 3]),
+                        ConfigSweepParameter(name="b", values=[10, 20, 30]),
+                    ],
+                    labels=["low", "medium", "high"],
+                ),
+            ],
+        )
+        result = config.expand()
+        
+        # Should have 3 combos (zipped), NOT 9 (cartesian)
+        self.assertEqual(len(result), 3)
+        
+        # Check first combo
+        self.assertEqual(result[0]["regime"], "low")
+        self.assertEqual(result[0]["a"], 1)
+        self.assertEqual(result[0]["b"], 10)
+        
+        # Check last combo
+        self.assertEqual(result[2]["regime"], "high")
+        self.assertEqual(result[2]["a"], 3)
+        self.assertEqual(result[2]["b"], 30)
+
+    def test_expand_compound_with_files(self):
+        """Compound with file parameters should include path and label."""
+        config = SweepConfig(
+            compound_parameters=[
+                CompoundSweepParameter(
+                    name="climate",
+                    parameters=[
+                        FileSweepParameter(name="temp", paths=[
+                            Path("temp_ssp126.jshd"),
+                            Path("temp_ssp245.jshd"),
+                        ]),
+                        FileSweepParameter(name="precip", paths=[
+                            Path("precip_ssp126.jshd"),
+                            Path("precip_ssp245.jshd"),
+                        ]),
+                    ],
+                    labels=["ssp126", "ssp245"],
+                ),
+            ],
+        )
+        result = config.expand()
+        
+        self.assertEqual(len(result), 2)
+        
+        # Check first combo (ssp126)
+        self.assertEqual(result[0]["climate"], "ssp126")
+        self.assertEqual(result[0]["temp"]["path"], Path("temp_ssp126.jshd"))
+        self.assertEqual(result[0]["temp"]["label"], "temp_ssp126")
+        self.assertEqual(result[0]["precip"]["path"], Path("precip_ssp126.jshd"))
+        self.assertEqual(result[0]["precip"]["label"], "precip_ssp126")
+        
+        # Check second combo (ssp245)
+        self.assertEqual(result[1]["climate"], "ssp245")
+        self.assertEqual(result[1]["temp"]["path"], Path("temp_ssp245.jshd"))
+
+    def test_expand_compound_with_config_params(self):
+        """Compound parameters should cartesian with config_parameters."""
+        config = SweepConfig(
+            config_parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2]),
+            ],
+            compound_parameters=[
+                CompoundSweepParameter(
+                    name="regime",
+                    parameters=[
+                        ConfigSweepParameter(name="a", values=[10, 20]),
+                        ConfigSweepParameter(name="b", values=[100, 200]),
+                    ],
+                    labels=["low", "high"],
+                ),
+            ],
+        )
+        result = config.expand()
+        
+        # 2 (x values) * 2 (compound scenarios) = 4 combos
+        self.assertEqual(len(result), 4)
+        
+        # Should have cartesian of x with compound
+        x_values = sorted(set(r["x"] for r in result))
+        regimes = sorted(set(r["regime"] for r in result))
+        self.assertEqual(x_values, [1, 2])
+        self.assertEqual(regimes, ["high", "low"])
+
+    def test_expand_multiple_compounds(self):
+        """Multiple compound parameters should cartesian with each other."""
+        config = SweepConfig(
+            compound_parameters=[
+                CompoundSweepParameter(
+                    name="climate",
+                    parameters=[
+                        ConfigSweepParameter(name="temp", values=[20, 25]),
+                    ],
+                    labels=["cool", "warm"],
+                ),
+                CompoundSweepParameter(
+                    name="soil",
+                    parameters=[
+                        ConfigSweepParameter(name="ph", values=[6, 7, 8]),
+                    ],
+                    labels=["acidic", "neutral", "alkaline"],
+                ),
+            ],
+        )
+        result = config.expand()
+        
+        # 2 (climate) * 3 (soil) = 6 combos
+        self.assertEqual(len(result), 6)
+
+    def test_len_with_compound_params(self):
+        """Length should include compound parameter scenarios."""
+        config = SweepConfig(
+            config_parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2, 3]),  # 3
+            ],
+            compound_parameters=[
+                CompoundSweepParameter(
+                    name="regime",
+                    parameters=[
+                        ConfigSweepParameter(name="a", values=[10, 20]),
+                    ],
+                    labels=["low", "high"],
+                ),  # 2
+            ],
+        )
+        self.assertEqual(len(config), 6)  # 3 * 2
+
+    def test_bool_with_compound_params(self):
+        """Boolean check should include compound parameters."""
+        empty = SweepConfig()
+        self.assertFalse(bool(empty.config_parameters) or bool(empty.compound_parameters))
+        
+        with_compound = SweepConfig(
+            compound_parameters=[
+                CompoundSweepParameter(
+                    name="test",
+                    parameters=[ConfigSweepParameter(name="x", values=[1])],
+                ),
+            ],
+        )
+        self.assertTrue(bool(with_compound))
+
+    def test_to_dict_with_compound_params(self):
+        """to_dict should serialize compound_parameters."""
+        config = SweepConfig(
+            compound_parameters=[
+                CompoundSweepParameter(
+                    name="regime",
+                    parameters=[
+                        ConfigSweepParameter(name="a", values=[1, 2]),
+                    ],
+                    labels=["low", "high"],
+                ),
+            ],
+        )
+        result = config.to_dict()
+        
+        self.assertIn("compound_parameters", result)
+        self.assertEqual(len(result["compound_parameters"]), 1)
+        self.assertEqual(result["compound_parameters"][0]["name"], "regime")
+
+    def test_from_dict_with_compound_params(self):
+        """from_dict should deserialize compound_parameters."""
+        data = {
+            "config_parameters": [{"name": "x", "values": [1, 2]}],
+            "compound_parameters": [
+                {
+                    "name": "regime",
+                    "parameters": [
+                        {"_type": "config", "name": "a", "values": [10, 20]},
+                    ],
+                    "labels": ["low", "high"],
+                },
+            ],
+        }
+        config = SweepConfig.from_dict(data)
+        
+        self.assertEqual(len(config.config_parameters), 1)
+        self.assertEqual(len(config.compound_parameters), 1)
+        self.assertEqual(config.compound_parameters[0].name, "regime")
+
+
+class TestJobExpanderWithCompoundParams(unittest.TestCase):
+    """Tests for JobExpander with compound_parameters."""
+
+    def test_expand_with_compound_config_params(self):
+        """Expanding with compound config parameters should create correct jobs."""
+        config = JobConfig(
+            template_string="a={{ a }}, b={{ b }}",
+            sweep=SweepConfig(
+                compound_parameters=[
+                    CompoundSweepParameter(
+                        name="regime",
+                        parameters=[
+                            ConfigSweepParameter(name="a", values=[1, 2]),
+                            ConfigSweepParameter(name="b", values=[10, 20]),
+                        ],
+                        labels=["low", "high"],
+                    ),
+                ],
+            ),
+        )
+        expander = JobExpander()
+        job_set = expander.expand(config)
+        
+        try:
+            self.assertEqual(len(job_set), 2)
+            
+            # Check first job (low)
+            job_low = job_set.jobs[0]
+            self.assertEqual(job_low.config_content, "a=1, b=10")
+            self.assertEqual(job_low.parameters["regime"], "low")
+            self.assertEqual(job_low.parameters["a"], 1)
+            self.assertEqual(job_low.parameters["b"], 10)
+            self.assertEqual(job_low.custom_tags["regime"], "low")
+            
+            # Check second job (high)
+            job_high = job_set.jobs[1]
+            self.assertEqual(job_high.config_content, "a=2, b=20")
+            self.assertEqual(job_high.parameters["regime"], "high")
+        finally:
+            job_set.cleanup()
+
+    def test_expand_with_compound_file_params(self):
+        """Expanding with compound file parameters should update file_mappings."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create test files
+            temp_ssp126 = Path(tmpdir) / "temp_ssp126.jshd"
+            temp_ssp245 = Path(tmpdir) / "temp_ssp245.jshd"
+            precip_ssp126 = Path(tmpdir) / "precip_ssp126.jshd"
+            precip_ssp245 = Path(tmpdir) / "precip_ssp245.jshd"
+            for f in [temp_ssp126, temp_ssp245, precip_ssp126, precip_ssp245]:
+                f.write_bytes(b"test data")
+
+            config = JobConfig(
+                template_string="# climate config",
+                source_path=Path(tmpdir) / "sim.josh",
+                sweep=SweepConfig(
+                    compound_parameters=[
+                        CompoundSweepParameter(
+                            name="climate",
+                            parameters=[
+                                FileSweepParameter(name="temp", paths=[temp_ssp126, temp_ssp245]),
+                                FileSweepParameter(name="precip", paths=[precip_ssp126, precip_ssp245]),
+                            ],
+                            labels=["ssp126", "ssp245"],
+                        ),
+                    ],
+                ),
+            )
+            config.source_path.write_text("simulation")
+
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 2)
+
+                # First job should have ssp126 files
+                job_126 = job_set.jobs[0]
+                self.assertEqual(job_126.parameters["climate"], "ssp126")
+                self.assertEqual(job_126.file_mappings["temp"], temp_ssp126)
+                self.assertEqual(job_126.file_mappings["precip"], precip_ssp126)
+
+                # Second job should have ssp245 files
+                job_245 = job_set.jobs[1]
+                self.assertEqual(job_245.parameters["climate"], "ssp245")
+                self.assertEqual(job_245.file_mappings["temp"], temp_ssp245)
+                self.assertEqual(job_245.file_mappings["precip"], precip_ssp245)
+            finally:
+                job_set.cleanup()
+
+    def test_expand_compound_cartesian_with_config(self):
+        """Compound should cartesian with regular config_parameters."""
+        config = JobConfig(
+            template_string="x={{ x }}, a={{ a }}",
+            sweep=SweepConfig(
+                config_parameters=[
+                    ConfigSweepParameter(name="x", values=[1, 2]),
+                ],
+                compound_parameters=[
+                    CompoundSweepParameter(
+                        name="regime",
+                        parameters=[
+                            ConfigSweepParameter(name="a", values=[10, 20]),
+                        ],
+                        labels=["low", "high"],
+                    ),
+                ],
+            ),
+        )
+        expander = JobExpander()
+        job_set = expander.expand(config)
+
+        try:
+            # 2 (x) * 2 (regime) = 4 jobs
+            self.assertEqual(len(job_set), 4)
+
+            # Verify all combinations exist
+            combos = [(j.parameters["x"], j.parameters["regime"]) for j in job_set]
+            expected = [(1, "low"), (1, "high"), (2, "low"), (2, "high")]
+            self.assertEqual(sorted(combos), sorted(expected))
+        finally:
+            job_set.cleanup()
 
 
 if __name__ == '__main__':
