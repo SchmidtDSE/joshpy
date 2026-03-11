@@ -1,15 +1,10 @@
 ---
 title: "Preprocessing External Data"
 description: "Convert geospatial data to Josh's optimized .jshd format"
+jupyter: python3
 execute:
   warning: false
 ---
-
-```{r}
-#| label: setup
-#| include: false
-library(reticulate)
-```
 
 ## Introduction
 
@@ -377,13 +372,82 @@ not the original variable name from the NetCDF file. However, when Josh resolves
 the internal variable name.
 :::
 
+## Step 4: Visual Verification with plot_jshd()
+
+For a more comprehensive check, use `inspect_jshd()` and `plot_jshd()` to dump
+the entire JSHD contents and visualize them. This is especially useful when
+debugging preprocessing issues or verifying spatial patterns.
+
+```{python}
+#| label: fig-jshd-verification
+#| fig-cap: "Visual verification of preprocessed JSHD files showing all three spatial patterns"
+#| fig-width: 12
+#| fig-height: 4
+
+import matplotlib.pyplot as plt
+from pathlib import Path
+from joshpy import JoshCLI, inspect_jshd, plot_jshd
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+DATA_DIR = Path("../../examples/external_data")
+
+patterns = ["gradient", "triangle", "stripes"]
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+for ax, pattern in zip(axes, patterns):
+    jshd_path = DATA_DIR / f"soil_quality_{pattern}.jshd"
+    
+    # Load JSHD data
+    data = inspect_jshd(cli, jshd_path)
+    arr = data.to_array(timestep=0)
+    
+    # Plot
+    im = ax.imshow(arr, origin="lower", cmap="YlGn", aspect="auto")
+    ax.set_xlabel("X (grid index)")
+    ax.set_ylabel("Y (grid index)")
+    ax.set_title(f"{pattern.title()}\n({data.metadata.width}×{data.metadata.height}, "
+                 f"range: {arr.min():.0f}–{arr.max():.0f})")
+
+plt.colorbar(im, ax=axes, label="Soil Quality (%)", shrink=0.8)
+plt.tight_layout()
+plt.show()
+```
+
+The visualization confirms that preprocessing preserved the spatial patterns:
+
+- **Gradient**: Values increase from left (low) to right (high)
+- **Triangle**: Values peak in the center and decrease toward edges
+- **Stripes**: Alternating bands of low (20%) and high (80%) values
+
+### Single File Inspection
+
+For detailed inspection of a single file, use `plot_jshd()` directly:
+
+```{python}
+#| label: fig-single-jshd
+#| fig-cap: "Detailed JSHD inspection with metadata"
+
+data = inspect_jshd(cli, DATA_DIR / "soil_quality_gradient.jshd")
+
+# Print metadata
+print(f"Grid: {data.metadata.width} × {data.metadata.height}")
+print(f"Timesteps: {data.metadata.num_timesteps}")
+print(f"Units: {data.metadata.units}")
+
+# Create debug plot with full metadata
+fig = plot_jshd(data, timestep=0, cmap="YlGn", title="Gradient Pattern - JSHD Debug View")
+```
+
 ## Summary
 
 In this tutorial, we:
 
 1. **Created synthetic test data** with clear spatial patterns using `scipy.io.netcdf_file`
 2. **Preprocessed NetCDF to .jshd** using `cli.preprocess()` with a reference simulation
-3. **Verified the data** using `cli.inspect_jshd()` to spot-check values
+3. **Verified point values** using `cli.inspect_jshd()` to spot-check coordinates
+4. **Visualized the full grid** using `inspect_jshd()` and `plot_jshd()` to confirm patterns
 
 The preprocessed `.jshd` files are now ready for use in simulations. The next
 tutorial, [Sweeping Over External Data](external-data-sweep.qmd), demonstrates
@@ -405,4 +469,5 @@ how to run parameter sweeps over multiple external data files.
 - [External Data Sweep Tutorial](external-data-sweep.qmd) - Use these files in a file sweep
 - [JoshCLI Reference](../reference/cli.JoshCLI.qmd) - CLI wrapper documentation
 - [PreprocessConfig Reference](../reference/cli.PreprocessConfig.qmd) - Preprocessing options
+- [JSHD Inspection](../reference/jshd.qmd) - `inspect_jshd()` and `plot_jshd()` reference
 - [Josh Data Guide](https://joshsim.org/guides/data.html) - Josh documentation on external data

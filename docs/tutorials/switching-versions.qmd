@@ -1,15 +1,10 @@
 ---
 title: "Switching Josh Versions"
 description: "Using stable, development, or custom Josh builds"
+jupyter: python3
 execute:
   warning: false
 ---
-
-```{r}
-#| label: setup
-#| include: false
-library(reticulate)
-```
 
 ## Introduction
 

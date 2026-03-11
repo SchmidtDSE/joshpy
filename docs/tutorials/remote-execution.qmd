@@ -1,15 +1,10 @@
 ---
 title: "Remote Runs in Parallel"
 description: "Speed up simulations by distributing replicates across Josh Cloud"
+jupyter: python3
 execute:
   warning: false
 ---
-
-```{r}
-#| label: setup
-#| include: false
-library(reticulate)
-```
 
 ## Introduction
 
