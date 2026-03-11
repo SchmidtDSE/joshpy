@@ -34,6 +34,14 @@ from joshpy.cli import (
     ExportPaths,
 )
 
+# JSHD inspection module (always available)
+from joshpy.jshd import (
+    JshdMetadata,
+    JshdData,
+    inspect_jshd,
+    plot_jshd,
+)
+
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
@@ -122,6 +130,11 @@ __all__ = [
     "InspectExportsConfig",
     "ExportFileInfo",
     "ExportPaths",
+    # JSHD inspection
+    "JshdMetadata",
+    "JshdData",
+    "inspect_jshd",
+    "plot_jshd",
     # Jobs (optional)
     "ConfigSweepParameter",
     "FileSweepParameter",
