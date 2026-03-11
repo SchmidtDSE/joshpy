@@ -45,8 +45,10 @@ JAR_URLS = {
     JarMode.DEV: "https://joshsim.org/dist/dev/joshsim-fat.jar",
 }
 
-# Default jar directory (relative to working directory)
-DEFAULT_JAR_DIR = Path("jar")
+# Default jar directory (relative to joshpy package, i.e., repo root)
+# This ensures JARs are always downloaded to the same location regardless of cwd
+_PACKAGE_DIR = Path(__file__).parent
+DEFAULT_JAR_DIR = _PACKAGE_DIR.parent / "jar"
 
 # Default jar filenames
 JAR_FILENAMES = {
