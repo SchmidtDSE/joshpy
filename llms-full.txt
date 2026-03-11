@@ -36,6 +36,7 @@ pip install joshpy[all]
 joshpy/
 ├── __init__.py      # Public API exports
 ├── cli.py           # CLI wrapper (JoshCLI, RunConfig, etc.)
+├── jshd.py          # JSHD file inspection (inspect_jshd, plot_jshd)
 ├── jobs.py          # Parameter sweep orchestration (JobConfig, JobExpander, etc.)
 ├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy, cv_objective)
 ├── sweep.py         # SweepManager for high-level orchestration
@@ -55,6 +56,7 @@ joshpy/
 **Always available:**
 - `jar.py`: `JarMode`, `JarManager`, `get_jar`, `download_jars`, `get_jar_hash`, `get_jar_version`
 - `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `PreprocessConfig`, `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
+- `jshd.py`: `JshdMetadata`, `JshdData`, `inspect_jshd`, `plot_jshd`
 
 **Requires joshpy[jobs]:**
 - `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`
@@ -1610,6 +1612,143 @@ print(f"Hash: {info['hash']}")
 | `JarMode.PROD` | Production JAR from joshsim.org |
 | `JarMode.DEV` | Development JAR from joshsim.org |
 | `JarMode.LOCAL` | Local JAR at jar/joshsim-fat.jar |
+
+---
+
+## JSHD File Inspection
+
+The `jshd` module provides tools for inspecting and visualizing Josh's preprocessed binary data files (`.jshd`). This is useful for verifying that preprocessing correctly interpolated external data (NetCDF, GeoTIFF) to the simulation grid.
+
+### Basic Usage
+
+```python
+from pathlib import Path
+from joshpy import JoshCLI, inspect_jshd, plot_jshd
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+# Inspect the JSHD file - extracts all data to a DataFrame
+data = inspect_jshd(cli, Path("soil_quality.jshd"))
+
+# View metadata
+print(f"Grid: {data.metadata.width} x {data.metadata.height}")
+print(f"Timesteps: {data.metadata.num_timesteps}")
+print(f"Units: {data.metadata.units}")
+
+# Quick debug plot
+plot_jshd(data, timestep=0, cmap="YlGn")
+
+# Get raw array for custom analysis
+arr = data.to_array(timestep=0)
+print(f"Shape: {arr.shape}")
+print(f"Range: {arr.min():.2f} to {arr.max():.2f}")
+```
+
+### JshdMetadata
+
+Metadata returned from JSHD inspection:
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `min_x` | int | Minimum X grid index (inclusive) |
+| `max_x` | int | Maximum X grid index (inclusive) |
+| `min_y` | int | Minimum Y grid index (inclusive) |
+| `max_y` | int | Maximum Y grid index (inclusive) |
+| `min_timestep` | int | Minimum timestep (inclusive) |
+| `max_timestep` | int | Maximum timestep (inclusive) |
+| `width` | int | Grid width (max_x - min_x + 1) |
+| `height` | int | Grid height (max_y - min_y + 1) |
+| `units` | str | Unit string from JSHD header |
+| `csv_path` | Path | Path to extracted CSV file |
+
+Computed properties:
+- `num_timesteps`: Number of timesteps (max_timestep - min_timestep + 1)
+- `num_cells`: Total grid cells (width * height)
+
+### JshdData
+
+Container for JSHD file contents:
+
+```python
+# Access the raw DataFrame
+print(data.df.head())
+# Columns: x, y, timestep, value
+
+# Convert to numpy array
+arr_2d = data.to_array(timestep=0)    # Shape: (height, width)
+arr_3d = data.to_array()               # Shape: (num_timesteps, height, width)
+
+# Cleanup temp files (if cleanup=False was used)
+data.cleanup()
+```
+
+### inspect_jshd Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `cli` | JoshCLI | JoshCLI instance (required) |
+| `jshd_path` | Path | Path to .jshd file (required) |
+| `output_csv` | Path | Path for CSV output (default: temp file) |
+| `variable` | str | Variable name in JSHD (default: "data") |
+| `timeout` | float | Command timeout in seconds |
+| `cleanup` | bool | Delete temp CSV after loading (default: True) |
+
+### plot_jshd Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `data` | JshdData | Data from inspect_jshd() (required) |
+| `timestep` | int | Which timestep to plot (default: 0) |
+| `cmap` | str | Matplotlib colormap name (default: "viridis") |
+| `title` | str | Custom title (default: filename + timestep) |
+| `figsize` | tuple | Figure size in inches (default: (10, 8)) |
+| `show` | bool | Call plt.show() (default: True) |
+
+### Plot Features
+
+The debug plot includes:
+
+- **Heatmap** of values at the specified timestep using grid indices (x, y)
+- **Red dashed bounding box** showing grid extent
+- **Metadata text box** with:
+  - Grid dimensions
+  - X and Y index ranges  
+  - Timestep range
+  - Units
+  - Value statistics (min, max, mean)
+
+```python
+# Save plot to file
+fig = plot_jshd(data, timestep=0, show=False)
+fig.savefig("debug_plot.png", dpi=150, bbox_inches="tight")
+```
+
+### Use Case: Debugging Preprocessing
+
+When simulation outputs don't match expected patterns, use JSHD inspection to verify the input data:
+
+```python
+# Compare original NetCDF pattern with preprocessed JSHD
+import matplotlib.pyplot as plt
+from scipy.io import netcdf_file
+
+# Load original NetCDF
+with netcdf_file("soil_quality.nc", 'r') as f:
+    orig_data = f.variables['soil_quality'][0, :, :].copy()
+
+# Load preprocessed JSHD
+data = inspect_jshd(cli, Path("soil_quality.jshd"))
+jshd_data = data.to_array(timestep=0)
+
+# Compare side by side
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+ax1.imshow(orig_data, origin='lower')
+ax1.set_title("Original NetCDF")
+ax2.imshow(jshd_data, origin='lower')
+ax2.set_title("Preprocessed JSHD")
+plt.show()
+```
 
 ---
 
