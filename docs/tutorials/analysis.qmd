@@ -50,7 +50,16 @@ registry = RunRegistry(REGISTRY_PATH)
 
 ## Part 1: Data Discovery
 
-Before plotting, discover what data is available in the registry.
+Before plotting, discover what data is available in the registry. This step is
+essential - column names come from your Josh exports, not from joshpy.
+
+::: {.callout-tip}
+## Discovery First
+
+Always run `list_export_variables()` and `list_config_parameters()` before writing
+queries. See [Best Practices: Schema & Querying](../best-practices.qmd#duckdb-schema-querying-patterns) 
+for common query patterns and aggregation guidance.
+:::
 
 ### Full Summary
 

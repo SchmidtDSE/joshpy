@@ -464,10 +464,19 @@ how to run parameter sweeps over multiple external data files.
 | `examples/external_data/soil_quality_triangle.jshd` | Preprocessed - triangle pattern |
 | `examples/external_data/soil_quality_stripes.jshd` | Preprocessed - stripes pattern |
 
+::: {.callout-tip}
+## Grid Alignment & JSHD Reuse
+
+JSHD files are tied to specific grid definitions. If you change `grid.size`, 
+`grid.low`, or `grid.high` in your simulation, you must regenerate the JSHD files.
+See [Best Practices: Preprocessing & Grid Alignment](../best-practices.qmd#preprocessing-grid-alignment) 
+for compatibility rules and directory organization patterns.
+:::
+
 ## Learn More
 
 - [External Data Sweep Tutorial](external-data-sweep.qmd) - Use these files in a file sweep
+- [Best Practices: Preprocessing](../best-practices.qmd#preprocessing-grid-alignment) - Grid alignment and JSHD reuse
 - [JoshCLI Reference](../reference/cli.JoshCLI.qmd) - CLI wrapper documentation
 - [PreprocessConfig Reference](../reference/cli.PreprocessConfig.qmd) - Preprocessing options
-- [JSHD Loading](../reference/jshd.qmd) - `load_jshd()` and `plot_jshd()` reference
 - [Josh Data Guide](https://joshsim.org/guides/data.html) - Josh documentation on external data

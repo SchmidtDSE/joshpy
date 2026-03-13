@@ -17,8 +17,7 @@ project:
     - tutorials/adaptive-sweep.qmd
     - tutorials/switching-versions.qmd   # Josh version switching
     - tutorials/remote-execution.qmd     # Josh Cloud execution
-    - how-to/index.qmd
-    - explanation/index.qmd
+    - best-practices.qmd
     - reference/
 
 website:
@@ -57,12 +56,10 @@ website:
           - text: "Analysis"
           - text: "Analysis & Visualization"
             href: tutorials/analysis.qmd
-      - text: "How-To"
-        href: how-to/index.qmd
+      - text: "Best Practices"
+        href: best-practices.qmd
       - text: "Reference"
         href: reference/index.qmd
-      - text: "Concepts"
-        href: explanation/index.qmd
     right:
       - icon: github
         href: https://github.com/SchmidtDSE/joshpy
@@ -98,9 +95,9 @@ website:
           contents:
             - tutorials/analysis.qmd
     
-    - title: "How-To Guides"
+    - title: "Best Practices"
       contents:
-        - how-to/index.qmd
+        - best-practices.qmd
     
     - title: "API Reference"
       contents:
@@ -159,10 +156,6 @@ website:
             - reference/jar.JarMode.qmd
             - reference/jar.JarManager.qmd
             - reference/jar.get_jar.qmd
-    
-    - title: "Concepts"
-      contents:
-        - explanation/index.qmd
 
   page-footer:
     center: |

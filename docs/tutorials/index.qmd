@@ -133,3 +133,7 @@ All tutorials assume:
 7. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
 8. [Timestep Interventions](timestep-interventions.qmd) - init-time and discrete event data
 9. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
+
+**Reference:**
+
+- [Best Practices & Troubleshooting](../best-practices.qmd) - registry design, error diagnosis, and practical guidance

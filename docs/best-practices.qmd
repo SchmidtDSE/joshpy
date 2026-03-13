@@ -1,0 +1,794 @@
+---
+title: "Best Practices & Troubleshooting"
+description: "Registry design, preprocessing workflow, and error diagnosis"
+execute:
+  warning: false
+---
+
+## Introduction
+
+This guide covers practical patterns for working effectively with joshpy, avoiding
+common pitfalls, and diagnosing issues when things go wrong. It's intended for users
+who have completed at least one tutorial.
+
+**What this covers:**
+
+1. [DuckDB Schema & Querying](#duckdb-schema-querying-patterns) - Understanding the registry structure
+2. [Registry Lifecycle](#registry-lifecycle) - One registry per experiment
+3. [Preprocessing & Grid Alignment](#preprocessing-grid-alignment) - When to regenerate JSHD files
+4. [Error Diagnosis](#error-diagnosis) - Josh vs. joshpy vs. user responsibility
+5. [Additional Best Practices](#additional-best-practices) - Development workflow, templates, performance
+
+## DuckDB Schema & Querying Patterns
+
+### Schema Overview
+
+The registry stores experiment data across six related tables. The `run_hash` is the
+universal key connecting configuration to results.
+
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `sweep_sessions` | Experiment-level metadata | session_id, experiment_name, status |
+| `job_configs` | Rendered config content + file hashes | run_hash, config_content, file_mappings |
+| `config_parameters` | Typed parameter columns for SQL queries | run_hash + one column per swept param |
+| `job_runs` | Execution records (timing, exit codes) | run_id, run_hash, replicate, exit_code |
+| `cell_data` | Simulation outputs (spatiotemporal) | run_hash, step, replicate, coordinates + export vars |
+| `run_outputs` | Output file metadata | run_id, output_type, file_path |
+
+::: {.callout-note collapse="true"}
+## Full Schema Details
+
+**sweep_sessions**
+```
+session_id: VARCHAR (primary key)
+experiment_name: VARCHAR
+created_at: TIMESTAMP
+template_path: VARCHAR
+template_hash: VARCHAR
+simulation: VARCHAR
+total_jobs: INTEGER
+total_replicates: INTEGER
+status: VARCHAR
+metadata: JSON
+```
+
+**job_configs**
+```
+run_hash: VARCHAR (primary key)
+session_id: VARCHAR (foreign key)
+josh_path: VARCHAR
+config_content: VARCHAR
+file_mappings: JSON
+created_at: TIMESTAMP
+```
+
+**config_parameters**
+```
+run_hash: VARCHAR (primary key)
+<dynamic columns>: DOUBLE, INTEGER, or VARCHAR
+```
+Columns are added dynamically based on swept parameters. For example, if you sweep
+`maxGrowth` and `survivalProb`, the table will have columns `maxGrowth DOUBLE` and
+`survivalProb DOUBLE`.
+
+**job_runs**
+```
+run_id: VARCHAR (primary key)
+run_hash: VARCHAR (foreign key)
+replicate: INTEGER
+started_at: TIMESTAMP
+completed_at: TIMESTAMP
+exit_code: INTEGER
+output_path: VARCHAR
+error_message: VARCHAR
+metadata: JSON
+```
+
+**cell_data**
+```
+cell_id: BIGINT (auto-increment)
+run_id: VARCHAR
+run_hash: VARCHAR
+step: INTEGER
+replicate: INTEGER
+position_x: DOUBLE
+position_y: DOUBLE
+longitude: DOUBLE
+latitude: DOUBLE
+entity_type: VARCHAR
+geom: GEOMETRY (if spatial extension enabled)
+<export variables>: DOUBLE or VARCHAR
+```
+Export variable columns are added dynamically based on what your Josh simulation exports.
+For example, `export.averageHeight.step = mean(Tree.height)` creates an `averageHeight DOUBLE` column.
+
+**run_outputs**
+```
+output_id: VARCHAR (primary key)
+run_id: VARCHAR (foreign key)
+output_type: VARCHAR
+file_path: VARCHAR
+file_size: BIGINT
+row_count: INTEGER
+created_at: TIMESTAMP
+```
+:::
+
+### The `run_hash` Connection
+
+The `run_hash` is a deterministic 12-character hash computed from:
+
+1. **Josh file content** - the full `.josh` source
+2. **Rendered config content** - the final `.jshc` after Jinja templating
+3. **File mapping hashes** - MD5 hashes of any external `.jshd` files
+
+This means:
+
+- **Same inputs = same hash** - enables reproducibility and deduplication
+- **Any change = new hash** - modifying source, config values, or data files produces a different hash
+- **Hash collisions** - if you run "the same" job in different experiments with a reused registry, you get ambiguous data
+
+### Common Query Patterns
+
+**Basic aggregation:**
+```sql
+SELECT step, AVG(averageHeight) as mean_height
+FROM cell_data
+GROUP BY step
+ORDER BY step
+```
+
+**Joining with parameters:**
+```sql
+SELECT 
+    cp.maxGrowth,
+    cd.step,
+    AVG(cd.averageHeight) as mean_height
+FROM cell_data cd
+JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+GROUP BY cp.maxGrowth, cd.step
+ORDER BY cp.maxGrowth, cd.step
+```
+
+**Filtering by parameter value:**
+```sql
+SELECT step, AVG(averageHeight) as mean_height
+FROM cell_data cd
+JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+WHERE cp.maxGrowth > 50
+GROUP BY step
+```
+
+**Aggregation order guidance:**
+
+When computing summary statistics, aggregate in this order:
+
+1. **Spatial** (per-cell) → compute cell-level values
+2. **Temporal** (per-step) → aggregate across cells within each timestep
+3. **Replicate** (per-run) → compute mean/std across replicates
+
+This matches ecological modeling conventions and produces meaningful uncertainty estimates.
+
+### Discovery First
+
+Before writing queries, always discover what's available:
+
+```python
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry("experiment.duckdb")
+
+# Full summary
+summary = registry.get_data_summary()
+print(summary)
+
+# What variables were exported from simulations?
+print(registry.list_export_variables())
+
+# What parameters were swept?
+print(registry.list_config_parameters())
+
+# What entity types are in the data?
+print(registry.list_entity_types())
+```
+
+Column names come from your Josh exports, not from joshpy. If your Josh file has
+`export.avgHeight.step = ...`, the column is named `avgHeight`, not `averageHeight`.
+
+**See also:** [Analysis & Visualization](tutorials/analysis.qmd) for full query examples and visualization patterns.
+
+## Registry Lifecycle
+
+### One Registry Per Experiment
+
+**Recommended pattern:** Create a new DuckDB file for each experiment or sweep.
+
+```python
+from datetime import date
+from joshpy.registry import RunRegistry
+
+# Naming convention: {experiment}_{date}.duckdb
+registry = RunRegistry(f"fire_sensitivity_{date.today()}.duckdb")
+```
+
+This approach:
+
+- Avoids hash collisions between experiments
+- Simplifies queries (no need to filter by session)
+- Makes sharing and archiving straightforward
+- Keeps file sizes manageable
+
+### Why Not Reuse Registries?
+
+Run hashes are deterministic. If you run "the same" simulation configuration in
+two different experiments using a shared registry, you get a hash collision:
+
+- The `job_configs` table already has that `run_hash`
+- New runs get associated with the existing config
+- Queries become ambiguous: which experiment's results are you analyzing?
+
+**Example problem:**
+
+```
+Experiment 1: maxGrowth=50, seed=42 → run_hash="abc123"
+Experiment 2: maxGrowth=50, seed=42 → run_hash="abc123" (same!)
+
+# This query now returns mixed results from both experiments
+SELECT AVG(height) FROM cell_data WHERE run_hash = 'abc123'
+```
+
+### When Multiple Sessions Make Sense
+
+Sessions exist within a registry to track related runs. You might use multiple
+sessions in a single registry when:
+
+- Running comparative experiments where you intentionally want cross-session queries
+- Iterating on the same experiment with minor adjustments
+
+If you do this, **always filter by `session_id`** in your queries:
+
+```sql
+SELECT ...
+FROM cell_data cd
+JOIN job_configs jc ON cd.run_hash = jc.run_hash
+WHERE jc.session_id = 'your-session-id'
+```
+
+### Cleanup & Archival
+
+**Export for archival (smaller, portable):**
+
+```python
+registry.to_parquet("results.parquet")
+```
+
+**Delete when done:**
+
+```python
+import os
+
+registry.close()
+os.remove("experiment.duckdb")
+# DuckDB may create a write-ahead log
+if os.path.exists("experiment.duckdb.wal"):
+    os.remove("experiment.duckdb.wal")
+```
+
+**Context manager for exploratory work:**
+
+```python
+with RunRegistry(":memory:") as registry:
+    # ... run sweep, analyze ...
+    pass  # Automatically cleaned up
+```
+
+**See also:** [Manual Workflow](tutorials/manual-workflow.qmd) for registry creation patterns.
+
+## Preprocessing & Grid Alignment
+
+### What's in a JSHD File
+
+A `.jshd` file is a precomputed binary grid that maps source geospatial data
+(GeoTIFF, NetCDF, COG) onto the simulation's grid. It stores:
+
+- **Spatial extents** (minX, maxX, minY, maxY) in grid coordinates
+- **Temporal range** (min/max timestep)
+- **Units string** (e.g., "K", "mm/year")
+- **Grid data** as `double[timesteps][height][width]`
+
+**Not stored:**
+
+- Source file path
+- Source file hash or modification timestamp
+- Preprocessing parameters used
+
+### Compatibility Rules
+
+A JSHD file is valid for a simulation if all of the following are true:
+
+| Requirement | What Must Match |
+|-------------|-----------------|
+| **Grid size** | Cell resolution must be the same (data was resampled during preprocessing) |
+| **Spatial extents** | Simulation's `grid.low`/`grid.high` must be within JSHD bounds |
+| **Timestep range** | Simulation's `steps.low`/`steps.high` must be within JSHD range |
+| **CRS** | Coordinate reference system from preprocessing must match |
+| **Units** | Must match what the simulation expects |
+
+**What does NOT invalidate a JSHD:**
+
+Other simulation parameters (patch logic, agents, attribute formulas) have no effect
+on JSHD validity. The JSHD is purely spatial/temporal input data - it's read-only
+during simulation. No part of the simulation writes back to or modifies the JSHD.
+
+### The Stale Data Risk
+
+::: {.callout-warning}
+## No Staleness Detection
+
+If the underlying GeoTIFF/NetCDF source file changes, the JSHD becomes stale with
+**zero detection**. There are no hashes, source file paths, or modification timestamps
+stored in the JSHD header.
+:::
+
+**User responsibility:** Track which source files produced which JSHD files. Consider:
+
+- A preprocessing log file (YAML or JSON)
+- Directory naming that encodes grid parameters
+- Re-preprocessing when in doubt
+
+### Directory Organization
+
+Organize preprocessed data by grid definition:
+
+```
+data/
+├── raw/                          # Original GeoTIFF/NetCDF files
+│   ├── climate_rcp45.nc
+│   ├── climate_rcp85.nc
+│   └── soil_quality.tif
+│
+├── preprocessed/
+│   ├── grid_1km_socal/           # Named for grid definition
+│   │   ├── climate_rcp45.jshd
+│   │   ├── climate_rcp85.jshd
+│   │   └── soil_quality.jshd
+│   │
+│   └── grid_500m_jotr/           # Different grid = separate directory
+│       ├── climate_rcp45.jshd
+│       └── climate_rcp85.jshd
+│
+└── preprocessing_log.yaml        # Track what was preprocessed how
+```
+
+Example `preprocessing_log.yaml`:
+
+```yaml
+grid_1km_socal:
+  grid_size: 1000m
+  bounds: "33.7-34.0 lat, -116.4 to -115.4 lon"
+  crs: EPSG:4326
+  files:
+    climate_rcp45.jshd:
+      source: raw/climate_rcp45.nc
+      variable: temperature
+      units: K
+      preprocessed: 2024-01-15
+    climate_rcp85.jshd:
+      source: raw/climate_rcp85.nc
+      variable: temperature
+      units: K
+      preprocessed: 2024-01-15
+```
+
+### Verification
+
+Use `load_jshd()` to verify a file matches expectations:
+
+```python
+from joshpy import JoshCLI, load_jshd
+from joshpy.jar import JarMode
+from pathlib import Path
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+data = load_jshd(cli, Path("climate.jshd"))
+
+print(f"Grid: {data.metadata.width} x {data.metadata.height}")
+print(f"Timesteps: {data.metadata.num_timesteps}")
+print(f"Units: {data.metadata.units}")
+
+# Visual check
+from joshpy import plot_jshd
+plot_jshd(data, timestep=0)
+```
+
+**See also:** [Preprocessing External Data](tutorials/preprocessing.qmd) for the full preprocessing workflow.
+
+## Error Diagnosis
+
+### Validate First
+
+Always validate Josh syntax before running:
+
+```python
+from joshpy.cli import JoshCLI, ValidateConfig
+from pathlib import Path
+
+cli = JoshCLI()
+result = cli.validate(ValidateConfig(script=Path("simulation.josh")))
+
+if not result.success:
+    print(result.stderr)
+```
+
+Validation catches syntax errors but not runtime errors (like undefined identifiers
+or unit mismatches).
+
+### Error Categories
+
+| Error Source | Symptoms | Where to Fix |
+|--------------|----------|--------------|
+| **Josh syntax** | Parse errors at validation | Edit `.josh` file |
+| **Josh runtime** | Unit mismatches, undefined identifiers | Edit `.josh` or report to [Josh repo](https://github.com/SchmidtDSE/josh) |
+| **Preprocessing** | JSHD values don't match source data | Re-run `cli.preprocess()` with correct options |
+| **joshpy orchestration** | Registry errors, job expansion failures | Report to [joshpy repo](https://github.com/SchmidtDSE/joshpy) |
+| **User analysis** | Missing data, unexpected query results | Check discovery methods, verify run_hash exists |
+
+### Common Josh Errors
+
+::: {.callout-note collapse="true"}
+## Syntax Error: Missing Parenthesis
+
+**Error message:**
+```
+Found errors in Josh code at /tmp/test.josh:
+ - On line 13: missing ')' at 'end'
+```
+
+**Cause:** Unbalanced parentheses or brackets in an expression.
+
+**Josh source that causes this:**
+```josh
+start simulation Main
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  steps.low = 0 count
+  steps.high = 10 count
+end simulation
+
+start patch Default
+  # Missing closing parenthesis
+  someValue.step = (5 + 3 meters
+end patch
+```
+
+**Fix:** Check for matching parentheses, brackets, and braces.
+:::
+
+::: {.callout-note collapse="true"}
+## Runtime Error: Unit Mismatch
+
+**Error message:**
+```
+java.lang.IllegalArgumentException: No conversion exists between "meters" and "years".
+```
+
+**Cause:** Attempting to add, subtract, or compare values with incompatible units.
+
+**Josh source that causes this:**
+```josh
+start simulation Main
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  steps.low = 0 count
+  steps.high = 2 count
+  grid.patch = "Default"
+end simulation
+
+start patch Default
+  # Adding meters to years - incompatible units
+  badValue.step = 5 meters + 3 years
+  export.badValue.step = badValue
+  exportFiles.patch = "file:///tmp/output.csv"
+end patch
+```
+
+**Fix:** Ensure operands have compatible units. Use `force` for explicit conversion if needed.
+:::
+
+::: {.callout-note collapse="true"}
+## Runtime Error: Missing Config File
+
+**Error message:**
+```
+java.lang.IllegalArgumentException: Config value not found: missing_config.paramValue
+```
+
+**Cause:** The simulation references a config value, but the `.jshc` file wasn't provided
+or doesn't contain the expected variable.
+
+**Josh source that causes this:**
+```josh
+start simulation Main
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  steps.low = 0 count
+  steps.high = 2 count
+  grid.patch = "Default"
+  
+  # References config file that doesn't exist
+  someParam = config missing_config.paramValue
+  exportFiles.patch = "file:///tmp/output.csv"
+end simulation
+
+start patch Default
+  export.value.step = meta.someParam
+end patch
+```
+
+**Fix:** 
+- Ensure the config file exists and is passed via `--data` flag
+- Check that the variable name matches exactly (case-sensitive)
+- Verify the config file syntax is correct
+:::
+
+::: {.callout-note collapse="true"}
+## Runtime Error: Missing External Data
+
+**Error message:**
+```
+java.lang.RuntimeException: Failed to open stream from working directory: nonexistent_data.jshd
+```
+
+**Cause:** The simulation uses `external` to reference a JSHD file that doesn't exist
+or wasn't provided.
+
+**Josh source that causes this:**
+```josh
+start simulation Main
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  steps.low = 0 count
+  steps.high = 2 count
+  grid.patch = "Default"
+  exportFiles.patch = "file:///tmp/output.csv"
+end simulation
+
+start patch Default
+  # References JSHD file that doesn't exist
+  soilQuality.step = external nonexistent_data
+  export.soil.step = soilQuality
+end patch
+```
+
+**Fix:**
+- Preprocess the external data file to create the `.jshd`
+- Pass it via `--data name=path.jshd` or `file_mappings` in joshpy
+- Ensure the name matches the `external` reference (e.g., `external soil_quality` needs `soil_quality.jshd`)
+:::
+
+::: {.callout-note collapse="true"}
+## Runtime Error: Undefined Identifier
+
+**Error message:**
+```
+java.lang.IllegalStateException: Unable to get value for ValueResolver(undefinedVariable)
+```
+
+**Cause:** Referenced a variable that doesn't exist - typically a typo or forgetting
+to define an attribute.
+
+**Josh source that causes this:**
+```josh
+start simulation Main
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  steps.low = 0 count
+  steps.high = 2 count
+  grid.patch = "Default"
+  exportFiles.patch = "file:///tmp/output.csv"
+end simulation
+
+start patch Default
+  # References undefined variable
+  value.step = undefinedVariable + 5 meters
+  export.value.step = value
+end patch
+```
+
+**Fix:**
+- Check spelling of variable names
+- Ensure the variable is defined before use
+- Use `prior.variableName` for previous-step values
+:::
+
+::: {.callout-note collapse="true"}
+## Runtime Error: Wrong Simulation Name
+
+**Error message:**
+```
+Could not find simulation: WrongName
+```
+
+**Cause:** The simulation name passed to `run` doesn't match any `start simulation`
+block in the Josh file.
+
+**Fix:**
+- Check the exact name in your Josh file: `start simulation Main` means use `"Main"`
+- Names are case-sensitive
+- Use `cli.validate()` to see available simulations
+:::
+
+### Using Josh's Debug Output
+
+For runtime debugging, use Josh's built-in `debug()` function:
+
+```josh
+start simulation Main
+  # ... grid setup ...
+  debugFiles.patch = "file:///tmp/patch_debug.txt"
+  debugFiles.organism = "file:///tmp/organism_debug.txt"
+end simulation
+
+start organism Tree
+  age.init = 0 years
+  age.step = prior.age + 1 year
+  
+  # Write debug info each step
+  debug(age, height)
+end organism
+```
+
+**Output format:**
+```
+[Step 5, organism @ 733264e6 (72.5, 1.5)] age: 6 height: 3.1305
+```
+
+The hex identifier (`733264e6`) is unique per entity, enabling lifecycle tracking:
+
+```bash
+grep "733264e6" organism_debug.txt
+```
+
+### Common joshpy Issues
+
+**"Variable not found"**
+```python
+# Check what's actually available
+print(registry.list_export_variables())
+# Column names come from Josh exports, not your expectations
+```
+
+**"Parameter not found"**
+```python
+# Only swept parameters are stored
+print(registry.list_config_parameters())
+# Static template values don't become parameters
+```
+
+**Empty query results**
+```python
+# Verify the run_hash exists
+runs = registry.get_runs_by_parameters(maxGrowth=50)
+print(runs)
+
+# Check step and replicate ranges
+summary = registry.get_data_summary()
+print(f"Steps: {summary.step_range}")
+print(f"Replicates: {summary.replicate_range}")
+```
+
+## Additional Best Practices
+
+### Run Hash Determinism
+
+The same Josh + config + file mappings always produces the same `run_hash`. This enables:
+
+- **Reproducibility**: Re-running generates the same hash
+- **Deduplication**: Registry can detect duplicate runs
+- **Caching**: Results can be reused if hash matches
+
+**Implication:** Don't modify source files between related experiments if you want
+consistent hashing.
+
+### Template Hygiene
+
+Keep Jinja templates minimal:
+
+```jinja
+{# Good: Simple value substitution #}
+maxGrowth = {{ maxGrowth }} meters
+survivalProb = {{ survivalProb }} percent
+```
+
+```jinja
+{# Avoid: Complex logic in templates #}
+{% if scenario == "optimistic" %}
+maxGrowth = 100 meters
+{% elif scenario == "pessimistic" %}
+maxGrowth = 20 meters
+{% endif %}
+```
+
+Complex logic belongs in:
+
+- **Josh** (using conditional expressions)
+- **Python** (pre-compute values before templating)
+
+### Development Workflow
+
+Start small, then scale:
+
+1. **Tiny grid**: 2x2 cells, 5 steps, 1 replicate
+   - Verify Josh syntax and logic
+   - Check exports are correct
+
+2. **Single job**: One parameter combination, manually
+   - Inspect output CSV
+   - Verify values make sense
+
+3. **Small sweep**: 2-3 parameter values, 2 replicates
+   - Test registry queries
+   - Verify parameter comparison plots
+
+4. **Full sweep**: Scale up only after small tests pass
+
+### File Parameter Labels
+
+When using `FileSweepParameter`, labels are derived from filename stems:
+
+```python
+FileSweepParameter(
+    name="climate",
+    paths=[
+        Path("climate_ssp245.jshd"),  # label: "climate_ssp245"
+        Path("climate_ssp585.jshd"),  # label: "climate_ssp585"
+    ],
+)
+```
+
+These labels become queryable in `config_parameters`. Use meaningful filenames:
+
+- **Good**: `climate_ssp245_2050.jshd`, `soil_quality_high.jshd`
+- **Bad**: `data_v3_final.jshd`, `test2.jshd`
+
+### Memory & Performance
+
+Large simulations can produce large tables:
+
+- 100x100 grid × 100 steps × 10 replicates × 5 variables = 50 million rows
+
+**Strategies:**
+
+- Use `output_steps` to limit which timesteps are exported
+- Export fewer variables (only what you need for analysis)
+- Process in batches for very large sweeps
+- Use `:memory:` for exploratory work, then re-run with persistent storage
+- Export to Parquet for efficient storage and sharing
+
+```python
+# Limit output steps in Josh
+exportFiles.patch = "file:///tmp/output.csv"
+# In Josh: Configure output_steps in simulation
+
+# Or in joshpy RunConfig
+RunConfig(
+    script=...,
+    simulation="Main",
+    output_steps="0,50,100",  # Only these steps
+)
+```
+
+## Summary
+
+| Topic | Key Takeaway | Learn More |
+|-------|--------------|------------|
+| **Schema** | `run_hash` connects everything; use `list_export_variables()` before querying | [Analysis Tutorial](tutorials/analysis.qmd) |
+| **Registry** | One registry per experiment avoids hash collisions | [Manual Workflow](tutorials/manual-workflow.qmd) |
+| **Preprocessing** | JSHD files are grid-specific; no staleness detection | [Preprocessing Tutorial](tutorials/preprocessing.qmd) |
+| **Errors** | Validate first; check stderr for Josh errors | [SweepManager Tutorial](tutorials/sweep-manager.qmd) |
+| **Workflow** | Start small (tiny grid, few replicates), then scale | All tutorials |

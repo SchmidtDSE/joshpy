@@ -166,6 +166,15 @@ if results.failed > 0:
     raise RuntimeError(f"Sweep failed: {results.failed} job(s) failed\n\n{error_detail}")
 ```
 
+::: {.callout-tip}
+## Debugging Failures
+
+If jobs fail, check `result.stderr` for Josh error messages. Common issues include
+unit mismatches, missing config files, and undefined identifiers. See 
+[Best Practices: Error Diagnosis](../best-practices.qmd#error-diagnosis) 
+for a guide to interpreting error messages.
+:::
+
 ## Step 4: Load Results
 
 The `load_results()` method automatically discovers export paths from the Josh

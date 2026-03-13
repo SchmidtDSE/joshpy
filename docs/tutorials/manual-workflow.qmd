@@ -127,6 +127,14 @@ The `RunRegistry` provides experiment tracking backed by DuckDB. It stores:
 - **Configs**: Rendered configuration files with parameter values and input file hashes
 - **Runs**: Individual execution records with timing and exit codes
 
+::: {.callout-tip}
+## One Registry Per Experiment
+
+We recommend creating a separate registry file for each experiment. Reusing 
+registries across experiments can cause hash collisions and query ambiguity.
+See [Best Practices: Registry Lifecycle](../best-practices.qmd#registry-lifecycle) for details.
+:::
+
 The `JobExpander` takes our `JobConfig` and generates concrete jobs - one per
 parameter combination, each with a unique **run hash** for tracking. The run hash
 includes the `.josh` file content, rendered `.jshc` content, and hashes of any
