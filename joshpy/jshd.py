@@ -1,6 +1,6 @@
-"""JSHD file inspection and conversion utilities.
+"""JSHD file loading and visualization utilities.
 
-This module provides tools for inspecting and visualizing Josh's preprocessed
+This module provides tools for loading and visualizing Josh's preprocessed
 binary data files (.jshd). The primary use case is debugging preprocessing
 to verify that NetCDF/GeoTIFF data was correctly interpolated to the simulation
 grid.
@@ -9,9 +9,9 @@ Future versions may support bidirectional conversion between JSHD and Python
 objects (xarray/pandas).
 
 Example:
-    >>> from joshpy import JoshCLI, inspect_jshd, plot_jshd
+    >>> from joshpy import JoshCLI, load_jshd, plot_jshd
     >>> cli = JoshCLI()
-    >>> data = inspect_jshd(cli, Path("soil_quality.jshd"))
+    >>> data = load_jshd(cli, Path("soil_quality.jshd"))
     >>> plot_jshd(data, timestep=0)
 
 Requires: pandas, matplotlib, numpy
@@ -160,7 +160,7 @@ class JshdData:
             self._temp_dir = None
 
 
-def inspect_jshd(
+def load_jshd(
     cli: JoshCLI,
     jshd_path: Path,
     output_csv: Path | None = None,
@@ -168,14 +168,14 @@ def inspect_jshd(
     timeout: float | None = None,
     cleanup: bool = True,
 ) -> JshdData:
-    """Dump JSHD contents to CSV and load as JshdData.
+    """Load JSHD contents as JshdData with DataFrame and metadata.
 
     Uses the CLI's ``inspectJshd --to-csv`` mode to extract all data from
     a JSHD file into a pandas DataFrame with metadata.
 
     Args:
         cli: JoshCLI instance to use for execution.
-        jshd_path: Path to the .jshd file to inspect.
+        jshd_path: Path to the .jshd file to load.
         output_csv: Path for CSV output. If None, uses a temp file.
         variable: Variable name in JSHD (typically "data").
         timeout: Command timeout in seconds.
@@ -192,7 +192,7 @@ def inspect_jshd(
 
     Example:
         >>> cli = JoshCLI()
-        >>> data = inspect_jshd(cli, Path("temperature.jshd"))
+        >>> data = load_jshd(cli, Path("temperature.jshd"))
         >>> print(f"Grid size: {data.metadata.width} x {data.metadata.height}")
         >>> arr = data.to_array(timestep=0)
     """
@@ -272,7 +272,7 @@ def plot_jshd(
     external data to the simulation grid.
 
     Args:
-        data: JshdData object from inspect_jshd().
+        data: JshdData object from load_jshd().
         timestep: Which timestep to plot (default: 0).
         cmap: Matplotlib colormap name.
         title: Custom title. If None, uses source filename and timestep.
@@ -286,7 +286,7 @@ def plot_jshd(
         ValueError: If timestep is out of range.
 
     Example:
-        >>> data = inspect_jshd(cli, Path("soil_quality.jshd"))
+        >>> data = load_jshd(cli, Path("soil_quality.jshd"))
         >>> fig = plot_jshd(data, timestep=0, cmap="YlGn")
         >>> fig.savefig("debug_plot.png", dpi=150, bbox_inches="tight")
     """
@@ -320,7 +320,7 @@ def plot_jshd(
         arr,
         origin="lower",
         extent=extent,
-        aspect="auto",
+        aspect="equal",
         cmap=cmap,
     )
 

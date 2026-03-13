@@ -36,7 +36,7 @@ pip install joshpy[all]
 joshpy/
 ├── __init__.py      # Public API exports
 ├── cli.py           # CLI wrapper (JoshCLI, RunConfig, etc.)
-├── jshd.py          # JSHD file inspection (inspect_jshd, plot_jshd)
+├── jshd.py          # JSHD file loading (load_jshd, plot_jshd)
 ├── jobs.py          # Parameter sweep orchestration (JobConfig, JobExpander, etc.)
 ├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy, cv_objective)
 ├── sweep.py         # SweepManager for high-level orchestration
@@ -56,7 +56,7 @@ joshpy/
 **Always available:**
 - `jar.py`: `JarMode`, `JarManager`, `get_jar`, `download_jars`, `get_jar_hash`, `get_jar_version`
 - `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `PreprocessConfig`, `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
-- `jshd.py`: `JshdMetadata`, `JshdData`, `inspect_jshd`, `plot_jshd`
+- `jshd.py`: `JshdMetadata`, `JshdData`, `load_jshd`, `plot_jshd`
 
 **Requires joshpy[jobs]:**
 - `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`
@@ -1617,19 +1617,19 @@ print(f"Hash: {info['hash']}")
 
 ## JSHD File Inspection
 
-The `jshd` module provides tools for inspecting and visualizing Josh's preprocessed binary data files (`.jshd`). This is useful for verifying that preprocessing correctly interpolated external data (NetCDF, GeoTIFF) to the simulation grid.
+The `jshd` module provides tools for loading and visualizing Josh's preprocessed binary data files (`.jshd`). This is useful for verifying that preprocessing correctly interpolated external data (NetCDF, GeoTIFF) to the simulation grid.
 
 ### Basic Usage
 
 ```python
 from pathlib import Path
-from joshpy import JoshCLI, inspect_jshd, plot_jshd
+from joshpy import JoshCLI, load_jshd, plot_jshd
 from joshpy.jar import JarMode
 
 cli = JoshCLI(josh_jar=JarMode.DEV)
 
-# Inspect the JSHD file - extracts all data to a DataFrame
-data = inspect_jshd(cli, Path("soil_quality.jshd"))
+# Load the JSHD file - extracts all data to a DataFrame
+data = load_jshd(cli, Path("soil_quality.jshd"))
 
 # View metadata
 print(f"Grid: {data.metadata.width} x {data.metadata.height}")
@@ -1683,7 +1683,7 @@ arr_3d = data.to_array()               # Shape: (num_timesteps, height, width)
 data.cleanup()
 ```
 
-### inspect_jshd Options
+### load_jshd Options
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1698,7 +1698,7 @@ data.cleanup()
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `data` | JshdData | Data from inspect_jshd() (required) |
+| `data` | JshdData | Data from load_jshd() (required) |
 | `timestep` | int | Which timestep to plot (default: 0) |
 | `cmap` | str | Matplotlib colormap name (default: "viridis") |
 | `title` | str | Custom title (default: filename + timestep) |
@@ -1738,7 +1738,7 @@ with netcdf_file("soil_quality.nc", 'r') as f:
     orig_data = f.variables['soil_quality'][0, :, :].copy()
 
 # Load preprocessed JSHD
-data = inspect_jshd(cli, Path("soil_quality.jshd"))
+data = load_jshd(cli, Path("soil_quality.jshd"))
 jshd_data = data.to_array(timestep=0)
 
 # Compare side by side

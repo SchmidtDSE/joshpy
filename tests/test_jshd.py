@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pandas as pd
 
-from joshpy.jshd import JshdData, JshdMetadata, inspect_jshd, plot_jshd
+from joshpy.jshd import JshdData, JshdMetadata, load_jshd, plot_jshd
 
 
 class TestJshdMetadata(unittest.TestCase):
@@ -220,15 +220,15 @@ class TestJshdData(unittest.TestCase):
         data.cleanup()
 
 
-class TestInspectJshd(unittest.TestCase):
-    """Tests for inspect_jshd function."""
+class TestLoadJshd(unittest.TestCase):
+    """Tests for load_jshd function."""
 
     def test_file_not_found(self):
         """Should raise FileNotFoundError for missing file."""
         cli = MagicMock()
 
         with self.assertRaises(FileNotFoundError) as ctx:
-            inspect_jshd(cli, Path("/nonexistent/file.jshd"))
+            load_jshd(cli, Path("/nonexistent/file.jshd"))
 
         self.assertIn("not found", str(ctx.exception))
 
@@ -265,7 +265,7 @@ class TestInspectJshd(unittest.TestCase):
                 "value": [50.0],
             })
 
-            inspect_jshd(cli, jshd_path)
+            load_jshd(cli, jshd_path)
 
             # Verify CLI was called with correct args
             call_args = cli._execute.call_args[0][0]
@@ -293,7 +293,7 @@ class TestInspectJshd(unittest.TestCase):
             )
 
             with self.assertRaises(RuntimeError) as ctx:
-                inspect_jshd(cli, jshd_path)
+                load_jshd(cli, jshd_path)
 
             self.assertIn("exit 6", str(ctx.exception))
             self.assertIn("Variable not found", str(ctx.exception))
@@ -333,7 +333,7 @@ class TestInspectJshd(unittest.TestCase):
                 "value": [273.15],
             })
 
-            inspect_jshd(cli, jshd_path, variable="temperature")
+            load_jshd(cli, jshd_path, variable="temperature")
 
             call_args = cli._execute.call_args[0][0]
             self.assertEqual(call_args[2], "temperature")
