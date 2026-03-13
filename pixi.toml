@@ -48,7 +48,7 @@ test = { cmd = "pytest tests/ -v", depends-on = ["install-dev"] }
 lint = "ruff check joshpy/"
 typecheck = "mypy joshpy/"
 format = "ruff format joshpy/"
-get-jars = "python scripts/get_jars.py"
+get-jars = { cmd = "python scripts/get_jars.py", depends-on = ["install"] }
 
 # Configure reticulate to use pixi's Python for Quarto docs rendering
 # This creates the conda-meta/history file that reticulate checks and exports RETICULATE_PYTHON
