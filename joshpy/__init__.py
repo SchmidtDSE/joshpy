@@ -34,11 +34,11 @@ from joshpy.cli import (
     ExportPaths,
 )
 
-# JSHD inspection module (always available)
+# JSHD loading module (always available)
 from joshpy.jshd import (
     JshdMetadata,
     JshdData,
-    inspect_jshd,
+    load_jshd,
     plot_jshd,
 )
 
@@ -130,10 +130,10 @@ __all__ = [
     "InspectExportsConfig",
     "ExportFileInfo",
     "ExportPaths",
-    # JSHD inspection
+    # JSHD loading
     "JshdMetadata",
     "JshdData",
-    "inspect_jshd",
+    "load_jshd",
     "plot_jshd",
     # Jobs (optional)
     "ConfigSweepParameter",
