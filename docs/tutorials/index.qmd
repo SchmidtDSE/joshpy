@@ -69,7 +69,7 @@ Convert geospatial data to Josh's optimized `.jshd` format:
 
 - Create synthetic test data with spatial patterns
 - Preprocess NetCDF files with `cli.preprocess()`
-- Verify data with `inspect_jshd()`
+- Verify data with `load_jshd()`
 
 Best for: Preparing external data for simulations.
 

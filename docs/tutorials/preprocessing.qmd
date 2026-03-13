@@ -23,7 +23,7 @@ This tutorial demonstrates:
 
 1. Creating synthetic test data with clear spatial patterns
 2. Preprocessing NetCDF files to `.jshd` format using `cli.preprocess()`
-3. Verifying preprocessed data with `inspect_jshd()`
+3. Verifying preprocessed data with `load_jshd()`
 
 **Prerequisites**: joshpy installed with `pip install joshpy[all]`
 
@@ -200,7 +200,7 @@ print(f"Grid size: {len(lats)} x {len(lons)} = {len(lats) * len(lons)} cells")
 #| label: fig-input-patterns
 #| fig-cap: "Synthetic soil quality patterns for preprocessing"
 #| fig-width: 12
-#| fig-height: 4
+#| fig-height: 3
 
 import matplotlib.pyplot as plt
 from scipy.io import netcdf_file
@@ -224,7 +224,7 @@ for ax, (filename, title) in zip(axes, patterns):
         lons = f.variables['lon'][:].copy()
     
     im = ax.imshow(data, extent=[lons.min(), lons.max(), lats.min(), lats.max()],
-                   origin='lower', cmap='YlGn', vmin=0, vmax=100, aspect='auto')
+                   origin='lower', cmap='YlGn', vmin=0, vmax=100, aspect='equal')
     ax.set_xlabel('Longitude')
     ax.set_ylabel('Latitude')
     ax.set_title(title)
@@ -312,9 +312,9 @@ for pattern in patterns:
 | `amend` | Add to existing `.jshd` file (default: False) |
 | `crs` | Coordinate reference system |
 
-## Step 3: Verify with inspect_jshd()
+## Step 3: Verify with cli.inspect_jshd()
 
-Use `inspect_jshd()` to verify that preprocessing worked correctly by
+Use `cli.inspect_jshd()` to verify that preprocessing worked correctly by
 spot-checking values at known coordinates.
 
 ```{python}
@@ -374,7 +374,7 @@ the internal variable name.
 
 ## Step 4: Visual Verification with plot_jshd()
 
-For a more comprehensive check, use `inspect_jshd()` and `plot_jshd()` to dump
+For a more comprehensive check, use `load_jshd()` and `plot_jshd()` to load
 the entire JSHD contents and visualize them. This is especially useful when
 debugging preprocessing issues or verifying spatial patterns.
 
@@ -382,11 +382,11 @@ debugging preprocessing issues or verifying spatial patterns.
 #| label: fig-jshd-verification
 #| fig-cap: "Visual verification of preprocessed JSHD files showing all three spatial patterns"
 #| fig-width: 12
-#| fig-height: 4
+#| fig-height: 3
 
 import matplotlib.pyplot as plt
 from pathlib import Path
-from joshpy import JoshCLI, inspect_jshd, plot_jshd
+from joshpy import JoshCLI, load_jshd, plot_jshd
 from joshpy.jar import JarMode
 
 cli = JoshCLI(josh_jar=JarMode.DEV)
@@ -400,11 +400,11 @@ for ax, pattern in zip(axes, patterns):
     jshd_path = DATA_DIR / f"soil_quality_{pattern}.jshd"
     
     # Load JSHD data
-    data = inspect_jshd(cli, jshd_path)
+    data = load_jshd(cli, jshd_path)
     arr = data.to_array(timestep=0)
     
     # Plot
-    im = ax.imshow(arr, origin="lower", cmap="YlGn", aspect="auto")
+    im = ax.imshow(arr, origin="lower", cmap="YlGn", aspect="equal")
     ax.set_xlabel("X (grid index)")
     ax.set_ylabel("Y (grid index)")
     ax.set_title(f"{pattern.title()}\n({data.metadata.width}×{data.metadata.height}, "
@@ -429,7 +429,7 @@ For detailed inspection of a single file, use `plot_jshd()` directly:
 #| label: fig-single-jshd
 #| fig-cap: "Detailed JSHD inspection with metadata"
 
-data = inspect_jshd(cli, DATA_DIR / "soil_quality_gradient.jshd")
+data = load_jshd(cli, DATA_DIR / "soil_quality_gradient.jshd")
 
 # Print metadata
 print(f"Grid: {data.metadata.width} × {data.metadata.height}")
@@ -447,7 +447,7 @@ In this tutorial, we:
 1. **Created synthetic test data** with clear spatial patterns using `scipy.io.netcdf_file`
 2. **Preprocessed NetCDF to .jshd** using `cli.preprocess()` with a reference simulation
 3. **Verified point values** using `cli.inspect_jshd()` to spot-check coordinates
-4. **Visualized the full grid** using `inspect_jshd()` and `plot_jshd()` to confirm patterns
+4. **Visualized the full grid** using `load_jshd()` and `plot_jshd()` to confirm patterns
 
 The preprocessed `.jshd` files are now ready for use in simulations. The next
 tutorial, [Sweeping Over External Data](external-data-sweep.qmd), demonstrates
@@ -469,5 +469,5 @@ how to run parameter sweeps over multiple external data files.
 - [External Data Sweep Tutorial](external-data-sweep.qmd) - Use these files in a file sweep
 - [JoshCLI Reference](../reference/cli.JoshCLI.qmd) - CLI wrapper documentation
 - [PreprocessConfig Reference](../reference/cli.PreprocessConfig.qmd) - Preprocessing options
-- [JSHD Inspection](../reference/jshd.qmd) - `inspect_jshd()` and `plot_jshd()` reference
+- [JSHD Loading](../reference/jshd.qmd) - `load_jshd()` and `plot_jshd()` reference
 - [Josh Data Guide](https://joshsim.org/guides/data.html) - Josh documentation on external data
