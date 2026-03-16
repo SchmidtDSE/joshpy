@@ -5,7 +5,10 @@ Each command has a corresponding Config dataclass that maps 1:1 to CLI arguments
 
 Example usage:
     from pathlib import Path
-    from joshpy.cli import JoshCLI, RunConfig, PreprocessConfig
+    from joshpy.cli import (
+        JoshCLI, RunConfig,
+        NetcdfPreprocessConfig, GeotiffPreprocessConfig, CsvPreprocessConfig,
+    )
 
     cli = JoshCLI()
 
@@ -16,14 +19,36 @@ Example usage:
         replicates=5,
     ))
 
-    # Preprocess data
-    result = cli.preprocess(PreprocessConfig(
+    # Preprocess NetCDF data
+    result = cli.preprocess(NetcdfPreprocessConfig(
         script=Path("simulation.josh"),
         simulation="Main",
         data_file=Path("temperature.nc"),
         variable="temp",
         units="K",
         output=Path("temperature.jshd"),
+    ))
+
+    # Preprocess GeoTIFF/COG data
+    result = cli.preprocess(GeotiffPreprocessConfig(
+        script=Path("simulation.josh"),
+        simulation="Main",
+        data_file=Path("cover.tif"),
+        band=0,
+        units="percent",
+        output=Path("cover.jshd"),
+        timestep=0,
+    ))
+
+    # Preprocess CSV point data
+    result = cli.preprocess(CsvPreprocessConfig(
+        script=Path("simulation.josh"),
+        simulation="Main",
+        data_file=Path("stations.csv"),
+        variable="precipitation",
+        units="mm",
+        output=Path("precip.jshd"),
+        timestep=0,
     ))
 """
 
@@ -33,7 +58,7 @@ import json
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from joshpy.jar import JarManager, JarMode
 
@@ -134,23 +159,25 @@ class RunRemoteConfig:
 
 
 @dataclass(frozen=True)
-class PreprocessConfig:
-    """Arguments for 'java -jar joshsim.jar preprocess' command.
+class NetcdfPreprocessConfig:
+    """Preprocess NetCDF files into Josh's .jshd format.
 
-    Converts geospatial data (NetCDF, GeoTIFF) into Josh's .jshd format.
+    For files with time dimensions. Use x_coord, y_coord, and time_coord
+    to specify dimension names if they differ from defaults.
 
     Attributes:
         script: Path to Josh simulation file (.josh).
-        simulation: Name of simulation for preprocessing.
-        data_file: Path to input data file (NetCDF, GeoTIFF, etc.).
-        variable: Variable name or band number to extract.
+        simulation: Name of simulation for grid extraction.
+        data_file: Path to NetCDF file (.nc, .nc4, .netcdf).
+        variable: NetCDF variable name to extract (e.g., "tas", "pr").
         units: Units of the data for simulation use.
-        output: Path for output preprocessed file (.jshd).
-        amend: Amend existing JSHD file rather than overwriting.
-        crs: Coordinate Reference System for reading input file.
-        x_coord: Name of X coordinate dimension.
-        y_coord: Name of Y coordinate dimension.
-        time_coord: Name of time dimension.
+        output: Path for output .jshd file.
+        x_coord: Name of X/longitude dimension (default: "lon").
+        y_coord: Name of Y/latitude dimension (default: "lat").
+        time_coord: Name of time dimension (default: "time").
+        timestep: Extract specific time slice (optional).
+        amend: Append to existing JSHD file.
+        crs: Coordinate Reference System if not embedded.
         verbose: Enable verbose output.
     """
 
@@ -160,12 +187,121 @@ class PreprocessConfig:
     variable: str
     units: str
     output: Path
+    x_coord: str = "lon"
+    y_coord: str = "lat"
+    time_coord: str = "time"
+    timestep: int | None = None
     amend: bool = False
     crs: str | None = None
-    x_coord: str | None = None
-    y_coord: str | None = None
-    time_coord: str | None = None
     verbose: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate config after initialization."""
+        suffix = str(self.data_file).lower()
+        if not any(suffix.endswith(ext) for ext in (".nc", ".nc4", ".netcdf")):
+            raise ValueError(
+                f"NetcdfPreprocessConfig expects .nc/.nc4/.netcdf file, "
+                f"got: {self.data_file.suffix}"
+            )
+
+
+@dataclass(frozen=True)
+class GeotiffPreprocessConfig:
+    """Preprocess GeoTIFF/COG files into Josh's .jshd format.
+
+    For single-band rasters without time dimension. The `timestep` parameter
+    is required to specify which simulation timestep the data maps to.
+
+    Note: GeoTIFF spatial coordinates are implicit in the file format,
+    so x_coord/y_coord options are not needed.
+
+    Attributes:
+        script: Path to Josh simulation file (.josh).
+        simulation: Name of simulation for grid extraction.
+        data_file: Path to GeoTIFF file (.tif, .tiff).
+        band: Band index to extract (0-based).
+        units: Units of the data for simulation use.
+        output: Path for output .jshd file.
+        timestep: Simulation timestep this data maps to (required).
+        amend: Append to existing JSHD file.
+        crs: Coordinate Reference System if not embedded in TIF.
+        verbose: Enable verbose output.
+    """
+
+    script: Path
+    simulation: str
+    data_file: Path
+    band: int
+    units: str
+    output: Path
+    timestep: int  # Required, no default
+    amend: bool = False
+    crs: str | None = None
+    verbose: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate config after initialization."""
+        if self.band < 0:
+            raise ValueError(f"band must be >= 0, got: {self.band}")
+        if self.timestep < 0:
+            raise ValueError(f"timestep must be >= 0, got: {self.timestep}")
+        suffix = str(self.data_file).lower()
+        if not any(suffix.endswith(ext) for ext in (".tif", ".tiff", ".geotiff")):
+            raise ValueError(
+                f"GeotiffPreprocessConfig expects .tif/.tiff file, "
+                f"got: {self.data_file.suffix}"
+            )
+
+
+@dataclass(frozen=True)
+class CsvPreprocessConfig:
+    """Preprocess CSV point data into Josh's .jshd format.
+
+    CSV must have columns named exactly "longitude" and "latitude".
+    All other columns are available as variables. The `timestep` parameter
+    is required to specify which simulation timestep the data maps to.
+
+    Note: CSV preprocessing uses brute-force nearest-neighbor lookup,
+    which may be slow for large files. For large datasets, consider
+    converting to GeoTIFF first.
+
+    Attributes:
+        script: Path to Josh simulation file (.josh).
+        simulation: Name of simulation for grid extraction.
+        data_file: Path to CSV file (.csv).
+        variable: Column name to extract.
+        units: Units of the data for simulation use.
+        output: Path for output .jshd file.
+        timestep: Simulation timestep this data maps to (required).
+        amend: Append to existing JSHD file.
+        crs: Coordinate Reference System.
+        verbose: Enable verbose output.
+    """
+
+    script: Path
+    simulation: str
+    data_file: Path
+    variable: str
+    units: str
+    output: Path
+    timestep: int  # Required, no default
+    amend: bool = False
+    crs: str | None = None
+    verbose: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate config after initialization."""
+        if self.timestep < 0:
+            raise ValueError(f"timestep must be >= 0, got: {self.timestep}")
+        if not str(self.data_file).lower().endswith(".csv"):
+            raise ValueError(
+                f"CsvPreprocessConfig expects .csv file, "
+                f"got: {self.data_file.suffix}"
+            )
+
+
+# Type alias for preprocess method parameter
+PreprocessConfig = Union[NetcdfPreprocessConfig, GeotiffPreprocessConfig, CsvPreprocessConfig]
 
 
 @dataclass(frozen=True)
@@ -508,34 +644,59 @@ class JoshCLI:
     def preprocess(self, config: PreprocessConfig, timeout: float | None = None) -> CLIResult:
         """Preprocess geospatial data into JSHD format.
 
+        Supports NetCDF, GeoTIFF/COG, and CSV input formats. Use the
+        appropriate config class for your input format:
+
+        - NetcdfPreprocessConfig: For .nc files with time dimensions
+        - GeotiffPreprocessConfig: For .tif/.tiff/COG rasters
+        - CsvPreprocessConfig: For .csv point data
+
         Args:
-            config: Preprocess configuration.
+            config: Format-specific preprocess configuration.
             timeout: Timeout in seconds.
 
         Returns:
             CLIResult with execution details.
         """
+        # Build common args
         args = [
             "preprocess",
             str(config.script.resolve()),
             config.simulation,
             str(config.data_file.resolve()),
-            config.variable,
-            config.units,
-            str(config.output.resolve()),
         ]
 
-        # Optional arguments
+        # Variable/band differs by format
+        if isinstance(config, GeotiffPreprocessConfig):
+            args.append(str(config.band))  # Band index as string
+        else:
+            args.append(config.variable)  # Variable name for NetCDF/CSV
+
+        args.extend([
+            config.units,
+            str(config.output.resolve()),
+        ])
+
+        # Format-specific optional arguments
+        if isinstance(config, NetcdfPreprocessConfig):
+            # NetCDF has coordinate dimension names
+            if config.x_coord:
+                args.extend(["--x-coord", config.x_coord])
+            if config.y_coord:
+                args.extend(["--y-coord", config.y_coord])
+            if config.time_coord:
+                args.extend(["--time-dim", config.time_coord])
+            if config.timestep is not None:
+                args.extend(["--timestep", str(config.timestep)])
+        else:
+            # GeoTIFF and CSV require timestep (validated in __post_init__)
+            args.extend(["--timestep", str(config.timestep)])
+
+        # Common optional arguments
         if config.amend:
             args.append("--amend")
         if config.crs:
             args.extend(["--crs", config.crs])
-        if config.x_coord:
-            args.extend(["--x-coord", config.x_coord])
-        if config.y_coord:
-            args.extend(["--y-coord", config.y_coord])
-        if config.time_coord:
-            args.extend(["--time-dim", config.time_coord])
         if config.verbose:
             args.append("--verbose")
 
