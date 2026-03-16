@@ -10,7 +10,7 @@ Josh command-line interface wrapper
 | [cli.CLIResult](cli.CLIResult.qmd#joshpy.cli.CLIResult) | Result of any CLI command execution. |
 | [cli.RunConfig](cli.RunConfig.qmd#joshpy.cli.RunConfig) | Arguments for 'java -jar joshsim.jar run' command. |
 | [cli.RunRemoteConfig](cli.RunRemoteConfig.qmd#joshpy.cli.RunRemoteConfig) | Arguments for 'java -jar joshsim.jar runRemote' command. |
-| [cli.PreprocessConfig](cli.PreprocessConfig.qmd#joshpy.cli.PreprocessConfig) | Arguments for 'java -jar joshsim.jar preprocess' command. |
+| [cli.PreprocessConfig](cli.PreprocessConfig.qmd#joshpy.cli.PreprocessConfig) |  |
 | [cli.ValidateConfig](cli.ValidateConfig.qmd#joshpy.cli.ValidateConfig) | Arguments for 'java -jar joshsim.jar validate' command. |
 
 ## Jobs Module

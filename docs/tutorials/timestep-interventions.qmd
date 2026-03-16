@@ -229,7 +229,7 @@ Convert NetCDF files to Josh's optimized `.jshd` format:
 ```{python}
 #| label: preprocess-data
 
-from joshpy.cli import JoshCLI, PreprocessConfig
+from joshpy.cli import JoshCLI, NetcdfPreprocessConfig
 from joshpy.jar import JarMode
 
 cli = JoshCLI(josh_jar=JarMode.DEV)
@@ -245,7 +245,7 @@ datasets = [
 for nc_name, var_name, jshd_name in datasets:
     print(f"Preprocessing {nc_name}...")
     
-    result = cli.preprocess(PreprocessConfig(
+    result = cli.preprocess(NetcdfPreprocessConfig(
         script=SOURCE_PATH,
         simulation="Main",
         data_file=DATA_DIR / nc_name,

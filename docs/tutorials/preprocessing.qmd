@@ -19,11 +19,23 @@ Preprocessing does several things:
 3. **Temporal alignment**: Maps time steps between data and simulation
 4. **Binary optimization**: Creates fast-loading binary format
 
+### Supported Input Formats
+
+Josh supports three input formats, each with a dedicated config class:
+
+| Format | Config Class | Use Case |
+|--------|--------------|----------|
+| **NetCDF** | `NetcdfPreprocessConfig` | Climate projections, gridded data with time dimension |
+| **GeoTIFF/COG** | `GeotiffPreprocessConfig` | Satellite imagery, elevation models, land cover maps |
+| **CSV** | `CsvPreprocessConfig` | Point observations, station data |
+
 This tutorial demonstrates:
 
 1. Creating synthetic test data with clear spatial patterns
-2. Preprocessing NetCDF files to `.jshd` format using `cli.preprocess()`
-3. Verifying preprocessed data with `load_jshd()`
+2. Preprocessing **NetCDF** files using `NetcdfPreprocessConfig`
+3. Preprocessing **GeoTIFF** files using `GeotiffPreprocessConfig`
+4. Preprocessing **CSV** files using `CsvPreprocessConfig`
+5. Verifying preprocessed data with `load_jshd()`
 
 **Prerequisites**: joshpy installed with `pip install joshpy[all]`
 
@@ -234,9 +246,9 @@ plt.tight_layout()
 plt.show()
 ```
 
-## Step 2: Preprocess with JoshCLI
+## Step 2: Preprocess NetCDF with JoshCLI
 
-The `cli.preprocess()` method converts NetCDF files to Josh's `.jshd` format.
+The `cli.preprocess()` method converts geospatial data to Josh's `.jshd` format.
 It requires a reference simulation to define the target grid.
 
 ### Reference Simulation
@@ -260,7 +272,7 @@ with `--data soil_quality=soil_quality_gradient.jshd`.
 ```{python}
 #| label: preprocess-all
 from pathlib import Path
-from joshpy.cli import JoshCLI, PreprocessConfig
+from joshpy.cli import JoshCLI, NetcdfPreprocessConfig
 from joshpy.jar import JarMode
 
 # Setup CLI (auto-downloads JAR if needed)
@@ -278,7 +290,7 @@ for pattern in patterns:
     
     print(f"Preprocessing {nc_file.name}...")
     
-    result = cli.preprocess(PreprocessConfig(
+    result = cli.preprocess(NetcdfPreprocessConfig(
         script=SOURCE_PATH,
         simulation="Main",
         data_file=nc_file,
@@ -296,19 +308,20 @@ for pattern in patterns:
         raise RuntimeError(f"Preprocessing failed for {nc_file.name}: {result.stderr}")
 ```
 
-### PreprocessConfig Options
+### NetcdfPreprocessConfig Options
 
 | Parameter | Description |
 |-----------|-------------|
 | `script` | Josh simulation file (defines target grid) |
 | `simulation` | Name of simulation to use |
-| `data_file` | Input NetCDF/GeoTIFF file |
-| `variable` | Variable name to extract |
+| `data_file` | Input NetCDF file (.nc, .nc4, .netcdf) |
+| `variable` | NetCDF variable name to extract |
 | `units` | Units for the data |
 | `output` | Output `.jshd` file path |
-| `x_coord` | Name of X coordinate in input file |
-| `y_coord` | Name of Y coordinate in input file |
-| `time_coord` | Name of time coordinate (required for NetCDF) |
+| `x_coord` | Name of X/longitude dimension (default: "lon") |
+| `y_coord` | Name of Y/latitude dimension (default: "lat") |
+| `time_coord` | Name of time dimension (default: "time") |
+| `timestep` | Extract specific time slice (optional) |
 | `amend` | Add to existing `.jshd` file (default: False) |
 | `crs` | Coordinate reference system |
 
@@ -440,18 +453,273 @@ print(f"Units: {data.metadata.units}")
 fig = plot_jshd(data, timestep=0, cmap="YlGn", title="Gradient Pattern - JSHD Debug View")
 ```
 
+## Step 5: Preprocessing GeoTIFF/COG Files
+
+GeoTIFF and Cloud-Optimized GeoTIFF (COG) files are common for satellite imagery,
+elevation models, and land cover data. Use `GeotiffPreprocessConfig` for these files.
+
+::: {.callout-important}
+## Required: `timestep` Parameter
+
+GeoTIFF files have no time dimension, so you **must** specify `timestep` to indicate
+which simulation step the data maps to. For initial conditions, use `timestep=0`.
+:::
+
+### Create Synthetic GeoTIFF
+
+```{python}
+#| label: create-geotiff
+#| eval: false
+
+# This example requires rasterio - shown for reference
+import numpy as np
+import rasterio
+from rasterio.transform import from_bounds
+
+DATA_DIR = Path("../../examples/external_data")
+
+# Grid specification (same as NetCDF examples)
+LAT_MIN, LAT_MAX = 33.7, 34.0
+LON_MIN, LON_MAX = -116.4, -115.4
+
+# Create elevation data - simple gradient from west to east
+width, height = 102, 31
+elevation = np.tile(np.linspace(100, 500, width), (height, 1)).astype(np.float32)
+
+# Write GeoTIFF
+transform = from_bounds(LON_MIN, LAT_MIN, LON_MAX, LAT_MAX, width, height)
+with rasterio.open(
+    DATA_DIR / "elevation.tif",
+    'w',
+    driver='GTiff',
+    height=height,
+    width=width,
+    count=1,
+    dtype=elevation.dtype,
+    crs='EPSG:4326',
+    transform=transform,
+) as dst:
+    dst.write(elevation, 1)
+
+print(f"Created elevation.tif ({width}x{height})")
+```
+
+### Preprocess GeoTIFF
+
+```{python}
+#| label: preprocess-geotiff
+#| eval: false
+
+from joshpy.cli import JoshCLI, GeotiffPreprocessConfig
+from joshpy.jar import JarMode
+from pathlib import Path
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+SOURCE_PATH = Path("../../examples/external_sweep.josh")
+DATA_DIR = Path("../../examples/external_data")
+
+result = cli.preprocess(GeotiffPreprocessConfig(
+    script=SOURCE_PATH,
+    simulation="Main",
+    data_file=DATA_DIR / "elevation.tif",
+    band=0,                    # Band index (0-based)
+    units="meters",
+    output=DATA_DIR / "elevation.jshd",
+    timestep=0,                # Required: maps to simulation step 0
+    crs="EPSG:4326",           # Specify if not embedded in TIF
+))
+
+if result.success:
+    print("GeoTIFF preprocessed successfully!")
+else:
+    print(f"Error: {result.stderr}")
+```
+
+### GeotiffPreprocessConfig Options
+
+| Parameter | Description |
+|-----------|-------------|
+| `script` | Josh simulation file (defines target grid) |
+| `simulation` | Name of simulation to use |
+| `data_file` | Input GeoTIFF file (.tif, .tiff) |
+| `band` | Band index to extract (0-based) |
+| `units` | Units for the data |
+| `output` | Output `.jshd` file path |
+| `timestep` | **Required**: Simulation timestep this data maps to |
+| `amend` | Add to existing `.jshd` file (default: False) |
+| `crs` | Coordinate reference system (if not embedded in file) |
+
+::: {.callout-note}
+## GeoTIFF Coordinates
+
+GeoTIFF spatial coordinates are embedded in the file format itself, so `x_coord`
+and `y_coord` options are not needed (and will be ignored if provided).
+:::
+
+## Step 6: Preprocessing CSV Point Data
+
+CSV files are useful for point observations like weather station data or field
+measurements. Use `CsvPreprocessConfig` for CSV files.
+
+::: {.callout-warning}
+## CSV Format Requirements
+
+CSV files **must** have columns named exactly `longitude` and `latitude`.
+All other columns are available as variables to extract.
+:::
+
+### Create Synthetic CSV
+
+```{python}
+#| label: create-csv
+import pandas as pd
+import numpy as np
+from pathlib import Path
+
+DATA_DIR = Path("../../examples/external_data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Create weather station data
+np.random.seed(42)
+n_stations = 50
+
+# Random station locations within the grid
+lons = np.random.uniform(-116.4, -115.4, n_stations)
+lats = np.random.uniform(33.7, 34.0, n_stations)
+
+# Temperature increases with latitude (north is warmer in this example)
+temperature = 20 + (lats - 33.7) * 30 + np.random.normal(0, 2, n_stations)
+
+# Precipitation decreases west to east
+precipitation = 500 - (lons + 116.4) * 400 + np.random.normal(0, 20, n_stations)
+precipitation = np.clip(precipitation, 50, 800)
+
+df = pd.DataFrame({
+    'longitude': lons,
+    'latitude': lats,
+    'temperature': temperature.round(1),
+    'precipitation': precipitation.round(0),
+})
+
+csv_path = DATA_DIR / "weather_stations.csv"
+df.to_csv(csv_path, index=False)
+
+print(f"Created {csv_path.name} with {len(df)} stations")
+print(df.head())
+```
+
+### Preprocess CSV
+
+```{python}
+#| label: preprocess-csv
+from joshpy.cli import JoshCLI, CsvPreprocessConfig
+from joshpy.jar import JarMode
+from pathlib import Path
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+SOURCE_PATH = Path("../../examples/external_sweep.josh")
+DATA_DIR = Path("../../examples/external_data")
+
+# Preprocess temperature
+result = cli.preprocess(CsvPreprocessConfig(
+    script=SOURCE_PATH,
+    simulation="Main",
+    data_file=DATA_DIR / "weather_stations.csv",
+    variable="temperature",    # Column name to extract
+    units="celsius",
+    output=DATA_DIR / "station_temperature.jshd",
+    timestep=0,                # Required: maps to simulation step 0
+))
+
+if result.success:
+    print("Temperature CSV preprocessed successfully!")
+else:
+    print(f"Error: {result.stderr}")
+
+# Preprocess precipitation
+result = cli.preprocess(CsvPreprocessConfig(
+    script=SOURCE_PATH,
+    simulation="Main",
+    data_file=DATA_DIR / "weather_stations.csv",
+    variable="precipitation",
+    units="mm",
+    output=DATA_DIR / "station_precipitation.jshd",
+    timestep=0,
+))
+
+if result.success:
+    print("Precipitation CSV preprocessed successfully!")
+else:
+    print(f"Error: {result.stderr}")
+```
+
+### CsvPreprocessConfig Options
+
+| Parameter | Description |
+|-----------|-------------|
+| `script` | Josh simulation file (defines target grid) |
+| `simulation` | Name of simulation to use |
+| `data_file` | Input CSV file (.csv) |
+| `variable` | Column name to extract |
+| `units` | Units for the data |
+| `output` | Output `.jshd` file path |
+| `timestep` | **Required**: Simulation timestep this data maps to |
+| `amend` | Add to existing `.jshd` file (default: False) |
+| `crs` | Coordinate reference system |
+
+::: {.callout-warning}
+## CSV Performance Note
+
+CSV preprocessing uses nearest-neighbor interpolation with a brute-force O(n) scan
+per grid cell. This may be slow for large CSV files (thousands of points) or large
+simulation grids. For better performance with large datasets, consider:
+
+1. Converting CSV to GeoTIFF using tools like GDAL
+2. Using NetCDF format which supports spatial indexing
+:::
+
+### Verify CSV Preprocessing
+
+```{python}
+#| label: verify-csv
+#| fig-cap: "CSV point data interpolated to simulation grid"
+
+from joshpy import load_jshd, plot_jshd
+
+# Load and visualize
+data = load_jshd(cli, DATA_DIR / "station_temperature.jshd")
+
+print(f"Grid: {data.metadata.width} × {data.metadata.height}")
+print(f"Units: {data.metadata.units}")
+
+arr = data.to_array(timestep=0)
+print(f"Value range: {arr.min():.1f} to {arr.max():.1f}")
+
+fig = plot_jshd(data, timestep=0, cmap="RdYlBu_r", 
+                title="Temperature from Weather Stations (interpolated)")
+```
+
 ## Summary
 
 In this tutorial, we:
 
 1. **Created synthetic test data** with clear spatial patterns using `scipy.io.netcdf_file`
-2. **Preprocessed NetCDF to .jshd** using `cli.preprocess()` with a reference simulation
-3. **Verified point values** using `cli.inspect_jshd()` to spot-check coordinates
-4. **Visualized the full grid** using `load_jshd()` and `plot_jshd()` to confirm patterns
+2. **Preprocessed NetCDF to .jshd** using `NetcdfPreprocessConfig`
+3. **Preprocessed GeoTIFF** using `GeotiffPreprocessConfig` (with required `timestep`)
+4. **Preprocessed CSV point data** using `CsvPreprocessConfig` (with required `timestep`)
+5. **Verified results** using `cli.inspect_jshd()` and `plot_jshd()`
 
 The preprocessed `.jshd` files are now ready for use in simulations. The next
 tutorial, [Sweeping Over External Data](external-data-sweep.qmd), demonstrates
 how to run parameter sweeps over multiple external data files.
+
+### Format Comparison
+
+| Format | Config Class | `timestep` | Coordinates | Best For |
+|--------|--------------|------------|-------------|----------|
+| NetCDF | `NetcdfPreprocessConfig` | Optional | Via `x_coord`, `y_coord`, `time_coord` | Climate data with time series |
+| GeoTIFF | `GeotiffPreprocessConfig` | **Required** | Embedded in file | Raster imagery, DEMs |
+| CSV | `CsvPreprocessConfig` | **Required** | Must be `longitude`, `latitude` columns | Point observations |
 
 ### Files Created
 
@@ -463,6 +731,9 @@ how to run parameter sweeps over multiple external data files.
 | `examples/external_data/soil_quality_gradient.jshd` | Preprocessed - gradient pattern |
 | `examples/external_data/soil_quality_triangle.jshd` | Preprocessed - triangle pattern |
 | `examples/external_data/soil_quality_stripes.jshd` | Preprocessed - stripes pattern |
+| `examples/external_data/weather_stations.csv` | Synthetic CSV - station observations |
+| `examples/external_data/station_temperature.jshd` | Preprocessed - temperature from stations |
+| `examples/external_data/station_precipitation.jshd` | Preprocessed - precipitation from stations |
 
 ::: {.callout-tip}
 ## Grid Alignment & JSHD Reuse
@@ -476,7 +747,7 @@ for compatibility rules and directory organization patterns.
 ## Learn More
 
 - [External Data Sweep Tutorial](external-data-sweep.qmd) - Use these files in a file sweep
+- [Timestep Interventions](timestep-interventions.qmd) - Using single-time data for events
 - [Best Practices: Preprocessing](../best-practices.qmd#preprocessing-grid-alignment) - Grid alignment and JSHD reuse
 - [JoshCLI Reference](../reference/cli.JoshCLI.qmd) - CLI wrapper documentation
-- [PreprocessConfig Reference](../reference/cli.PreprocessConfig.qmd) - Preprocessing options
 - [Josh Data Guide](https://joshsim.org/guides/data.html) - Josh documentation on external data
