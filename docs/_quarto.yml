@@ -108,7 +108,9 @@ website:
             - reference/cli.CLIResult.qmd
             - reference/cli.RunConfig.qmd
             - reference/cli.RunRemoteConfig.qmd
-            - reference/cli.PreprocessConfig.qmd
+            - reference/cli.NetcdfPreprocessConfig.qmd
+            - reference/cli.GeotiffPreprocessConfig.qmd
+            - reference/cli.CsvPreprocessConfig.qmd
             - reference/cli.ValidateConfig.qmd
         - section: "Jobs"
           contents:
@@ -195,7 +197,9 @@ quartodoc:
         - cli.CLIResult
         - cli.RunConfig
         - cli.RunRemoteConfig
-        - cli.PreprocessConfig
+        - cli.NetcdfPreprocessConfig
+        - cli.GeotiffPreprocessConfig
+        - cli.CsvPreprocessConfig
         - cli.ValidateConfig
     
     - title: Jobs Module

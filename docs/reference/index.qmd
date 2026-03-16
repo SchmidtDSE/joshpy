@@ -10,7 +10,9 @@ Josh command-line interface wrapper
 | [cli.CLIResult](cli.CLIResult.qmd#joshpy.cli.CLIResult) | Result of any CLI command execution. |
 | [cli.RunConfig](cli.RunConfig.qmd#joshpy.cli.RunConfig) | Arguments for 'java -jar joshsim.jar run' command. |
 | [cli.RunRemoteConfig](cli.RunRemoteConfig.qmd#joshpy.cli.RunRemoteConfig) | Arguments for 'java -jar joshsim.jar runRemote' command. |
-| [cli.PreprocessConfig](cli.PreprocessConfig.qmd#joshpy.cli.PreprocessConfig) |  |
+| [cli.NetcdfPreprocessConfig](cli.NetcdfPreprocessConfig.qmd#joshpy.cli.NetcdfPreprocessConfig) | Preprocess NetCDF files into Josh's .jshd format. |
+| [cli.GeotiffPreprocessConfig](cli.GeotiffPreprocessConfig.qmd#joshpy.cli.GeotiffPreprocessConfig) | Preprocess GeoTIFF/COG files into Josh's .jshd format. |
+| [cli.CsvPreprocessConfig](cli.CsvPreprocessConfig.qmd#joshpy.cli.CsvPreprocessConfig) | Preprocess CSV point data into Josh's .jshd format. |
 | [cli.ValidateConfig](cli.ValidateConfig.qmd#joshpy.cli.ValidateConfig) | Arguments for 'java -jar joshsim.jar validate' command. |
 
 ## Jobs Module
