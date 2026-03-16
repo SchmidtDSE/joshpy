@@ -12,7 +12,9 @@ from joshpy.cli import (
     InspectExportsConfig,
     InspectJshdConfig,
     JoshCLI,
-    PreprocessConfig,
+    NetcdfPreprocessConfig,
+    GeotiffPreprocessConfig,
+    CsvPreprocessConfig,
     RunConfig,
     RunRemoteConfig,
     ValidateConfig,
@@ -128,12 +130,12 @@ class TestRunRemoteConfig(unittest.TestCase):
         self.assertEqual(config.endpoint, "https://custom.josh.cloud")
 
 
-class TestPreprocessConfig(unittest.TestCase):
-    """Tests for PreprocessConfig dataclass."""
+class TestNetcdfPreprocessConfig(unittest.TestCase):
+    """Tests for NetcdfPreprocessConfig dataclass."""
 
     def test_basic_creation(self):
-        """Basic config with required fields."""
-        config = PreprocessConfig(
+        """Basic config with required fields and defaults."""
+        config = NetcdfPreprocessConfig(
             script=Path("simulation.josh"),
             simulation="Main",
             data_file=Path("temperature.nc"),
@@ -144,10 +146,15 @@ class TestPreprocessConfig(unittest.TestCase):
         self.assertEqual(config.variable, "temp")
         self.assertEqual(config.units, "K")
         self.assertFalse(config.amend)
+        # Check defaults
+        self.assertEqual(config.x_coord, "lon")
+        self.assertEqual(config.y_coord, "lat")
+        self.assertEqual(config.time_coord, "time")
+        self.assertIsNone(config.timestep)
 
-    def test_with_coordinates(self):
-        """Config with coordinate options."""
-        config = PreprocessConfig(
+    def test_with_custom_coordinates(self):
+        """Config with custom coordinate names."""
+        config = NetcdfPreprocessConfig(
             script=Path("simulation.josh"),
             simulation="Main",
             data_file=Path("data.nc"),
@@ -157,10 +164,171 @@ class TestPreprocessConfig(unittest.TestCase):
             amend=True,
             x_coord="longitude",
             y_coord="latitude",
-            time_coord="time",
+            time_coord="calendar_year",
+            timestep=5,
         )
         self.assertTrue(config.amend)
         self.assertEqual(config.x_coord, "longitude")
+        self.assertEqual(config.y_coord, "latitude")
+        self.assertEqual(config.time_coord, "calendar_year")
+        self.assertEqual(config.timestep, 5)
+
+    def test_invalid_extension(self):
+        """Should raise ValueError for non-NetCDF file."""
+        with self.assertRaises(ValueError) as ctx:
+            NetcdfPreprocessConfig(
+                script=Path("simulation.josh"),
+                simulation="Main",
+                data_file=Path("data.tif"),
+                variable="temp",
+                units="K",
+                output=Path("out.jshd"),
+            )
+        self.assertIn(".nc", str(ctx.exception))
+
+
+class TestGeotiffPreprocessConfig(unittest.TestCase):
+    """Tests for GeotiffPreprocessConfig dataclass."""
+
+    def test_basic_creation(self):
+        """Basic config with required fields."""
+        config = GeotiffPreprocessConfig(
+            script=Path("simulation.josh"),
+            simulation="Main",
+            data_file=Path("cover.tif"),
+            band=0,
+            units="percent",
+            output=Path("cover.jshd"),
+            timestep=0,
+        )
+        self.assertEqual(config.band, 0)
+        self.assertEqual(config.timestep, 0)
+        self.assertFalse(config.amend)
+
+    def test_with_crs(self):
+        """Config with CRS specified."""
+        config = GeotiffPreprocessConfig(
+            script=Path("simulation.josh"),
+            simulation="Main",
+            data_file=Path("cover.tiff"),
+            band=1,
+            units="meters",
+            output=Path("elev.jshd"),
+            timestep=0,
+            crs="EPSG:4326",
+            amend=True,
+        )
+        self.assertEqual(config.band, 1)
+        self.assertEqual(config.crs, "EPSG:4326")
+        self.assertTrue(config.amend)
+
+    def test_negative_band(self):
+        """Should raise ValueError for negative band."""
+        with self.assertRaises(ValueError) as ctx:
+            GeotiffPreprocessConfig(
+                script=Path("simulation.josh"),
+                simulation="Main",
+                data_file=Path("cover.tif"),
+                band=-1,
+                units="percent",
+                output=Path("cover.jshd"),
+                timestep=0,
+            )
+        self.assertIn("band", str(ctx.exception))
+
+    def test_negative_timestep(self):
+        """Should raise ValueError for negative timestep."""
+        with self.assertRaises(ValueError) as ctx:
+            GeotiffPreprocessConfig(
+                script=Path("simulation.josh"),
+                simulation="Main",
+                data_file=Path("cover.tif"),
+                band=0,
+                units="percent",
+                output=Path("cover.jshd"),
+                timestep=-1,
+            )
+        self.assertIn("timestep", str(ctx.exception))
+
+    def test_invalid_extension(self):
+        """Should raise ValueError for non-GeoTIFF file."""
+        with self.assertRaises(ValueError) as ctx:
+            GeotiffPreprocessConfig(
+                script=Path("simulation.josh"),
+                simulation="Main",
+                data_file=Path("data.nc"),
+                band=0,
+                units="percent",
+                output=Path("out.jshd"),
+                timestep=0,
+            )
+        self.assertIn(".tif", str(ctx.exception))
+
+
+class TestCsvPreprocessConfig(unittest.TestCase):
+    """Tests for CsvPreprocessConfig dataclass."""
+
+    def test_basic_creation(self):
+        """Basic config with required fields."""
+        config = CsvPreprocessConfig(
+            script=Path("simulation.josh"),
+            simulation="Main",
+            data_file=Path("stations.csv"),
+            variable="precipitation",
+            units="mm",
+            output=Path("precip.jshd"),
+            timestep=0,
+        )
+        self.assertEqual(config.variable, "precipitation")
+        self.assertEqual(config.timestep, 0)
+        self.assertFalse(config.amend)
+
+    def test_with_options(self):
+        """Config with optional fields."""
+        config = CsvPreprocessConfig(
+            script=Path("simulation.josh"),
+            simulation="Main",
+            data_file=Path("points.csv"),
+            variable="elevation",
+            units="m",
+            output=Path("elev.jshd"),
+            timestep=5,
+            amend=True,
+            crs="EPSG:4326",
+            verbose=True,
+        )
+        self.assertEqual(config.timestep, 5)
+        self.assertTrue(config.amend)
+        self.assertEqual(config.crs, "EPSG:4326")
+        self.assertTrue(config.verbose)
+
+    def test_negative_timestep(self):
+        """Should raise ValueError for negative timestep."""
+        with self.assertRaises(ValueError) as ctx:
+            CsvPreprocessConfig(
+                script=Path("simulation.josh"),
+                simulation="Main",
+                data_file=Path("data.csv"),
+                variable="temp",
+                units="K",
+                output=Path("out.jshd"),
+                timestep=-1,
+            )
+        self.assertIn("timestep", str(ctx.exception))
+
+    def test_invalid_extension(self):
+        """Should raise ValueError for non-CSV file."""
+        with self.assertRaises(ValueError) as ctx:
+            CsvPreprocessConfig(
+                script=Path("simulation.josh"),
+                simulation="Main",
+                data_file=Path("data.nc"),
+                variable="temp",
+                units="K",
+                output=Path("out.jshd"),
+                timestep=0,
+            )
+        self.assertIn(".csv", str(ctx.exception))
 
 
 class TestValidateConfig(unittest.TestCase):
@@ -360,12 +528,12 @@ class TestJoshCLI(unittest.TestCase):
         self.assertIn("3", cmd)
 
     @patch("subprocess.run")
-    def test_preprocess(self, mock_run):
-        """preprocess() should build correct command."""
+    def test_preprocess_netcdf(self, mock_run):
+        """preprocess() should build correct command for NetCDF."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         cli = JoshCLI(josh_jar=self.JAR_MODE)
-        config = PreprocessConfig(
+        config = NetcdfPreprocessConfig(
             script=Path("/path/to/simulation.josh"),
             simulation="Main",
             data_file=Path("/path/to/temperature.nc"),
@@ -374,6 +542,8 @@ class TestJoshCLI(unittest.TestCase):
             output=Path("/path/to/temperature.jshd"),
             amend=True,
             x_coord="longitude",
+            y_coord="latitude",
+            time_coord="time",
         )
 
         result = cli.preprocess(config)
@@ -386,6 +556,93 @@ class TestJoshCLI(unittest.TestCase):
         self.assertIn("--amend", cmd)
         self.assertIn("--x-coord", cmd)
         self.assertIn("longitude", cmd)
+        self.assertIn("--y-coord", cmd)
+        self.assertIn("latitude", cmd)
+        self.assertIn("--time-dim", cmd)
+        self.assertIn("time", cmd)
+        # NetCDF without timestep should NOT have --timestep
+        self.assertNotIn("--timestep", cmd)
+
+    @patch("subprocess.run")
+    def test_preprocess_netcdf_with_timestep(self, mock_run):
+        """preprocess() should include --timestep for NetCDF when specified."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = NetcdfPreprocessConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/temperature.nc"),
+            variable="temp",
+            units="K",
+            output=Path("/path/to/temperature.jshd"),
+            timestep=5,
+        )
+
+        result = cli.preprocess(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--timestep", cmd)
+        self.assertIn("5", cmd)
+
+    @patch("subprocess.run")
+    def test_preprocess_geotiff(self, mock_run):
+        """preprocess() should build correct command for GeoTIFF."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = GeotiffPreprocessConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/cover.tif"),
+            band=0,
+            units="percent",
+            output=Path("/path/to/cover.jshd"),
+            timestep=0,
+            crs="EPSG:4326",
+        )
+
+        result = cli.preprocess(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("preprocess", cmd)
+        self.assertIn("0", cmd)  # band index
+        self.assertIn("percent", cmd)
+        self.assertIn("--timestep", cmd)  # Required for GeoTIFF
+        self.assertIn("--crs", cmd)
+        self.assertIn("EPSG:4326", cmd)
+        # GeoTIFF should NOT have coord dimension flags
+        self.assertNotIn("--x-coord", cmd)
+        self.assertNotIn("--y-coord", cmd)
+        self.assertNotIn("--time-dim", cmd)
+
+    @patch("subprocess.run")
+    def test_preprocess_csv(self, mock_run):
+        """preprocess() should build correct command for CSV."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = CsvPreprocessConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/stations.csv"),
+            variable="precipitation",
+            units="mm",
+            output=Path("/path/to/precip.jshd"),
+            timestep=0,
+        )
+
+        result = cli.preprocess(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("preprocess", cmd)
+        self.assertIn("precipitation", cmd)  # variable name
+        self.assertIn("mm", cmd)
+        self.assertIn("--timestep", cmd)  # Required for CSV
+        self.assertIn("0", cmd)
 
     @patch("subprocess.run")
     def test_validate(self, mock_run):
