@@ -55,7 +55,7 @@ joshpy/
 
 **Always available:**
 - `jar.py`: `JarMode`, `JarManager`, `get_jar`, `download_jars`, `get_jar_hash`, `get_jar_version`
-- `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `PreprocessConfig`, `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
+- `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `NetcdfPreprocessConfig`, `GeotiffPreprocessConfig`, `CsvPreprocessConfig`, `PreprocessConfig` (type alias), `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
 - `jshd.py`: `JshdMetadata`, `JshdData`, `load_jshd`, `plot_jshd`
 
 **Requires joshpy[jobs]:**
@@ -236,58 +236,139 @@ else:
 
 ### Preprocessing Geospatial Data
 
-Convert NetCDF or GeoTIFF to Josh's optimized .jshd format:
+Convert NetCDF, GeoTIFF/COG, or CSV to Josh's optimized .jshd format using
+format-specific config classes:
+
+#### NetCDF Files
+
+Use `NetcdfPreprocessConfig` for NetCDF files with time dimensions:
 
 ```python
-from joshpy.cli import JoshCLI, PreprocessConfig
+from joshpy.cli import JoshCLI, NetcdfPreprocessConfig
 
 cli = JoshCLI()
 
-# Basic preprocessing
-result = cli.preprocess(PreprocessConfig(
+# Basic NetCDF preprocessing
+result = cli.preprocess(NetcdfPreprocessConfig(
     script=Path("simulation.josh"),
     simulation="Main",
     data_file=Path("temperature.nc"),
-    variable="temp",
+    variable="temp",           # NetCDF variable name
     units="K",
     output=Path("temperature.jshd"),
 ))
 
-# With coordinate mapping
-result = cli.preprocess(PreprocessConfig(
+# With custom coordinate names
+result = cli.preprocess(NetcdfPreprocessConfig(
     script=Path("simulation.josh"),
     simulation="Main",
     data_file=Path("precip.nc"),
     variable="rainfall",
     units="mm/year",
     output=Path("climate.jshd"),
-    amend=True,  # Add to existing file
-    x_coord="longitude",
-    y_coord="latitude",
-    time_coord="time",
+    amend=True,                # Add to existing file
+    x_coord="longitude",       # Custom X dimension name
+    y_coord="latitude",        # Custom Y dimension name
+    time_coord="calendar_year", # Custom time dimension name
+    timestep=5,                # Extract specific time slice (optional)
     crs="EPSG:4326",
     verbose=True,
 ))
-
-if not result.success:
-    print(f"Preprocessing failed: {result.stderr}")
 ```
 
-### PreprocessConfig Options
+#### GeoTIFF/COG Files
+
+Use `GeotiffPreprocessConfig` for GeoTIFF and Cloud-Optimized GeoTIFF files.
+The `timestep` parameter is **required** since GeoTIFFs have no time dimension:
+
+```python
+from joshpy.cli import JoshCLI, GeotiffPreprocessConfig
+
+cli = JoshCLI()
+
+result = cli.preprocess(GeotiffPreprocessConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    data_file=Path("cover.tif"),
+    band=0,                    # Band index (0-based)
+    units="percent",
+    output=Path("cover.jshd"),
+    timestep=0,                # Required: simulation step this maps to
+    crs="EPSG:4326",           # Specify if not embedded in TIF
+))
+```
+
+#### CSV Point Data
+
+Use `CsvPreprocessConfig` for CSV files with point observations.
+CSV must have columns named exactly `longitude` and `latitude`.
+The `timestep` parameter is **required**:
+
+```python
+from joshpy.cli import JoshCLI, CsvPreprocessConfig
+
+cli = JoshCLI()
+
+result = cli.preprocess(CsvPreprocessConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    data_file=Path("stations.csv"),
+    variable="precipitation",  # Column name
+    units="mm",
+    output=Path("precip.jshd"),
+    timestep=0,                # Required: simulation step this maps to
+))
+```
+
+Note: CSV preprocessing uses brute-force nearest-neighbor lookup, which may be
+slow for large files. For large datasets, consider converting to GeoTIFF first.
+
+### NetcdfPreprocessConfig Options
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `script` | Path | Path to .josh file (required) |
 | `simulation` | str | Simulation name (required) |
-| `data_file` | Path | Input data file (required) |
-| `variable` | str | Variable name to extract (required) |
+| `data_file` | Path | Input NetCDF file (required) |
+| `variable` | str | NetCDF variable name (required) |
 | `units` | str | Units of the data (required) |
 | `output` | Path | Output .jshd file path (required) |
+| `x_coord` | str | X/longitude dimension name (default: "lon") |
+| `y_coord` | str | Y/latitude dimension name (default: "lat") |
+| `time_coord` | str | Time dimension name (default: "time") |
+| `timestep` | int | Extract specific time slice (optional) |
 | `amend` | bool | Amend existing file (default: False) |
 | `crs` | str | Coordinate Reference System |
-| `x_coord` | str | Name of X coordinate dimension |
-| `y_coord` | str | Name of Y coordinate dimension |
-| `time_coord` | str | Name of time dimension |
+| `verbose` | bool | Enable verbose output |
+
+### GeotiffPreprocessConfig Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `script` | Path | Path to .josh file (required) |
+| `simulation` | str | Simulation name (required) |
+| `data_file` | Path | Input GeoTIFF file (required) |
+| `band` | int | Band index, 0-based (required) |
+| `units` | str | Units of the data (required) |
+| `output` | Path | Output .jshd file path (required) |
+| `timestep` | int | Simulation timestep this maps to (required) |
+| `amend` | bool | Amend existing file (default: False) |
+| `crs` | str | CRS if not embedded in file |
+| `verbose` | bool | Enable verbose output |
+
+### CsvPreprocessConfig Options
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `script` | Path | Path to .josh file (required) |
+| `simulation` | str | Simulation name (required) |
+| `data_file` | Path | Input CSV file (required) |
+| `variable` | str | Column name to extract (required) |
+| `units` | str | Units of the data (required) |
+| `output` | Path | Output .jshd file path (required) |
+| `timestep` | int | Simulation timestep this maps to (required) |
+| `amend` | bool | Amend existing file (default: False) |
+| `crs` | str | Coordinate Reference System |
 | `verbose` | bool | Enable verbose output |
 
 ### Validating Scripts
