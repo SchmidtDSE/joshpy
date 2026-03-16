@@ -25,7 +25,11 @@ from joshpy.cli import (
     CLIResult,
     RunConfig,
     RunRemoteConfig,
-    PreprocessConfig,
+    # Format-specific preprocess configs
+    NetcdfPreprocessConfig,
+    GeotiffPreprocessConfig,
+    CsvPreprocessConfig,
+    PreprocessConfig,  # Type alias for Union of the above
     ValidateConfig,
     DiscoverConfigConfig,
     InspectJshdConfig,
@@ -123,6 +127,9 @@ __all__ = [
     "CLIResult",
     "RunConfig",
     "RunRemoteConfig",
+    "NetcdfPreprocessConfig",
+    "GeotiffPreprocessConfig",
+    "CsvPreprocessConfig",
     "PreprocessConfig",
     "ValidateConfig",
     "DiscoverConfigConfig",
