@@ -295,12 +295,12 @@ class TestCsvPreprocessConfig(unittest.TestCase):
             timestep=5,
             amend=True,
             crs="EPSG:4326",
-            verbose=True,
+            parallel=True,
         )
         self.assertEqual(config.timestep, 5)
         self.assertTrue(config.amend)
         self.assertEqual(config.crs, "EPSG:4326")
-        self.assertTrue(config.verbose)
+        self.assertTrue(config.parallel)
 
     def test_negative_timestep(self):
         """Should raise ValueError for negative timestep."""
