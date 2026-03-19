@@ -276,7 +276,7 @@ from joshpy.cli import JoshCLI, NetcdfPreprocessConfig
 from joshpy.jar import JarMode
 
 # Setup CLI (auto-downloads JAR if needed)
-cli = JoshCLI(josh_jar=JarMode.LOCAL)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 
 SOURCE_PATH = Path("../../examples/external_sweep.josh")
 DATA_DIR = Path("../../examples/external_data")
@@ -348,7 +348,7 @@ from joshpy.cli import JoshCLI, InspectJshdConfig
 from joshpy.jar import JarMode
 from pathlib import Path
 
-cli = JoshCLI(josh_jar=JarMode.LOCAL)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 DATA_DIR = Path("../../examples/external_data")
 
 # Test coordinates (grid space, not lat/lon)
@@ -414,7 +414,7 @@ from pathlib import Path
 from joshpy import JoshCLI, load_jshd, plot_jshd
 from joshpy.jar import JarMode
 
-cli = JoshCLI(josh_jar=JarMode.LOCAL)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 DATA_DIR = Path("../../examples/external_data")
 
 patterns = ["gradient", "triangle", "stripes"]
@@ -526,7 +526,7 @@ from joshpy.cli import JoshCLI, GeotiffPreprocessConfig
 from joshpy.jar import JarMode
 from pathlib import Path
 
-cli = JoshCLI(josh_jar=JarMode.LOCAL)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 SOURCE_PATH = Path("../../examples/external_sweep.josh")
 DATA_DIR = Path("../../examples/external_data")
 
@@ -629,7 +629,7 @@ from joshpy.cli import JoshCLI, CsvPreprocessConfig
 from joshpy.jar import JarMode
 from pathlib import Path
 
-cli = JoshCLI(josh_jar=JarMode.LOCAL)
+cli = JoshCLI(josh_jar=JarMode.DEV)
 SOURCE_PATH = Path("../../examples/external_sweep.josh")
 DATA_DIR = Path("../../examples/external_data")
 
