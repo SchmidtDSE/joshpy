@@ -258,7 +258,7 @@ result = cli.preprocess(NetcdfPreprocessConfig(
     output=Path("temperature.jshd"),
 ))
 
-# With custom coordinate names
+# With custom coordinate names and parallel processing
 result = cli.preprocess(NetcdfPreprocessConfig(
     script=Path("simulation.josh"),
     simulation="Main",
@@ -272,7 +272,7 @@ result = cli.preprocess(NetcdfPreprocessConfig(
     time_coord="calendar_year", # Custom time dimension name
     timestep=5,                # Extract specific time slice (optional)
     crs="EPSG:4326",
-    verbose=True,
+    parallel=True,             # Enable parallel processing (~Nx speedup)
 ))
 ```
 
@@ -339,7 +339,7 @@ slow for large files. For large datasets, consider converting to GeoTIFF first.
 | `timestep` | int | Extract specific time slice (optional) |
 | `amend` | bool | Amend existing file (default: False) |
 | `crs` | str | Coordinate Reference System |
-| `verbose` | bool | Enable verbose output |
+| `parallel` | bool | Enable parallel processing (~Nx speedup on N cores) |
 
 ### GeotiffPreprocessConfig Options
 
@@ -354,7 +354,7 @@ slow for large files. For large datasets, consider converting to GeoTIFF first.
 | `timestep` | int | Simulation timestep this maps to (required) |
 | `amend` | bool | Amend existing file (default: False) |
 | `crs` | str | CRS if not embedded in file |
-| `verbose` | bool | Enable verbose output |
+| `parallel` | bool | Enable parallel processing (~Nx speedup on N cores) |
 
 ### CsvPreprocessConfig Options
 
@@ -369,7 +369,7 @@ slow for large files. For large datasets, consider converting to GeoTIFF first.
 | `timestep` | int | Simulation timestep this maps to (required) |
 | `amend` | bool | Amend existing file (default: False) |
 | `crs` | str | Coordinate Reference System |
-| `verbose` | bool | Enable verbose output |
+| `parallel` | bool | Enable parallel processing (~Nx speedup on N cores) |
 
 ### Validating Scripts
 
