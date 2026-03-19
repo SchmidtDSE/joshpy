@@ -178,7 +178,7 @@ class NetcdfPreprocessConfig:
         timestep: Extract specific time slice (optional).
         amend: Append to existing JSHD file.
         crs: Coordinate Reference System if not embedded.
-        verbose: Enable verbose output.
+        parallel: Enable parallel processing (~Nx speedup on N cores).
     """
 
     script: Path
@@ -193,7 +193,7 @@ class NetcdfPreprocessConfig:
     timestep: int | None = None
     amend: bool = False
     crs: str | None = None
-    verbose: bool = False
+    parallel: bool = False
 
     def __post_init__(self) -> None:
         """Validate config after initialization."""
@@ -225,7 +225,7 @@ class GeotiffPreprocessConfig:
         timestep: Simulation timestep this data maps to (required).
         amend: Append to existing JSHD file.
         crs: Coordinate Reference System if not embedded in TIF.
-        verbose: Enable verbose output.
+        parallel: Enable parallel processing (~Nx speedup on N cores).
     """
 
     script: Path
@@ -237,7 +237,7 @@ class GeotiffPreprocessConfig:
     timestep: int  # Required, no default
     amend: bool = False
     crs: str | None = None
-    verbose: bool = False
+    parallel: bool = False
 
     def __post_init__(self) -> None:
         """Validate config after initialization."""
@@ -275,7 +275,7 @@ class CsvPreprocessConfig:
         timestep: Simulation timestep this data maps to (required).
         amend: Append to existing JSHD file.
         crs: Coordinate Reference System.
-        verbose: Enable verbose output.
+        parallel: Enable parallel processing (~Nx speedup on N cores).
     """
 
     script: Path
@@ -287,7 +287,7 @@ class CsvPreprocessConfig:
     timestep: int  # Required, no default
     amend: bool = False
     crs: str | None = None
-    verbose: bool = False
+    parallel: bool = False
 
     def __post_init__(self) -> None:
         """Validate config after initialization."""
@@ -697,8 +697,8 @@ class JoshCLI:
             args.append("--amend")
         if config.crs:
             args.extend(["--crs", config.crs])
-        if config.verbose:
-            args.append("--verbose")
+        if config.parallel:
+            args.append("--parallel")
 
         return self._execute(args, timeout=timeout)
 

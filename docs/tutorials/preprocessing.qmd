@@ -276,7 +276,7 @@ from joshpy.cli import JoshCLI, NetcdfPreprocessConfig
 from joshpy.jar import JarMode
 
 # Setup CLI (auto-downloads JAR if needed)
-cli = JoshCLI(josh_jar=JarMode.DEV)
+cli = JoshCLI(josh_jar=JarMode.LOCAL)
 
 SOURCE_PATH = Path("../../examples/external_sweep.josh")
 DATA_DIR = Path("../../examples/external_data")
@@ -287,9 +287,9 @@ patterns = ["gradient", "triangle", "stripes"]
 for pattern in patterns:
     nc_file = DATA_DIR / f"soil_quality_{pattern}.nc"
     jshd_file = DATA_DIR / f"soil_quality_{pattern}.jshd"
-    
+
     print(f"Preprocessing {nc_file.name}...")
-    
+
     result = cli.preprocess(NetcdfPreprocessConfig(
         script=SOURCE_PATH,
         simulation="Main",
@@ -300,13 +300,24 @@ for pattern in patterns:
         x_coord="lon",
         y_coord="lat",
         time_coord="time",
+        parallel=True,  # Enable parallel processing for faster preprocessing
     ))
-    
+
     if result.success:
         print(f"  -> {jshd_file.name} created successfully")
     else:
         raise RuntimeError(f"Preprocessing failed for {nc_file.name}: {result.stderr}")
 ```
+
+::: {.callout-tip}
+## Parallel Preprocessing
+
+The `parallel=True` option enables parallel processing of grid patches, providing
+approximately Nx speedup on machines with N CPU cores. This is especially beneficial
+for large grids or when preprocessing many files. For small grids like this tutorial
+example, the overhead may outweigh the benefit, but for production-scale data it can
+significantly reduce preprocessing time.
+:::
 
 ### NetcdfPreprocessConfig Options
 
@@ -324,6 +335,7 @@ for pattern in patterns:
 | `timestep` | Extract specific time slice (optional) |
 | `amend` | Add to existing `.jshd` file (default: False) |
 | `crs` | Coordinate reference system |
+| `parallel` | Enable parallel processing (~Nx speedup on N cores) |
 
 ## Step 3: Verify with cli.inspect_jshd()
 
@@ -336,7 +348,7 @@ from joshpy.cli import JoshCLI, InspectJshdConfig
 from joshpy.jar import JarMode
 from pathlib import Path
 
-cli = JoshCLI(josh_jar=JarMode.DEV)
+cli = JoshCLI(josh_jar=JarMode.LOCAL)
 DATA_DIR = Path("../../examples/external_data")
 
 # Test coordinates (grid space, not lat/lon)
@@ -402,7 +414,7 @@ from pathlib import Path
 from joshpy import JoshCLI, load_jshd, plot_jshd
 from joshpy.jar import JarMode
 
-cli = JoshCLI(josh_jar=JarMode.DEV)
+cli = JoshCLI(josh_jar=JarMode.LOCAL)
 DATA_DIR = Path("../../examples/external_data")
 
 patterns = ["gradient", "triangle", "stripes"]
@@ -514,7 +526,7 @@ from joshpy.cli import JoshCLI, GeotiffPreprocessConfig
 from joshpy.jar import JarMode
 from pathlib import Path
 
-cli = JoshCLI(josh_jar=JarMode.DEV)
+cli = JoshCLI(josh_jar=JarMode.LOCAL)
 SOURCE_PATH = Path("../../examples/external_sweep.josh")
 DATA_DIR = Path("../../examples/external_data")
 
@@ -548,6 +560,7 @@ else:
 | `timestep` | **Required**: Simulation timestep this data maps to |
 | `amend` | Add to existing `.jshd` file (default: False) |
 | `crs` | Coordinate reference system (if not embedded in file) |
+| `parallel` | Enable parallel processing (~Nx speedup on N cores) |
 
 ::: {.callout-note}
 ## GeoTIFF Coordinates
@@ -616,7 +629,7 @@ from joshpy.cli import JoshCLI, CsvPreprocessConfig
 from joshpy.jar import JarMode
 from pathlib import Path
 
-cli = JoshCLI(josh_jar=JarMode.DEV)
+cli = JoshCLI(josh_jar=JarMode.LOCAL)
 SOURCE_PATH = Path("../../examples/external_sweep.josh")
 DATA_DIR = Path("../../examples/external_data")
 
@@ -666,6 +679,7 @@ else:
 | `timestep` | **Required**: Simulation timestep this data maps to |
 | `amend` | Add to existing `.jshd` file (default: False) |
 | `crs` | Coordinate reference system |
+| `parallel` | Enable parallel processing (~Nx speedup on N cores) |
 
 ::: {.callout-warning}
 ## CSV Performance Note
