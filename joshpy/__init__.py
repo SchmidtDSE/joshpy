@@ -46,6 +46,17 @@ from joshpy.jshd import (
     plot_jshd,
 )
 
+# Debug log parsing module (always available)
+from joshpy.debug import (
+    DebugMessage,
+    DebugMessageStore,
+    DebugSummary,
+    parse_debug_line,
+    load_debug_file,
+    load_debug_from_script,
+    format_message,
+)
+
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
@@ -142,6 +153,14 @@ __all__ = [
     "JshdData",
     "load_jshd",
     "plot_jshd",
+    # Debug log parsing
+    "DebugMessage",
+    "DebugMessageStore",
+    "DebugSummary",
+    "parse_debug_line",
+    "load_debug_file",
+    "load_debug_from_script",
+    "format_message",
     # Jobs (optional)
     "ConfigSweepParameter",
     "FileSweepParameter",
