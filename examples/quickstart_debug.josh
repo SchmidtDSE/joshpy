@@ -1,0 +1,50 @@
+# Quickstart simulation with debug output enabled
+# Same as quickstart.josh but with debugFiles configured for tracing agent behavior
+
+start simulation Main
+
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 count
+  steps.high = 10 count
+
+  exportFiles.patch = "file:///tmp/quickstart_debug_output.csv"
+  debugFiles.patch = "file:///tmp/quickstart_patch_debug.txt"
+  debugFiles.organism = "file:///tmp/quickstart_organism_debug.txt"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create 10 count of ForeverTree
+
+  export.treeCount.step = count(ForeverTree)
+  export.averageAge.step = mean(ForeverTree.age)
+  export.averageHeight.step = mean(ForeverTree.height)
+
+  dbg.step = debug("Patch step complete")
+
+end patch
+
+start organism ForeverTree
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 meters
+  height.step = prior.height + sample uniform from 0 meters to 1 meters
+
+  dbg.step = debug("Tree age:", age, "height:", height)
+
+end organism
+
+start unit year
+
+  alias years
+  alias yr
+  alias yrs
+
+end unit

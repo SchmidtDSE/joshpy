@@ -93,6 +93,21 @@ Use single-time external data for initialization and discrete events:
 
 Best for: Initial conditions from COGs, discrete disturbance events.
 
+## Debugging
+
+Tutorials for tracing and inspecting agent behavior.
+
+### [Debug Output Inspection](debug-inspection.qmd)
+
+Trace agent behavior with structured debug log analysis:
+
+- Parse and filter debug output programmatically
+- `python -m joshpy.debug` CLI with colored terminal output
+- Auto-discover debug paths from `.josh` scripts
+- Trace individual entities across timesteps
+
+Best for: Understanding why agents behave a certain way, debugging simulation logic.
+
 ## Analysis
 
 Tutorials for exploring and visualizing results.
