@@ -15,6 +15,7 @@ project:
     - tutorials/external-data-sweep.qmd     # Depends on preprocessing output
     - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
+    - tutorials/debug-inspection.qmd     # Debug output inspection
     - tutorials/switching-versions.qmd   # Josh version switching
     - tutorials/remote-execution.qmd     # Josh Cloud execution
     - best-practices.qmd
@@ -52,6 +53,10 @@ website:
           - text: "Optimization"
           - text: "Adaptive Sweeps"
             href: tutorials/adaptive-sweep.qmd
+          - text: "---"
+          - text: "Debugging"
+          - text: "Debug Output Inspection"
+            href: tutorials/debug-inspection.qmd
           - text: "---"
           - text: "Analysis"
           - text: "Analysis & Visualization"
@@ -91,6 +96,9 @@ website:
         - section: "Optimization"
           contents:
             - tutorials/adaptive-sweep.qmd
+        - section: "Debugging"
+          contents:
+            - tutorials/debug-inspection.qmd
         - section: "Analysis"
           contents:
             - tutorials/analysis.qmd

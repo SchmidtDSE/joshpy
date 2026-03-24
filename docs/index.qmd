@@ -36,6 +36,10 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 - [External Data Sweeps](tutorials/external-data-sweep.qmd) - Sweep over different input data files
 - [Timestep Interventions](tutorials/timestep-interventions.qmd) - Single-time data for initialization and discrete events
 
+### Debugging
+
+- [Debug Output Inspection](tutorials/debug-inspection.qmd) - Trace agent behavior with structured debug log analysis
+
 ### Optimization & Analysis
 
 - [Adaptive Optimization](tutorials/adaptive-sweep.qmd) - Bayesian parameter optimization with Optuna

@@ -1,0 +1,233 @@
+---
+title: "Debug Output Inspection"
+description: "Trace agent behavior with structured debug log analysis"
+jupyter: python3
+execute:
+  warning: false
+---
+
+## Introduction
+
+Josh simulations can emit **debug messages** that log per-agent decisions at each
+timestep — survival checks, flowering events, state transitions, and more. These
+logs are invaluable for understanding *why* a simulation behaves the way it does.
+
+The `joshpy.debug` module provides:
+
+- **Python API**: Parse, filter, and summarize debug output programmatically
+- **CLI tool**: `python -m joshpy.debug` for quick terminal-based inspection with colored output
+- **Script integration**: Point at a `.josh` file and let joshpy discover debug paths automatically
+
+This tutorial demonstrates both approaches using the quickstart simulation.
+
+## Step 1: Run a Simulation with Debug Output
+
+First, we need a Josh script with `debugFiles` configured. The key additions
+compared to a standard simulation are `debugFiles.patch` and `debugFiles.organism`
+in the simulation block, plus `debug()` calls in the entity definitions:
+
+```{python}
+#| label: show-josh
+from pathlib import Path
+
+josh_source = Path("../../examples/quickstart_debug.josh").read_text()
+print(josh_source)
+```
+
+Run the simulation:
+
+```{python}
+#| label: run-simulation
+from joshpy.cli import JoshCLI, RunConfig
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+result = cli.run(RunConfig(
+    script=Path("../../examples/quickstart_debug.josh"),
+    simulation="Main",
+    replicates=1,
+))
+
+if not result.success:
+    raise RuntimeError(f"Simulation failed:\n{result.stderr}")
+print(f"Exit code: {result.exit_code}")
+```
+
+## Step 2: Load Debug Output (Python API)
+
+### From a debug text file directly
+
+```{python}
+#| label: load-from-file
+from joshpy.debug import load_debug_file
+
+store = load_debug_file("/tmp/quickstart_organism_debug.txt")
+print(f"Total messages: {len(store):,}")
+print(f"Steps: {store.steps()}")
+print(f"Entity types: {store.entity_types()}")
+print(f"Unique entities: {len(store.entity_ids()):,}")
+print(f"Unique locations: {len(store.locations())}")
+```
+
+### From a .josh script (auto-discovers debug paths)
+
+Instead of managing file paths yourself, point `load_debug_from_script` at the
+Josh file — it calls `inspect-exports` under the hood to find configured debug
+paths, then loads them all:
+
+```{python}
+#| label: load-from-script
+from joshpy.debug import load_debug_from_script
+
+# Loads all configured debug files (organism + patch in this case)
+store = load_debug_from_script(
+    "../../examples/quickstart_debug.josh",
+    simulation="Main",
+    cli=cli,  # reuse the CLI instance
+)
+print(f"Total messages (all debug files): {len(store):,}")
+print(f"Entity types: {store.entity_types()}")
+```
+
+## Step 3: Filter Messages
+
+All filters use AND logic — combine them to narrow results:
+
+```{python}
+#| label: filter-examples
+# All organism messages at step 5
+step5 = store.filter(step=5, entity_type="organism")
+print(f"Organism messages at step 5: {len(step5)}")
+
+# Messages at a specific location
+loc_msgs = store.filter(entity_type="patch")
+print(f"Patch debug messages: {len(loc_msgs)}")
+
+# Search by content substring
+height_msgs = store.filter(content_contains="height:")
+print(f"Messages mentioning height: {len(height_msgs)}")
+if height_msgs:
+    print(f"  Example: {height_msgs[0].content}")
+```
+
+## Step 4: Trace an Entity
+
+Follow a single entity across all timesteps to understand its lifecycle:
+
+```{python}
+#| label: trace-entity
+# Pick the first organism entity
+entity_id = store.filter(entity_type="organism")[0].entity_id
+print(f"Tracing entity: {entity_id}\n")
+
+for msg in store.trace(entity_id):
+    print(f"  Step {msg.step}: {msg.content}")
+```
+
+## Step 5: Summary Statistics
+
+Get a high-level overview of what the debug output contains:
+
+```{python}
+#| label: summary
+summary = store.summary()
+print(f"Total messages:  {summary.total_messages:,}")
+print(f"Parse errors:    {summary.parse_errors}")
+print(f"Step range:      {summary.step_range[0]} - {summary.step_range[1]}")
+print(f"Entity types:    {', '.join(summary.entity_types)}")
+print(f"Unique entities: {summary.num_entities:,}")
+print(f"Unique locations: {summary.num_locations}")
+
+print("\nMessages per step:")
+for step, count in summary.messages_per_step.items():
+    print(f"  Step {step}: {count:,}")
+
+print("\nEntities by type:")
+for etype, count in summary.entities_per_type.items():
+    print(f"  {etype}: {count:,}")
+```
+
+## Step 6: CLI Usage
+
+The `python -m joshpy.debug` CLI provides the same capabilities from the terminal
+with colored output. All examples below work with either a debug text file or a
+`.josh` script as input.
+
+### Summary
+
+```bash
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --summary
+```
+
+### Filter and search
+
+```bash
+# Step 5 organism messages
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --step 5 --limit 20
+
+# Messages at a specific grid cell
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --location 19.5 8.5
+
+# Search content
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --content "height:" --limit 10
+```
+
+### Trace an entity
+
+```bash
+# Full entity ID
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --trace a1b2c3d4
+
+# Prefix match (like git short SHAs)
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --trace a1b2
+```
+
+### Point at the .josh script directly
+
+```bash
+# Auto-discovers debug file paths from the simulation config
+python -m joshpy.debug examples/quickstart_debug.josh --summary
+python -m joshpy.debug examples/quickstart_debug.josh --trace a1b2c3d4
+```
+
+### Message count per step
+
+```bash
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --count
+```
+
+### Color control
+
+Output is automatically colored when writing to a terminal and plain when piped.
+You can also control it explicitly:
+
+```bash
+# Force no color
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --no-color --limit 5
+
+# Respects NO_COLOR environment variable (https://no-color.org/)
+NO_COLOR=1 python -m joshpy.debug /tmp/quickstart_organism_debug.txt --limit 5
+```
+
+## Template Variables in Debug Paths
+
+When debug file paths contain template variables like `{run_hash}` (common in
+sweep workflows), pass the value to resolve them:
+
+```python
+# Python API
+store = load_debug_from_script(
+    "simulation.josh",
+    run_hash="abc123def456",
+)
+
+# CLI
+# python -m joshpy.debug simulation.josh --run-hash abc123def456 --summary
+```
+
+## What's Next?
+
+- [Quickstart](../getting-started/quickstart.qmd) — Run a basic simulation
+- [Manual Workflow](manual-workflow.qmd) — Parameter sweeps with full control
+- [Analysis & Visualization](analysis.qmd) — Query and plot simulation results
