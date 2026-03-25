@@ -59,7 +59,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from joshpy.cli import JoshCLI, RunConfig, RunRemoteConfig
+    from joshpy.cli import JfrConfig, JoshCLI, RunConfig, RunRemoteConfig
     from joshpy.registry import RunRegistry
     from joshpy.strategies import SweepStrategy
 
@@ -1345,6 +1345,21 @@ class AdaptiveSweepResult:
         return len(self.job_results)
 
 
+def _per_job_jfr(jfr: JfrConfig, run_hash: str) -> JfrConfig:
+    """Create a per-job JFR config with run_hash in the filename.
+
+    Inserts the run_hash before the file extension so each job in a sweep
+    gets its own recording file. For example, ``profile.jfr`` becomes
+    ``profile_{run_hash}.jfr``.
+    """
+    from joshpy.cli import JfrConfig as _JfrConfig
+
+    stem = jfr.output.stem
+    suffix = jfr.output.suffix or ".jfr"
+    new_path = jfr.output.parent / f"{stem}_{run_hash}{suffix}"
+    return _JfrConfig(output=new_path, settings=jfr.settings, maxsize=jfr.maxsize)
+
+
 def run_sweep(
     cli: JoshCLI,
     job_set: JobSet,
@@ -1359,6 +1374,7 @@ def run_sweep(
     stop_on_failure: bool = True,
     dry_run: bool = False,
     quiet: bool = False,
+    jfr: JfrConfig | None = None,
 ) -> SweepResult:
     """Execute all jobs in a JobSet.
 
@@ -1388,6 +1404,8 @@ def run_sweep(
             continue running remaining jobs and return partial results.
         dry_run: If True, print plan without executing.
         quiet: If True, suppress progress output.
+        jfr: Optional JFR profiling configuration. When provided, each job
+            gets its own recording file with the run_hash in the filename.
 
     Returns:
         SweepResult with all job outcomes.
@@ -1474,12 +1492,13 @@ def run_sweep(
                 mode = "remote" if remote else "local"
                 print(f"[{i + 1}/{total_jobs}] Running ({mode}): {job.parameters}")
 
+            job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-                result = cli.run_remote(run_config)
+                result = cli.run_remote(run_config, jfr=job_jfr)
             else:
                 run_config = to_run_config(job)
-                result = cli.run(run_config)
+                result = cli.run(run_config, jfr=job_jfr)
 
             job_results.append((job, result))
 

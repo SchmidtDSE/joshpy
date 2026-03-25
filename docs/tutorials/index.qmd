@@ -95,7 +95,7 @@ Best for: Initial conditions from COGs, discrete disturbance events.
 
 ## Debugging
 
-Tutorials for tracing and inspecting agent behavior.
+Tutorials for tracing, inspecting, and profiling simulations.
 
 ### [Debug Output Inspection](debug-inspection.qmd)
 
@@ -107,6 +107,16 @@ Trace agent behavior with structured debug log analysis:
 - Trace individual entities across timesteps
 
 Best for: Understanding why agents behave a certain way, debugging simulation logic.
+
+### [JVM Profiling with Flight Recorder](jfr-profiling.qmd)
+
+Diagnose performance issues using Java Flight Recorder (JFR):
+
+- Enable JFR on any CLI operation with `JfrConfig`
+- Get text summaries with `summarize_jfr()` (no IDE needed)
+- Attach `.jfr` files to GitHub issues for detailed analysis
+
+Best for: Diagnosing slow simulations or preprocessing, reporting performance issues.
 
 ## Analysis
 

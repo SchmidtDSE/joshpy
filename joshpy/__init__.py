@@ -23,6 +23,7 @@ from joshpy.jar import (
 from joshpy.cli import (
     JoshCLI,
     CLIResult,
+    JfrConfig,
     RunConfig,
     RunRemoteConfig,
     # Format-specific preprocess configs
@@ -136,6 +137,7 @@ __all__ = [
     # CLI
     "JoshCLI",
     "CLIResult",
+    "JfrConfig",
     "RunConfig",
     "RunRemoteConfig",
     "NetcdfPreprocessConfig",

@@ -85,6 +85,47 @@ class CLIResult:
         return self.exit_code == 0
 
 
+@dataclass(frozen=True)
+class JfrConfig:
+    """Java Flight Recorder configuration for profiling JVM operations.
+
+    JFR is built into OpenJDK 11+ and captures detailed runtime profiling data
+    (CPU, GC, memory, threads, I/O) with minimal overhead. Use this to diagnose
+    performance issues in simulations or preprocessing.
+
+    The resulting .jfr file can be analyzed with:
+    - JDK Mission Control (GUI)
+    - ``jfr`` CLI tool (bundled with JDK): ``jfr summary recording.jfr``
+    - IntelliJ IDEA profiler
+    - :meth:`JoshCLI.summarize_jfr` for a quick text summary
+
+    Example::
+
+        from joshpy.cli import JoshCLI, RunConfig, JfrConfig
+
+        cli = JoshCLI()
+        result = cli.run(
+            RunConfig(script=Path("sim.josh"), simulation="Main"),
+            jfr=JfrConfig(output=Path("recording.jfr")),
+        )
+        # Get text summary for GitHub issue
+        summary = cli.summarize_jfr(Path("recording.jfr"))
+        print(summary.stdout)
+
+    Attributes:
+        output: Path for the .jfr output file.
+        settings: JFR settings profile. ``"profile"`` captures more detail
+            (~2% overhead), ``"default"`` is lighter (~1% overhead).
+            Default is ``"profile"`` since JFR is typically enabled for debugging.
+        maxsize: Optional maximum recording file size (e.g., ``"500m"``, ``"1g"``).
+            If None, no size limit is applied.
+    """
+
+    output: Path
+    settings: str = "profile"
+    maxsize: str | None = None
+
+
 # -----------------------------------------------------------------------------
 # Config Dataclasses - each maps 1:1 to a CLI command's arguments
 # -----------------------------------------------------------------------------
@@ -514,7 +555,11 @@ class JoshCLI:
         self._resolved_jar = self._resolved_jar.resolve()
 
     def _execute(
-        self, args: list[str], timeout: float | None = None, capture_output: bool = True
+        self,
+        args: list[str],
+        timeout: float | None = None,
+        capture_output: bool = True,
+        jfr: JfrConfig | None = None,
     ) -> CLIResult:
         """Execute a CLI command.
 
@@ -522,11 +567,24 @@ class JoshCLI:
             args: Command arguments (without java -jar prefix).
             timeout: Timeout in seconds (None for no timeout).
             capture_output: Whether to capture stdout/stderr.
+            jfr: Optional JFR configuration for profiling. When provided,
+                adds ``-XX:StartFlightRecording`` JVM flag before ``-jar``.
 
         Returns:
             CLIResult with execution details.
         """
-        cmd = [self.java_path, "-jar", str(self._resolved_jar)] + args
+        jvm_flags: list[str] = []
+        if jfr is not None:
+            jfr_opts = (
+                f"filename={jfr.output.resolve()},"
+                f"settings={jfr.settings},"
+                f"dumponexit=true"
+            )
+            if jfr.maxsize is not None:
+                jfr_opts += f",maxsize={jfr.maxsize}"
+            jvm_flags.append(f"-XX:StartFlightRecording={jfr_opts}")
+
+        cmd = [self.java_path] + jvm_flags + ["-jar", str(self._resolved_jar)] + args
 
         try:
             proc = subprocess.run(
@@ -557,12 +615,18 @@ class JoshCLI:
                 command=cmd,
             )
 
-    def run(self, config: RunConfig, timeout: float | None = None) -> CLIResult:
+    def run(
+        self,
+        config: RunConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> CLIResult:
         """Execute a simulation.
 
         Args:
             config: Run configuration.
             timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
 
         Returns:
             CLIResult with execution details.
@@ -605,14 +669,20 @@ class JoshCLI:
         if config.seed is not None:
             args.extend(["--seed", str(config.seed)])
 
-        return self._execute(args, timeout=timeout)
+        return self._execute(args, timeout=timeout, jfr=jfr)
 
-    def run_remote(self, config: RunRemoteConfig, timeout: float | None = None) -> CLIResult:
+    def run_remote(
+        self,
+        config: RunRemoteConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> CLIResult:
         """Execute a simulation on Josh Cloud.
 
         Args:
             config: Run remote configuration.
             timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
 
         Returns:
             CLIResult with execution details.
@@ -639,9 +709,14 @@ class JoshCLI:
         for name, value in config.custom_tags.items():
             args.extend(["--custom-tag", f"{name}={value}"])
 
-        return self._execute(args, timeout=timeout)
+        return self._execute(args, timeout=timeout, jfr=jfr)
 
-    def preprocess(self, config: PreprocessConfig, timeout: float | None = None) -> CLIResult:
+    def preprocess(
+        self,
+        config: PreprocessConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> CLIResult:
         """Preprocess geospatial data into JSHD format.
 
         Supports NetCDF, GeoTIFF/COG, and CSV input formats. Use the
@@ -654,6 +729,7 @@ class JoshCLI:
         Args:
             config: Format-specific preprocess configuration.
             timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
 
         Returns:
             CLIResult with execution details.
@@ -700,14 +776,20 @@ class JoshCLI:
         if config.parallel:
             args.append("--parallel")
 
-        return self._execute(args, timeout=timeout)
+        return self._execute(args, timeout=timeout, jfr=jfr)
 
-    def validate(self, config: ValidateConfig, timeout: float | None = None) -> CLIResult:
+    def validate(
+        self,
+        config: ValidateConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> CLIResult:
         """Validate a Josh script.
 
         Args:
             config: Validate configuration.
             timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
 
         Returns:
             CLIResult with execution details.
@@ -719,29 +801,39 @@ class JoshCLI:
         if config.upload_source:
             args.append("--upload-source")
 
-        return self._execute(args, timeout=timeout)
+        return self._execute(args, timeout=timeout, jfr=jfr)
 
     def discover_config(
-        self, config: DiscoverConfigConfig, timeout: float | None = None
+        self,
+        config: DiscoverConfigConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
     ) -> CLIResult:
         """Discover configuration variables in a Josh script.
 
         Args:
             config: Discover config configuration.
             timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
 
         Returns:
             CLIResult with execution details.
         """
         args = ["discoverConfig", str(config.script.resolve())]
-        return self._execute(args, timeout=timeout)
+        return self._execute(args, timeout=timeout, jfr=jfr)
 
-    def inspect_jshd(self, config: InspectJshdConfig, timeout: float | None = None) -> CLIResult:
+    def inspect_jshd(
+        self,
+        config: InspectJshdConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> CLIResult:
         """Inspect values in a JSHD file.
 
         Args:
             config: Inspect JSHD configuration.
             timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
 
         Returns:
             CLIResult with execution details.
@@ -754,16 +846,20 @@ class JoshCLI:
             str(config.x),
             str(config.y),
         ]
-        return self._execute(args, timeout=timeout)
+        return self._execute(args, timeout=timeout, jfr=jfr)
 
     def inspect_exports(
-        self, config: InspectExportsConfig, timeout: float | None = None
+        self,
+        config: InspectExportsConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
     ) -> ExportPaths:
         """Inspect export paths in a Josh script.
 
         Args:
             config: Inspect exports configuration.
             timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
 
         Returns:
             ExportPaths with parsed export file information.
@@ -779,7 +875,7 @@ class JoshCLI:
         if not config.json_output:
             args.append("--json")
 
-        result = self._execute(args, timeout=timeout)
+        result = self._execute(args, timeout=timeout, jfr=jfr)
 
         if not result.success:
             raise RuntimeError(
@@ -814,3 +910,57 @@ class JoshCLI:
                 "disturbance": parse_file_info(data["debugFiles"].get("disturbance")),
             },
         )
+
+    def summarize_jfr(self, jfr_path: Path, timeout: float | None = None) -> CLIResult:
+        """Get a text summary of a JFR recording.
+
+        Uses the ``jfr`` CLI tool bundled with the JDK to produce a human-readable
+        summary of a flight recording. Users can paste this into GitHub issues
+        without needing JDK Mission Control or IntelliJ.
+
+        The ``jfr`` binary is resolved relative to :attr:`java_path`: if
+        ``java_path`` points into a JDK ``bin/`` directory, the sibling ``jfr``
+        binary is used; otherwise ``jfr`` is expected to be on ``PATH``.
+
+        Args:
+            jfr_path: Path to the ``.jfr`` recording file.
+            timeout: Timeout in seconds.
+
+        Returns:
+            CLIResult where stdout contains the text summary.
+        """
+        java = Path(self.java_path)
+        if java.parent.name == "bin":
+            jfr_bin = str(java.parent / "jfr")
+        else:
+            jfr_bin = "jfr"
+
+        cmd = [jfr_bin, "summary", str(jfr_path.resolve())]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return CLIResult(
+                exit_code=proc.returncode,
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                command=cmd,
+            )
+        except subprocess.TimeoutExpired:
+            return CLIResult(
+                exit_code=-1,
+                stdout="",
+                stderr=f"Command timed out after {timeout} seconds",
+                command=cmd,
+            )
+        except Exception as e:
+            return CLIResult(
+                exit_code=-1,
+                stdout="",
+                stderr=str(e),
+                command=cmd,
+            )

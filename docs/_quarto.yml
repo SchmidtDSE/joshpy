@@ -16,6 +16,7 @@ project:
     - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
     - tutorials/debug-inspection.qmd     # Debug output inspection
+    - tutorials/jfr-profiling.qmd       # JVM profiling with Flight Recorder
     - tutorials/switching-versions.qmd   # Josh version switching
     - tutorials/remote-execution.qmd     # Josh Cloud execution
     - best-practices.qmd
@@ -57,6 +58,8 @@ website:
           - text: "Debugging"
           - text: "Debug Output Inspection"
             href: tutorials/debug-inspection.qmd
+          - text: "JVM Profiling (JFR)"
+            href: tutorials/jfr-profiling.qmd
           - text: "---"
           - text: "Analysis"
           - text: "Analysis & Visualization"
@@ -99,6 +102,7 @@ website:
         - section: "Debugging"
           contents:
             - tutorials/debug-inspection.qmd
+            - tutorials/jfr-profiling.qmd
         - section: "Analysis"
           contents:
             - tutorials/analysis.qmd

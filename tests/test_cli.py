@@ -11,6 +11,7 @@ from joshpy.cli import (
     ExportPaths,
     InspectExportsConfig,
     InspectJshdConfig,
+    JfrConfig,
     JoshCLI,
     NetcdfPreprocessConfig,
     GeotiffPreprocessConfig,
@@ -735,6 +736,224 @@ class TestJoshCLI(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.exit_code, -1)
         self.assertIn("Java not found", result.stderr)
+
+
+class TestJfrConfig(unittest.TestCase):
+    """Tests for JfrConfig dataclass."""
+
+    def test_defaults(self):
+        """JfrConfig should have sensible defaults."""
+        config = JfrConfig(output=Path("/tmp/recording.jfr"))
+        self.assertEqual(config.output, Path("/tmp/recording.jfr"))
+        self.assertEqual(config.settings, "profile")
+        self.assertIsNone(config.maxsize)
+
+    def test_custom_settings(self):
+        """JfrConfig should accept custom settings and maxsize."""
+        config = JfrConfig(
+            output=Path("/tmp/recording.jfr"),
+            settings="default",
+            maxsize="500m",
+        )
+        self.assertEqual(config.settings, "default")
+        self.assertEqual(config.maxsize, "500m")
+
+    def test_frozen(self):
+        """JfrConfig should be immutable."""
+        config = JfrConfig(output=Path("/tmp/recording.jfr"))
+        with self.assertRaises(AttributeError):
+            config.settings = "default"  # type: ignore[misc]
+
+
+class TestJfr(unittest.TestCase):
+    """Tests for JFR integration in JoshCLI."""
+
+    JAR_MODE = JarMode.DEV
+
+    @patch("subprocess.run")
+    def test_run_with_jfr(self, mock_run):
+        """run() with JFR should insert JVM flags before -jar."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+        )
+        jfr = JfrConfig(output=Path("/tmp/recording.jfr"))
+
+        result = cli.run(config, jfr=jfr)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+
+        # Find the JFR flag
+        jfr_flags = [c for c in cmd if c.startswith("-XX:StartFlightRecording")]
+        self.assertEqual(len(jfr_flags), 1)
+        jfr_flag = jfr_flags[0]
+
+        # Verify contents
+        self.assertIn("filename=", jfr_flag)
+        self.assertIn("recording.jfr", jfr_flag)
+        self.assertIn("settings=profile", jfr_flag)
+        self.assertIn("dumponexit=true", jfr_flag)
+
+        # Verify ordering: JFR flag must come before -jar
+        jfr_idx = cmd.index(jfr_flag)
+        jar_idx = cmd.index("-jar")
+        self.assertLess(jfr_idx, jar_idx)
+
+    @patch("subprocess.run")
+    def test_run_without_jfr(self, mock_run):
+        """run() without JFR should not have any -XX: flags."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+        )
+
+        cli.run(config)
+
+        cmd = mock_run.call_args[0][0]
+        xx_flags = [c for c in cmd if c.startswith("-XX:")]
+        self.assertEqual(len(xx_flags), 0)
+
+    @patch("subprocess.run")
+    def test_jfr_with_maxsize(self, mock_run):
+        """JFR with maxsize should include it in the flag."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+        )
+        jfr = JfrConfig(output=Path("/tmp/recording.jfr"), maxsize="500m")
+
+        cli.run(config, jfr=jfr)
+
+        cmd = mock_run.call_args[0][0]
+        jfr_flag = [c for c in cmd if c.startswith("-XX:StartFlightRecording")][0]
+        self.assertIn("maxsize=500m", jfr_flag)
+
+    @patch("subprocess.run")
+    def test_jfr_with_default_settings(self, mock_run):
+        """JFR with settings='default' should use that in the flag."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+        )
+        jfr = JfrConfig(output=Path("/tmp/recording.jfr"), settings="default")
+
+        cli.run(config, jfr=jfr)
+
+        cmd = mock_run.call_args[0][0]
+        jfr_flag = [c for c in cmd if c.startswith("-XX:StartFlightRecording")][0]
+        self.assertIn("settings=default", jfr_flag)
+
+    @patch("subprocess.run")
+    def test_preprocess_with_jfr(self, mock_run):
+        """preprocess() with JFR should insert JVM flags before -jar."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = NetcdfPreprocessConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/data.nc"),
+            variable="temp",
+            units="K",
+            output=Path("/path/to/output.jshd"),
+        )
+        jfr = JfrConfig(output=Path("/tmp/preprocess.jfr"))
+
+        cli.preprocess(config, jfr=jfr)
+
+        cmd = mock_run.call_args[0][0]
+        jfr_flags = [c for c in cmd if c.startswith("-XX:StartFlightRecording")]
+        self.assertEqual(len(jfr_flags), 1)
+
+        # Verify ordering
+        jfr_idx = cmd.index(jfr_flags[0])
+        jar_idx = cmd.index("-jar")
+        self.assertLess(jfr_idx, jar_idx)
+
+    @patch("subprocess.run")
+    def test_validate_with_jfr(self, mock_run):
+        """validate() with JFR should insert JVM flags before -jar."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = ValidateConfig(script=Path("/path/to/simulation.josh"))
+        jfr = JfrConfig(output=Path("/tmp/validate.jfr"))
+
+        cli.validate(config, jfr=jfr)
+
+        cmd = mock_run.call_args[0][0]
+        jfr_flags = [c for c in cmd if c.startswith("-XX:StartFlightRecording")]
+        self.assertEqual(len(jfr_flags), 1)
+
+    @patch("subprocess.run")
+    def test_summarize_jfr(self, mock_run):
+        """summarize_jfr() should invoke 'jfr summary'."""
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="Flight Recording summary",
+            stderr="",
+        )
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        result = cli.summarize_jfr(Path("/tmp/recording.jfr"))
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[1], "summary")
+        self.assertIn("recording.jfr", cmd[2])
+
+    @patch("subprocess.run")
+    def test_summarize_jfr_derives_bin_from_java_path(self, mock_run):
+        """summarize_jfr() should derive jfr binary from java_path when in bin/."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE, java_path="/usr/lib/jvm/java-21/bin/java")
+        cli.summarize_jfr(Path("/tmp/recording.jfr"))
+
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], "/usr/lib/jvm/java-21/bin/jfr")
+
+
+class TestPerJobJfr(unittest.TestCase):
+    """Tests for _per_job_jfr helper."""
+
+    def test_inserts_run_hash(self):
+        """_per_job_jfr should insert run_hash before extension."""
+        from joshpy.jobs import _per_job_jfr
+
+        jfr = JfrConfig(output=Path("/tmp/profile.jfr"))
+        result = _per_job_jfr(jfr, "abc123def456")
+        self.assertEqual(result.output, Path("/tmp/profile_abc123def456.jfr"))
+
+    def test_preserves_settings(self):
+        """_per_job_jfr should preserve settings and maxsize."""
+        from joshpy.jobs import _per_job_jfr
+
+        jfr = JfrConfig(output=Path("/tmp/profile.jfr"), settings="default", maxsize="500m")
+        result = _per_job_jfr(jfr, "abc123")
+        self.assertEqual(result.settings, "default")
+        self.assertEqual(result.maxsize, "500m")
+
+    def test_no_extension(self):
+        """_per_job_jfr should default to .jfr when no extension."""
+        from joshpy.jobs import _per_job_jfr
+
+        jfr = JfrConfig(output=Path("/tmp/profile"))
+        result = _per_job_jfr(jfr, "abc123")
+        self.assertEqual(result.output, Path("/tmp/profile_abc123.jfr"))
 
 
 class TestInspectExportsConfig(unittest.TestCase):
