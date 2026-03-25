@@ -686,6 +686,26 @@ class TestSweepManager(unittest.TestCase):
             manager.cleanup()
             manager.close()
 
+    @patch("joshpy.sweep.run_sweep")
+    def test_run_forwards_jfr(self, mock_run_sweep):
+        """run(jfr=...) should forward jfr to run_sweep."""
+        from joshpy.cli import JfrConfig
+        from joshpy.jobs import SweepResult
+
+        mock_run_sweep.return_value = SweepResult(succeeded=2, failed=0)
+
+        manager = SweepManager.from_config(self.config, registry=":memory:")
+
+        try:
+            jfr = JfrConfig(output=Path("/tmp/sweep_profile.jfr"))
+            manager.run(quiet=True, jfr=jfr)
+
+            call_kwargs = mock_run_sweep.call_args[1]
+            self.assertIs(call_kwargs["jfr"], jfr)
+        finally:
+            manager.cleanup()
+            manager.close()
+
 
 def _has_optuna() -> bool:
     """Check if optuna is available."""
