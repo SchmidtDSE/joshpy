@@ -9,22 +9,23 @@ execute:
 ## Introduction
 
 Josh simulations can emit **debug messages** that log per-agent decisions at each
-timestep — survival checks, flowering events, state transitions, and more. These
+timestep — survival checks, reproduction events, state transitions, and more. These
 logs are invaluable for understanding *why* a simulation behaves the way it does.
 
-The `joshpy.debug` module provides:
+The `joshpy.debug` module provides a **CLI tool** (`python -m joshpy.debug`) for
+quick terminal-based investigation with colored output, and a **Python API** for
+use in notebooks and scripts.
 
-- **Python API**: Parse, filter, and summarize debug output programmatically
-- **CLI tool**: `python -m joshpy.debug` for quick terminal-based inspection with colored output
-- **Script integration**: Point at a `.josh` file and let joshpy discover debug paths automatically
-
-This tutorial demonstrates both approaches using the quickstart simulation.
+This tutorial walks through both using a quickstart simulation that models trees
+growing, maturing at age 7, and then facing yearly survival checks and
+reproduction coin flips.
 
 ## Step 1: Run a Simulation with Debug Output
 
-First, we need a Josh script with `debugFiles` configured. The key additions
-compared to a standard simulation are `debugFiles.patch` and `debugFiles.organism`
-in the simulation block, plus `debug()` calls in the entity definitions:
+A Josh script needs `debugFiles` configured to emit debug output. The key
+additions compared to a standard simulation are `debugFiles.patch` and
+`debugFiles.organism` in the simulation block, plus `debug()` calls in the
+entity definitions:
 
 ```{python}
 #| label: show-josh
@@ -33,8 +34,6 @@ from pathlib import Path
 josh_source = Path("../../examples/quickstart_debug.josh").read_text()
 print(josh_source)
 ```
-
-Run the simulation:
 
 ```{python}
 #| label: run-simulation
@@ -54,123 +53,53 @@ if not result.success:
 print(f"Exit code: {result.exit_code}")
 ```
 
-## Step 2: Load Debug Output (Python API)
+## Step 2: Python API
 
-### From a debug text file directly
-
-```{python}
-#| label: load-from-file
-from joshpy.debug import load_debug_file
-
-store = load_debug_file("/tmp/quickstart_organism_debug.txt")
-print(f"Total messages: {len(store):,}")
-print(f"Steps: {store.steps()}")
-print(f"Entity types: {store.entity_types()}")
-print(f"Unique entities: {len(store.entity_ids()):,}")
-print(f"Unique locations: {len(store.locations())}")
-```
-
-### From a .josh script (auto-discovers debug paths)
-
-Instead of managing file paths yourself, point `load_debug_from_script` at the
-Josh file — it calls `inspect-exports` under the hood to find configured debug
-paths, then loads them all:
+The Python API is useful in notebooks for quick exploration. Load debug output,
+trace an entity, and find events — all in a few lines.
 
 ```{python}
-#| label: load-from-script
+#| label: load-and-explore
 from joshpy.debug import load_debug_from_script
 
-# Loads all configured debug files (organism + patch in this case)
 store = load_debug_from_script(
     "../../examples/quickstart_debug.josh",
     simulation="Main",
-    cli=cli,  # reuse the CLI instance
+    cli=cli,
 )
-print(f"Total messages (all debug files): {len(store):,}")
-print(f"Entity types: {store.entity_types()}")
-```
+print(f"Loaded {len(store):,} messages across {len(store.entity_ids()):,} entities\n")
 
-## Step 3: Filter Messages
-
-All filters use AND logic — combine them to narrow results:
-
-```{python}
-#| label: filter-examples
-# All organism messages at step 5
-step5 = store.filter(step=5, entity_type="organism")
-print(f"Organism messages at step 5: {len(step5)}")
-
-# Messages at a specific location
-loc_msgs = store.filter(entity_type="patch")
-print(f"Patch debug messages: {len(loc_msgs)}")
-
-# Search by content substring
-height_msgs = store.filter(content_contains="height:")
-print(f"Messages mentioning height: {len(height_msgs)}")
-if height_msgs:
-    print(f"  Example: {height_msgs[0].content}")
-```
-
-## Step 4: Trace an Entity
-
-Follow a single entity across all timesteps to understand its lifecycle:
-
-```{python}
-#| label: trace-entity
-# Pick the first organism entity
+# Trace an entity — just call print_trace()
 entity_id = store.filter(entity_type="organism")[0].entity_id
-print(f"Tracing entity: {entity_id}\n")
-
-for msg in store.trace(entity_id):
-    print(f"  Step {msg.step}: {msg.content}")
+store.print_trace(entity_id)
 ```
 
-## Step 5: Summary Statistics
+### Find events
 
-Get a high-level overview of what the debug output contains:
+`find_events()` searches all entity traces for a keyword and prints matching
+entities with context — just like the CLI's `--find` flag:
 
 ```{python}
-#| label: summary
-summary = store.summary()
-print(f"Total messages:  {summary.total_messages:,}")
-print(f"Parse errors:    {summary.parse_errors}")
-print(f"Step range:      {summary.step_range[0]} - {summary.step_range[1]}")
-print(f"Entity types:    {', '.join(summary.entity_types)}")
-print(f"Unique entities: {summary.num_entities:,}")
-print(f"Unique locations: {summary.num_locations}")
-
-print("\nMessages per step:")
-for step, count in summary.messages_per_step.items():
-    print(f"  Step {step}: {count:,}")
-
-print("\nEntities by type:")
-for etype, count in summary.entities_per_type.items():
-    print(f"  {etype}: {count:,}")
+#| label: find-deaths
+# Trees that died
+store.find_events("survives? false", entity_type="organism", before=3, after=1);
 ```
 
-## Step 6: CLI Usage
+```{python}
+#| label: find-reproductions
+# Trees that reproduced
+store.find_events("reproduces? true", entity_type="organism", before=3, after=1);
+```
 
-The `python -m joshpy.debug` CLI provides the same capabilities from the terminal
-with colored output. All examples below work with either a debug text file or a
-`.josh` script as input.
+## Step 3: CLI Usage
+
+For day-to-day investigation, the CLI is the primary tool. It provides colored
+output, filtering, and all the same capabilities without writing any Python.
 
 ### Summary
 
 ```bash
 python -m joshpy.debug /tmp/quickstart_organism_debug.txt --summary
-```
-
-### Filter and search
-
-```bash
-# Step 5 organism messages
-python -m joshpy.debug /tmp/quickstart_organism_debug.txt --step 5 --limit 20
-
-# Messages at a specific grid cell
-python -m joshpy.debug /tmp/quickstart_organism_debug.txt --location 19.5 8.5
-
-# Search content
-python -m joshpy.debug /tmp/quickstart_organism_debug.txt --content "height:" --limit 10
 ```
 
 ### Trace an entity
@@ -183,7 +112,54 @@ python -m joshpy.debug /tmp/quickstart_organism_debug.txt --trace a1b2c3d4
 python -m joshpy.debug /tmp/quickstart_organism_debug.txt --trace a1b2
 ```
 
-### Point at the .josh script directly
+### Find events
+
+The `--find` flag searches all entity traces for a keyword and displays matching
+entities with context:
+
+```bash
+# Find organisms that died, show 3 messages before the death
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt \
+    --find "survives? false" --before 3 --after 0
+
+# Find organisms that reproduced, with surrounding context
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt \
+    --find "reproduces? true" --before 2 --after 2
+
+# Combine with step filters
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt \
+    --find "survives? false" --step-range 7 10
+
+# Count mode: how many entities died?
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt \
+    --find "survives? false" --count
+```
+
+### Filter and search
+
+```bash
+# Step 5 organism messages
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --step 5 --limit 20
+
+# Messages at a specific grid cell
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --location 19.5 8.5
+
+# Search content
+python -m joshpy.debug /tmp/quickstart_organism_debug.txt --content "[survival]" --limit 10
+```
+
+### Multiple files
+
+Pass multiple debug files — they are merged into a single store. Use
+`--entity-type` to focus on one type:
+
+```bash
+python -m joshpy.debug /tmp/quickstart_patch_debug.txt \
+    /tmp/quickstart_organism_debug.txt \
+    --find "survives? false" --entity-type organism
+```
+
+### Point at a .josh script directly
 
 ```bash
 # Auto-discovers debug file paths from the simulation config
