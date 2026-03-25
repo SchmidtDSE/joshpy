@@ -9,9 +9,11 @@ from joshpy.debug import (
     DebugMessage,
     DebugMessageStore,
     DebugSummary,
+    EventMatch,
     _Ansi,
     _supports_color,
     format_message,
+    format_trace,
     load_debug_file,
     load_debug_from_script,
     parse_debug_line,
@@ -655,6 +657,315 @@ class TestColorSupport(unittest.TestCase):
         mock_stdout.isatty.return_value = True
         with patch.dict("os.environ", {}, clear=True):
             self.assertTrue(_supports_color())
+
+
+class TestByEntityIndex(unittest.TestCase):
+    """Tests for the _by_entity incremental index."""
+
+    def test_by_entity_populated_on_add(self):
+        """_by_entity should group messages by entity_id during add()."""
+        store = DebugMessageStore()
+        m1 = DebugMessage(0, "organism", "aaa", 1.0, 2.0, "init", 1)
+        m2 = DebugMessage(1, "organism", "aaa", 1.0, 2.0, "step", 2)
+        m3 = DebugMessage(0, "organism", "bbb", 3.0, 4.0, "init", 3)
+        store.add(m1)
+        store.add(m2)
+        store.add(m3)
+        self.assertEqual(len(store._by_entity["aaa"]), 2)
+        self.assertEqual(len(store._by_entity["bbb"]), 1)
+
+    def test_trace_returns_sorted_via_index(self):
+        """trace() should return chronologically sorted messages."""
+        store = DebugMessageStore()
+        # Add out of order
+        store.add(DebugMessage(2, "organism", "aaa", 1.0, 2.0, "late", 3))
+        store.add(DebugMessage(0, "organism", "aaa", 1.0, 2.0, "early", 1))
+        store.add(DebugMessage(1, "organism", "aaa", 1.0, 2.0, "mid", 2))
+        trace = store.trace("aaa")
+        self.assertEqual([m.step for m in trace], [0, 1, 2])
+
+
+class TestEventMatch(unittest.TestCase):
+    """Tests for EventMatch dataclass."""
+
+    def test_frozen(self):
+        """EventMatch should be immutable."""
+        match = EventMatch(
+            entity_id="aaa",
+            location=(1.0, 2.0),
+            event_messages=[],
+            context=[],
+            full_trace=[],
+        )
+        with self.assertRaises(AttributeError):
+            match.entity_id = "bbb"  # type: ignore[misc]
+
+    def test_event_steps(self):
+        """event_steps should return sorted unique steps from event_messages."""
+        m1 = DebugMessage(5, "organism", "aaa", 1.0, 2.0, "ev", 1)
+        m2 = DebugMessage(3, "organism", "aaa", 1.0, 2.0, "ev", 2)
+        m3 = DebugMessage(5, "organism", "aaa", 1.0, 2.0, "ev2", 3)
+        match = EventMatch(
+            entity_id="aaa",
+            location=(1.0, 2.0),
+            event_messages=[m1, m2, m3],
+            context=[],
+            full_trace=[],
+        )
+        self.assertEqual(match.event_steps, [3, 5])
+
+
+class TestFindEvents(unittest.TestCase):
+    """Tests for DebugMessageStore.find_events()."""
+
+    def setUp(self):
+        """Create a store with multiple entities and known events."""
+        self.store = DebugMessageStore()
+        # Entity aaa: init -> survives -> burned -> resprout
+        self.store.add(DebugMessage(0, "organism", "aaa", 1.0, 2.0, "init adult", 1))
+        self.store.add(DebugMessage(1, "organism", "aaa", 1.0, 2.0, "survives true", 2))
+        self.store.add(DebugMessage(2, "organism", "aaa", 1.0, 2.0, "burned true", 3))
+        self.store.add(DebugMessage(3, "organism", "aaa", 1.0, 2.0, "resprout check", 4))
+        self.store.add(DebugMessage(4, "organism", "aaa", 1.0, 2.0, "survives true", 5))
+
+        # Entity bbb: init -> survives -> survives
+        self.store.add(DebugMessage(0, "organism", "bbb", 3.0, 4.0, "init seedling", 6))
+        self.store.add(DebugMessage(1, "organism", "bbb", 3.0, 4.0, "survives true", 7))
+        self.store.add(DebugMessage(2, "organism", "bbb", 3.0, 4.0, "survives false", 8))
+
+        # Entity ccc: patch messages
+        self.store.add(DebugMessage(0, "patch", "ccc", 1.0, 2.0, "fire false", 9))
+        self.store.add(DebugMessage(1, "patch", "ccc", 1.0, 2.0, "fire false", 10))
+        self.store.add(DebugMessage(2, "patch", "ccc", 1.0, 2.0, "fire true", 11))
+
+    def test_basic_keyword_match(self):
+        """Should find entities containing the keyword."""
+        matches = self.store.find_events("burned", print=False)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].entity_id, "aaa")
+
+    def test_multiple_entity_matches(self):
+        """Should find all entities containing the keyword."""
+        matches = self.store.find_events("survives", print=False)
+        # aaa and bbb both have "survives"
+        ids = {m.entity_id for m in matches}
+        self.assertEqual(ids, {"aaa", "bbb"})
+
+    def test_no_match(self):
+        """Should return empty list when no entities match."""
+        matches = self.store.find_events("nonexistent", print=False)
+        self.assertEqual(matches, [])
+
+    def test_event_messages_populated(self):
+        """event_messages should contain only the matching messages."""
+        matches = self.store.find_events("burned", print=False)
+        self.assertEqual(len(matches[0].event_messages), 1)
+        self.assertIn("burned", matches[0].event_messages[0].content)
+
+    def test_full_trace_always_complete(self):
+        """full_trace should contain all messages for the entity."""
+        matches = self.store.find_events("burned", print=False)
+        self.assertEqual(len(matches[0].full_trace), 5)  # all aaa messages
+
+    def test_context_equals_full_trace_when_no_window(self):
+        """Without before/after, context should equal full_trace."""
+        matches = self.store.find_events("burned", print=False)
+        self.assertEqual(matches[0].context, matches[0].full_trace)
+
+    def test_context_window_before_after(self):
+        """before/after should limit context around event messages."""
+        # "burned true" is at index 2 in aaa's trace (step 2)
+        matches = self.store.find_events("burned", before=1, after=1, print=False)
+        self.assertEqual(len(matches), 1)
+        context = matches[0].context
+        # Should include step 1 (before), step 2 (event), step 3 (after)
+        self.assertEqual(len(context), 3)
+        self.assertEqual([m.step for m in context], [1, 2, 3])
+
+    def test_context_window_clamps_to_trace_bounds(self):
+        """Context window should not extend beyond trace boundaries."""
+        # "init adult" is at index 0 in aaa's trace
+        matches = self.store.find_events("init adult", before=5, after=0, print=False)
+        context = matches[0].context
+        # before=5 but only index 0 exists before, so just the event itself
+        self.assertEqual(len(context), 1)
+        self.assertEqual(context[0].content, "init adult")
+
+    def test_context_window_merge_overlapping(self):
+        """Overlapping context windows from multiple events should merge."""
+        # aaa has "survives" at steps 1 and 4 (indices 1 and 4)
+        matches = self.store.find_events("survives", before=1, after=1, print=False)
+        aaa_match = next(m for m in matches if m.entity_id == "aaa")
+        # Index 1: window [0, 2], Index 4: window [3, 4] -> merged [0,1,2,3,4]
+        self.assertEqual(len(aaa_match.context), 5)
+
+    def test_entity_type_filter(self):
+        """entity_type should limit search to that type."""
+        # "fire" appears in patch entity ccc
+        matches = self.store.find_events("fire", entity_type="organism", print=False)
+        self.assertEqual(matches, [])
+
+        matches = self.store.find_events("fire", entity_type="patch", print=False)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].entity_id, "ccc")
+
+    def test_step_filter(self):
+        """step should limit matches to events at that step."""
+        # "survives" appears at steps 1, 2, 4 across entities
+        matches = self.store.find_events("survives", step=2, print=False)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].entity_id, "bbb")
+        self.assertEqual(matches[0].event_messages[0].step, 2)
+
+    def test_step_range_filter(self):
+        """step_range should limit matches to events in that range."""
+        matches = self.store.find_events("survives", step_range=(0, 1), print=False)
+        # aaa has survives at step 1, bbb has survives at step 1
+        ids = {m.entity_id for m in matches}
+        self.assertEqual(ids, {"aaa", "bbb"})
+        # Verify no event_messages outside range
+        for match in matches:
+            for em in match.event_messages:
+                self.assertLessEqual(em.step, 1)
+
+    def test_sorted_by_first_event_step(self):
+        """Results should be sorted by the step of the first event."""
+        matches = self.store.find_events("survives", print=False)
+        steps = [m.event_messages[0].step for m in matches]
+        self.assertEqual(steps, sorted(steps))
+
+    def test_location_from_first_message(self):
+        """location should come from the entity's first trace message."""
+        matches = self.store.find_events("burned", print=False)
+        self.assertEqual(matches[0].location, (1.0, 2.0))
+
+    def test_context_before_zero_after_zero(self):
+        """before=0 after=0 should return only the event messages."""
+        matches = self.store.find_events("burned", before=0, after=0, print=False)
+        self.assertEqual(len(matches[0].context), 1)
+        self.assertEqual(matches[0].context[0].content, "burned true")
+
+
+class TestFormatTrace(unittest.TestCase):
+    """Tests for format_trace()."""
+
+    def test_empty_messages(self):
+        """Should return empty string for empty list."""
+        self.assertEqual(format_trace([]), "")
+
+    def test_contains_step_and_content(self):
+        """Output should include step numbers and message content."""
+        msgs = [
+            DebugMessage(0, "organism", "aaa", 1.0, 2.0, "init", 1),
+            DebugMessage(1, "organism", "aaa", 1.0, 2.0, "step one", 2),
+        ]
+        result = format_trace(msgs)
+        self.assertIn("Step 0", result)
+        self.assertIn("Step 1", result)
+        self.assertIn("init", result)
+        self.assertIn("step one", result)
+
+    def test_groups_by_step(self):
+        """Messages at the same step should share a single separator."""
+        msgs = [
+            DebugMessage(0, "organism", "aaa", 1.0, 2.0, "first", 1),
+            DebugMessage(0, "organism", "aaa", 1.0, 2.0, "second", 2),
+            DebugMessage(1, "organism", "aaa", 1.0, 2.0, "third", 3),
+        ]
+        result = format_trace(msgs)
+        # Separator lines start with "---"; one per unique step
+        separators = [l for l in result.split("\n") if l.lstrip().startswith("---")]
+        self.assertEqual(len(separators), 2)  # step 0 and step 1
+
+
+class TestPrintTrace(unittest.TestCase):
+    """Tests for DebugMessageStore.print_trace()."""
+
+    def test_print_trace_outputs(self):
+        """print_trace should print formatted output to stdout."""
+        store = DebugMessageStore()
+        store.add(DebugMessage(0, "organism", "aaa", 1.0, 2.0, "init", 1))
+        store.add(DebugMessage(1, "organism", "aaa", 1.0, 2.0, "step", 2))
+        import io
+        from unittest.mock import patch as mock_patch
+        with mock_patch("sys.stdout", new_callable=io.StringIO) as out:
+            store.print_trace("aaa")
+        output = out.getvalue()
+        self.assertIn("Step 0", output)
+        self.assertIn("init", output)
+
+    def test_print_trace_prefix_match(self):
+        """print_trace should resolve prefix IDs."""
+        store = DebugMessageStore()
+        store.add(DebugMessage(0, "organism", "abcdef", 1.0, 2.0, "hi", 1))
+        import io
+        from unittest.mock import patch as mock_patch
+        with mock_patch("sys.stdout", new_callable=io.StringIO) as out:
+            store.print_trace("abc")
+        self.assertIn("hi", out.getvalue())
+
+    def test_print_trace_not_found(self):
+        """print_trace should print error for unknown entity."""
+        store = DebugMessageStore()
+        store.add(DebugMessage(0, "organism", "aaa", 1.0, 2.0, "hi", 1))
+        import io
+        from unittest.mock import patch as mock_patch
+        with mock_patch("sys.stdout", new_callable=io.StringIO) as out:
+            store.print_trace("zzz")
+        self.assertIn("not found", out.getvalue())
+
+
+class TestEventMatchFormat(unittest.TestCase):
+    """Tests for EventMatch.format() and print()."""
+
+    def _make_match(self, before=None, after=None):
+        """Create a store with gaps and find a match for testing."""
+        store = DebugMessageStore()
+        store.add(DebugMessage(3, "organism", "bbb", 5.0, 6.0, "before", 1))
+        store.add(DebugMessage(4, "organism", "bbb", 5.0, 6.0, "target hit", 2))
+        store.add(DebugMessage(5, "organism", "bbb", 5.0, 6.0, "middle", 3))
+        store.add(DebugMessage(6, "organism", "bbb", 5.0, 6.0, "filler", 4))
+        store.add(DebugMessage(7, "organism", "bbb", 5.0, 6.0, "filler2", 5))
+        store.add(DebugMessage(8, "organism", "bbb", 5.0, 6.0, "target again", 6))
+        store.add(DebugMessage(9, "organism", "bbb", 5.0, 6.0, "after", 7))
+        matches = store.find_events("target", before=before, after=after, print=False)
+        return matches[0]
+
+    def test_format_contains_header(self):
+        """format() should include entity ID and location in header."""
+        match = self._make_match()
+        result = match.format()
+        self.assertIn("bbb", result)
+        self.assertIn("5.0", result)
+        self.assertIn("6.0", result)
+
+    def test_format_marks_events(self):
+        """format() should mark event messages with > and <- event."""
+        match = self._make_match()
+        result = match.format()
+        self.assertIn("> ", result)
+        self.assertIn("<- event", result)
+
+    def test_format_shows_gap(self):
+        """format() should show omitted message count for gaps."""
+        match = self._make_match(before=0, after=0)
+        result = match.format()
+        self.assertIn("omitted", result)
+
+    def test_format_no_gap_full_context(self):
+        """format() without before/after should show no gaps."""
+        match = self._make_match()
+        result = match.format()
+        self.assertNotIn("omitted", result)
+
+    def test_print_outputs_format(self):
+        """print() should output the same as format()."""
+        match = self._make_match()
+        import io
+        from unittest.mock import patch as mock_patch
+        with mock_patch("sys.stdout", new_callable=io.StringIO) as out:
+            match.print()
+        self.assertEqual(out.getvalue().strip(), match.format().strip())
 
 
 if __name__ == "__main__":
