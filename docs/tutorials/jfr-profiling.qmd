@@ -1,0 +1,245 @@
+---
+title: "Performance Profiling with Java Flight Recorder"
+description: "Diagnose performance issues using Java Flight Recorder"
+jupyter: python3
+execute:
+  warning: false
+---
+
+## Introduction
+
+When a simulation or preprocessing step is unexpectedly slow, **Java Flight Recorder
+(JFR)** can capture detailed profiling data with minimal overhead (~1-2%). JFR is
+built into OpenJDK 11+ and records CPU hotspots, GC pauses, memory allocation,
+thread activity, and I/O -- everything needed to diagnose performance issues.
+
+joshpy makes JFR easy to use:
+
+1. Pass a `JfrConfig` to any CLI method to enable recording
+2. Use `summarize_jfr()` to get a text summary (no IDE required)
+3. Attach the `.jfr` file to a GitHub issue for deeper analysis
+
+No extra dependencies are needed -- JFR is part of the JDK that Josh already
+requires.
+
+::: {.callout-warning}
+Note: It's not likely that JFR output will be useful in diagnosing a specific scientific error in the simulation. Instead, JFR is best for identifying *performance* bottlenecks (e.g., "why is this simulation taking 10x longer than expected?") within java. This will expose the underlying Java stack trace, which will likely not be very useful to a user without Java experience. However, this information is critical for the Josh team to diagnose and fix performance issues in the Java codebase. If you have a performance issue, please include the JFR summary and recording when filing a GitHub issue!
+
+For diagnosing scientific errors (e.g., "why are my results different from expected?"), the best approach is to use the [debug output](debug-inspection.qmd) - contrary to JFR, the debug logs are designed to be human-readable and expose the internal state of the simulation in a way that is meaningful to users. The debug logs can help identify issues with the scientific logic, data handling, or configuration that may be causing incorrect results.
+:::
+
+
+## Step 1: Run a Simulation with JFR
+
+Enable JFR by passing a `JfrConfig` to any CLI method. The only required field
+is `output` -- the path where the recording will be written.
+
+```{python}
+#| label: run-with-jfr
+from pathlib import Path
+from joshpy.cli import JoshCLI, RunConfig, JfrConfig
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+jfr_path = Path("/tmp/simulation_profile.jfr")
+
+result = cli.run(
+    RunConfig(
+        script=Path("../../examples/quickstart.josh"),
+        simulation="Main",
+        replicates=1,
+    ),
+    jfr=JfrConfig(output=jfr_path),
+)
+
+print(f"Simulation: {'OK' if result.success else 'FAILED'}")
+print(f"JFR file exists: {jfr_path.exists()}")
+if jfr_path.exists():
+    size_kb = jfr_path.stat().st_size / 1024
+    print(f"JFR file size: {size_kb:.0f} KB")
+```
+
+The simulation runs normally -- JFR records in the background with negligible
+impact on execution time.
+
+## Step 2: Get a Text Summary
+
+Users without JDK Mission Control or IntelliJ can use `summarize_jfr()` to
+produce a human-readable summary using the JDK's bundled `jfr` CLI tool:
+
+```{python}
+#| label: summarize-jfr
+summary = cli.summarize_jfr(jfr_path)
+
+if summary.success:
+    # Print the first 80 lines of the summary
+    lines = summary.stdout.strip().split("\n")
+    for line in lines[:80]:
+        print(line)
+    if len(lines) > 80:
+        print(f"\n... ({len(lines) - 80} more lines)")
+else:
+    print(f"Summary failed: {summary.stderr}")
+```
+
+This summary is compact enough to paste directly into a GitHub issue.
+
+## Step 3: Profile Preprocessing
+
+JFR works on **any** CLI method, not just `run()`. If preprocessing is slow,
+profile it the same way:
+
+```{python}
+#| label: preprocess-with-jfr
+#| eval: false
+from joshpy.cli import NetcdfPreprocessConfig
+
+result = cli.preprocess(
+    NetcdfPreprocessConfig(
+        script=Path("simulation.josh"),
+        simulation="Main",
+        data_file=Path("temperature.nc"),
+        variable="temp",
+        units="K",
+        output=Path("temperature.jshd"),
+    ),
+    jfr=JfrConfig(output=Path("/tmp/preprocess_profile.jfr")),
+)
+```
+
+The same pattern applies to `validate()`, `discover_config()`, `inspect_jshd()`,
+and all other CLI methods.
+
+## Step 4: Profile a Parameter Sweep
+
+JFR also works through `SweepManager.run()` and `run_sweep()`. Each job
+automatically gets its own recording file with the `run_hash` in the filename:
+
+```{python}
+#| label: sweep-with-jfr
+#| eval: false
+from joshpy.sweep import SweepManager
+from joshpy.cli import JfrConfig
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiment.duckdb", experiment_name="profiled_sweep")
+    .with_cli(cli)
+    .build()
+)
+
+# Each job writes to /tmp/sweep_profile_{run_hash}.jfr
+results = manager.run(jfr=JfrConfig(output=Path("/tmp/sweep_profile.jfr")))
+```
+
+For a sweep with 3 jobs, this produces:
+
+```
+/tmp/sweep_profile_a1b2c3d4e5f6.jfr
+/tmp/sweep_profile_f7e8d9c0b1a2.jfr
+/tmp/sweep_profile_3456789abcde.jfr
+```
+
+You can then summarize any individual job's recording:
+
+```{python}
+#| label: summarize-sweep-jfr
+#| eval: false
+for job, result in results:
+    jfr_path = Path(f"/tmp/sweep_profile_{job.run_hash}.jfr")
+    if jfr_path.exists():
+        summary = cli.summarize_jfr(jfr_path)
+        print(f"=== {job.parameters} ===")
+        print(summary.stdout[:500])
+```
+
+## JfrConfig Options
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `output` | `Path` | *(required)* | Where to write the `.jfr` file |
+| `settings` | `str` | `"profile"` | `"profile"` (~2% overhead, more detail) or `"default"` (~1%, lighter) |
+| `maxsize` | `str \| None` | `None` | Max recording size (e.g., `"500m"`, `"1g"`) |
+
+```{python}
+#| label: jfr-options
+#| eval: false
+# Default: profile settings, no size limit
+JfrConfig(output=Path("recording.jfr"))
+
+# Lighter recording for long runs
+JfrConfig(output=Path("recording.jfr"), settings="default")
+
+# Cap file size for very long simulations
+JfrConfig(output=Path("recording.jfr"), maxsize="500m")
+```
+
+## Analyzing .jfr Files
+
+### Quick text summary (no tools needed)
+
+```python
+summary = cli.summarize_jfr(Path("recording.jfr"))
+print(summary.stdout)
+```
+
+### JDK CLI tool (terminal)
+
+The `jfr` command is bundled with the JDK:
+
+```bash
+# High-level summary
+jfr summary recording.jfr
+
+# Full event dump (verbose)
+jfr print recording.jfr
+
+# Filter by event type
+jfr print --events jdk.GCPhasePause recording.jfr
+jfr print --events jdk.CPULoad recording.jfr
+```
+
+### GUI tools (detailed analysis)
+
+For deeper investigation:
+
+- **JDK Mission Control**: Free, open-source GUI.
+  Download from [adoptium.net](https://adoptium.net/jmc/) and open the `.jfr` file.
+- **IntelliJ IDEA**: Open the `.jfr` file directly (built-in profiler support).
+
+## Reporting Performance Issues
+
+When filing a [GitHub issue](https://github.com/SchmidtDSE/josh/issues) for a
+performance problem:
+
+1. **Reproduce with JFR enabled:**
+   ```python
+   result = cli.run(config, jfr=JfrConfig(output=Path("issue_profile.jfr")))
+   ```
+
+2. **Get the text summary:**
+   ```python
+   summary = cli.summarize_jfr(Path("issue_profile.jfr"))
+   print(summary.stdout)
+   ```
+
+3. **Attach both to your issue:**
+   - Paste the text summary in the issue body
+   - Attach the `.jfr` file for detailed analysis
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+import os
+
+for f in ["/tmp/simulation_profile.jfr"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+## Learn More
+
+- [Debug Output Inspection](debug-inspection.qmd) -- Trace agent behavior with structured logs
+- [Best Practices](../best-practices.qmd) -- General troubleshooting guidance
