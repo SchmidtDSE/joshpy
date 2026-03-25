@@ -788,6 +788,7 @@ def run_adaptive_sweep(
     quiet: bool = False,
     load_config: Any | None = None,  # LoadConfig
     stop_on_failure: bool = True,
+    jfr: Any | None = None,  # JfrConfig
 ) -> Any:  # AdaptiveSweepResult
     """Run an adaptive sweep using Optuna.
 
@@ -909,6 +910,8 @@ def run_adaptive_sweep(
         )
     )
 
+    from joshpy.jobs import _per_job_jfr
+
     # Initialize tracking
     job_results: list[tuple[ExpandedJob, Any]] = []
     succeeded = 0
@@ -958,12 +961,13 @@ def run_adaptive_sweep(
             )
 
             # 5. Execute CLI
+            job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-                result = cli.run_remote(run_config)
+                result = cli.run_remote(run_config, jfr=job_jfr)
             else:
                 run_config = to_run_config(job)
-                result = cli.run(run_config)
+                result = cli.run(run_config, jfr=job_jfr)
 
             job_results.append((job, result))
 

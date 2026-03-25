@@ -533,6 +533,7 @@ class SweepManager:
         quiet: bool = False,
         on_complete: Callable[[ExpandedJob, Any], None] | None = None,
         objective: Any | None = None,
+        jfr: Any | None = None,  # JfrConfig
     ) -> SweepResult:
         """Execute all jobs in the sweep.
 
@@ -559,6 +560,8 @@ class SweepManager:
                 registry recording. Use for progress reporting, logging, etc.
             objective: Objective function for adaptive strategies. If not provided,
                 uses the objective from the strategy configuration.
+            jfr: Optional JFR profiling configuration. When provided, each job
+                gets its own recording file with the run_hash in the filename.
 
         Returns:
             SweepResult for batch strategies, AdaptiveSweepResult for adaptive.
@@ -608,6 +611,7 @@ class SweepManager:
                 endpoint=endpoint,
                 quiet=quiet,
                 stop_on_failure=stop_on_failure,
+                jfr=jfr,
             )
         else:
             # Use batch runner
@@ -623,6 +627,7 @@ class SweepManager:
                 stop_on_failure=stop_on_failure,
                 dry_run=dry_run,
                 quiet=quiet,
+                jfr=jfr,
             )
 
     def load_results(
