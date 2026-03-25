@@ -5,6 +5,8 @@ Usage::
     python -m joshpy.debug debug.txt --summary
     python -m joshpy.debug debug.txt --step 5 --entity-type organism
     python -m joshpy.debug debug.txt --trace a1b2c3d4
+    python -m joshpy.debug debug.txt --find "resprout" --before 3 --after 3
+    python -m joshpy.debug patch.txt organism.txt --find "burned" --count
     python -m joshpy.debug simulation.josh --summary
     python -m joshpy.debug simulation.josh --simulation Main --trace a1b2
 """
@@ -18,9 +20,11 @@ from pathlib import Path
 
 from joshpy.debug import (
     DebugMessageStore,
+    EventMatch,
     _Ansi,
     _supports_color,
     format_message,
+    format_trace,
     load_debug_file,
     load_debug_from_script,
 )
@@ -32,9 +36,14 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Inspect Josh simulation debug output.",
     )
     parser.add_argument(
-        "file",
+        "files",
         type=Path,
-        help="Path to debug output file (.txt) or Josh script (.josh).",
+        nargs="+",
+        metavar="FILE",
+        help=(
+            "Debug output file(s) (.txt) or a single Josh script (.josh). "
+            "Multiple .txt files are merged into one store."
+        ),
     )
     parser.add_argument(
         "--simulation",
@@ -101,9 +110,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Trace a specific entity across all timesteps.",
     )
     modes.add_argument(
+        "--find",
+        metavar="KEYWORD",
+        default=None,
+        help=(
+            "Find entities whose traces contain KEYWORD. "
+            "Use --before/--after for context window."
+        ),
+    )
+
+    # --count can combine with --find or stand alone
+    parser.add_argument(
         "--count",
         action="store_true",
-        help="Show message count per step.",
+        help=(
+            "Show counts. With --find: summary of matched entities. "
+            "Without: message count per step."
+        ),
+    )
+
+    # -- Find context --------------------------------------------------------
+    find_ctx = parser.add_argument_group("find context")
+    find_ctx.add_argument(
+        "--before",
+        type=int,
+        default=None,
+        metavar="N",
+        help="With --find: include N trace messages before each event.",
+    )
+    find_ctx.add_argument(
+        "--after",
+        type=int,
+        default=None,
+        metavar="N",
+        help="With --find: include N trace messages after each event.",
     )
 
     # -- Display -------------------------------------------------------------
@@ -203,15 +243,7 @@ def _print_trace(store: DebugMessageStore, entity_id: str,
     print(f"{a.BOLD}Trace: {a.MAGENTA}{entity_id}{a.RESET}"
           f" ({len(msgs)} messages)")
     print()
-
-    current_step: int | None = None
-    for msg in msgs:
-        if msg.step != current_step:
-            current_step = msg.step
-            print(f"{a.DIM}--- {a.BOLD}{a.YELLOW}"
-                  f"Step {current_step}{a.RESET}"
-                  f" {a.DIM}{'─' * 30}{a.RESET}")
-        print(format_message(msg, use_color=use_color))
+    print(format_trace(msgs, use_color=use_color, limit=None))
 
 
 def _print_count(store: DebugMessageStore) -> None:
@@ -222,6 +254,53 @@ def _print_count(store: DebugMessageStore) -> None:
     print(f"{'─' * 6}  {'─' * 8}")
     for step, count in s.messages_per_step.items():
         print(f"{step:>6d}  {count:>8,}")
+
+
+def _print_find(
+    matches: list[EventMatch],
+    keyword: str,
+    use_color: bool,
+) -> None:
+    """Print find_events results with context and event markers."""
+    if not matches:
+        print(f"No entities matching \"{keyword}\".")
+        return
+
+    for match in matches:
+        print()
+        print(match.format(use_color=use_color))
+
+
+def _print_find_count(matches: list[EventMatch], keyword: str) -> None:
+    """Print summary counts for find_events results."""
+    a = _Ansi
+    print(
+        f"{a.BOLD}Found {len(matches)} entities matching "
+        f"\"{keyword}\"{a.RESET}"
+    )
+    if not matches:
+        return
+
+    # Count entities per event step
+    step_counts: Counter[int] = Counter()
+    for match in matches:
+        for s in match.event_steps:
+            step_counts[s] += 1
+
+    if step_counts:
+        for s in sorted(step_counts):
+            print(f"  Step {s}: {step_counts[s]} entities")
+
+    locations = set(m.location for m in matches)
+    print(f"Unique locations: {len(locations)}")
+
+    ids = [m.entity_id for m in matches]
+    preview = ids[:10]
+    print(f"Entity IDs: {', '.join(preview)}", end="")
+    if len(ids) > 10:
+        print(f", ... ({len(ids) - 10} more)")
+    else:
+        print()
 
 
 def _apply_filters(
@@ -252,10 +331,41 @@ def _apply_filters(
     return filtered
 
 
+def _load_files(args: argparse.Namespace) -> DebugMessageStore:
+    """Load one or more debug files into a merged store."""
+    files: list[Path] = args.files
+
+    # Single .josh script — use script loader
+    if len(files) == 1 and files[0].suffix == ".josh":
+        return load_debug_from_script(
+            files[0],
+            simulation=args.simulation,
+            run_hash=args.run_hash,
+        )
+
+    # One or more .txt debug files — merge into one store
+    store = DebugMessageStore()
+    for path in files:
+        if path.suffix == ".josh":
+            raise RuntimeError(
+                "Cannot mix .josh scripts with other files. "
+                "Pass a single .josh file or one or more .txt files."
+            )
+        file_store = load_debug_file(path)
+        for msg in file_store.messages:
+            store.add(msg)
+        store.parse_errors += file_store.parse_errors
+    return store
+
+
 def main() -> int:
     """Entry point for ``python -m joshpy.debug``."""
     parser = _build_parser()
     args = parser.parse_args()
+
+    # Validate --before/--after only with --find
+    if (args.before is not None or args.after is not None) and args.find is None:
+        parser.error("--before and --after require --find")
 
     # Color setup
     use_color = not args.no_color and _supports_color()
@@ -264,16 +374,9 @@ def main() -> int:
     else:
         _Ansi.disable()
 
-    # Load file — auto-detect .josh scripts vs debug text files
+    # Load files
     try:
-        if args.file.suffix == ".josh":
-            store = load_debug_from_script(
-                args.file,
-                simulation=args.simulation,
-                run_hash=args.run_hash,
-            )
-        else:
-            store = load_debug_file(args.file)
+        store = _load_files(args)
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)
         return 1
@@ -283,6 +386,25 @@ def main() -> int:
 
     if len(store) == 0:
         print("No debug messages found.", file=sys.stderr)
+        return 0
+
+    # Find mode — uses find_events() directly on the store
+    if args.find is not None:
+        find_limit = args.limit if args.limit is not None else 3
+        matches = store.find_events(
+            args.find,
+            before=args.before,
+            after=args.after,
+            entity_type=args.entity_type,
+            step=args.step,
+            step_range=tuple(args.step_range) if args.step_range else None,
+            limit=None if args.count else find_limit,
+            print=False,
+        )
+        if args.count:
+            _print_find_count(matches, args.find)
+        else:
+            _print_find(matches, args.find, use_color)
         return 0
 
     # Trace mode (resolve ID before filtering)
@@ -311,7 +433,7 @@ def main() -> int:
         _print_summary(filtered)
         return 0
 
-    # Count mode
+    # Count mode (without --find)
     if args.count:
         _print_count(filtered)
         return 0

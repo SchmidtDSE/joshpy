@@ -105,6 +105,92 @@ class DebugSummary:
     entities_per_type: dict[str, int]
 
 
+@dataclass(frozen=True)
+class EventMatch:
+    """An entity whose trace contains a matched event.
+
+    Attributes:
+        entity_id: The matched entity's hex ID.
+        location: Grid (x, y) from the entity's first message.
+        event_messages: Messages within the trace that matched the keyword.
+        context: Context window of trace messages around each event.
+            If before/after are specified, this is a subset of the full
+            trace centered on the event(s). Otherwise equals full_trace.
+        full_trace: The entity's complete trace (all messages).
+    """
+
+    entity_id: str
+    location: tuple[float, float]
+    event_messages: list[DebugMessage]
+    context: list[DebugMessage]
+    full_trace: list[DebugMessage]
+
+    @property
+    def event_steps(self) -> list[int]:
+        """Steps where the event occurred."""
+        return sorted(set(m.step for m in self.event_messages))
+
+    def __repr__(self) -> str:
+        steps = self.event_steps
+        return f"EventMatch({self.entity_id}, steps={steps})"
+
+    def format(self, *, use_color: bool = False) -> str:
+        """Format this match with context, event markers, and gap indicators.
+
+        Produces a header line with entity ID, location, and event steps,
+        followed by the context messages. Event messages are marked with
+        ``>`` and ``<- event``. Gaps between non-contiguous context windows
+        show how many messages were omitted.
+
+        Args:
+            use_color: Whether to apply ANSI color codes.
+
+        Returns:
+            Formatted multi-line string.
+        """
+        if use_color:
+            _Ansi.enable()
+        a = _Ansi
+
+        event_ids = {id(m) for m in self.event_messages}
+        steps_str = ", ".join(str(s) for s in self.event_steps)
+
+        lines: list[str] = []
+        lines.append(
+            f"{a.BOLD}=== Entity {a.MAGENTA}{self.entity_id}{a.RESET}"
+            f"{a.BOLD} at ({self.location[0]}, {self.location[1]})"
+            f" — event at step {steps_str} ==={a.RESET}"
+        )
+
+        # Build position map for gap detection
+        trace_pos = {id(m): i for i, m in enumerate(self.full_trace)}
+        prev_pos: int | None = None
+
+        for msg in self.context:
+            cur_pos = trace_pos[id(msg)]
+            if prev_pos is not None and cur_pos > prev_pos + 1:
+                skipped = cur_pos - prev_pos - 1
+                lines.append(
+                    f"  {a.DIM}  ... {skipped} messages omitted ...{a.RESET}"
+                )
+            prev_pos = cur_pos
+
+            formatted = format_message(msg, use_color=use_color)
+            if id(msg) in event_ids:
+                lines.append(
+                    f"{a.BOLD}{a.GREEN}>{a.RESET} {formatted}"
+                    f"  {a.DIM}<- event{a.RESET}"
+                )
+            else:
+                lines.append(f"  {formatted}")
+
+        return "\n".join(lines)
+
+    def print(self, *, use_color: bool = False) -> None:
+        """Print this match's formatted context to stdout."""
+        print(self.format(use_color=use_color))
+
+
 @dataclass
 class DebugMessageStore:
     """Accumulator for parsed debug messages with filtering.
@@ -122,6 +208,9 @@ class DebugMessageStore:
     _steps: set[int] = field(default_factory=set, repr=False)
     _entity_ids: set[str] = field(default_factory=set, repr=False)
     _entity_types: set[str] = field(default_factory=set, repr=False)
+    _by_entity: dict[str, list[DebugMessage]] = field(
+        default_factory=dict, repr=False
+    )
 
     def add(self, msg: DebugMessage) -> None:
         """Add a parsed message to the store."""
@@ -130,6 +219,7 @@ class DebugMessageStore:
         self._steps.add(msg.step)
         self._entity_ids.add(msg.entity_id)
         self._entity_types.add(msg.entity_type)
+        self._by_entity.setdefault(msg.entity_id, []).append(msg)
 
     def filter(
         self,
@@ -199,7 +289,7 @@ class DebugMessageStore:
         Returns:
             Messages for that entity in chronological order.
         """
-        msgs = [m for m in self.messages if m.entity_id == entity_id]
+        msgs = list(self._by_entity.get(entity_id, []))
         msgs.sort(key=lambda m: (m.step, m.line_number))
         return msgs
 
@@ -245,6 +335,169 @@ class DebugMessageStore:
                 k: len(v) for k, v in sorted(entities_per_type.items())
             },
         )
+
+    def find_events(
+        self,
+        keyword: str,
+        *,
+        before: int | None = None,
+        after: int | None = None,
+        entity_type: str | None = None,
+        step: int | None = None,
+        step_range: tuple[int, int] | None = None,
+        limit: int | None = 3,
+        print: bool = True,
+    ) -> list[EventMatch]:
+        """Find entities whose traces contain a keyword, with context.
+
+        Scans all entity traces for messages whose content contains
+        ``keyword``. Returns up to ``limit`` matches (default 3) and
+        prints them to stdout. The total count of matching entities is
+        always shown regardless of limit.
+
+        By default, results are printed to stdout (like the CLI ``--find``
+        flag). Pass ``print=False`` to suppress output.
+
+        The context window (``before``/``after``) is measured in **trace
+        messages** — the N messages before and after each event message
+        within that entity's trace. Overlapping windows are merged.
+
+        Args:
+            keyword: Content substring to search for in entity traces.
+            before: Number of trace messages to include before each event.
+                If None, include all preceding messages.
+            after: Number of trace messages to include after each event.
+                If None, include all following messages.
+            entity_type: Filter to entities of this type (e.g., "organism").
+            step: Only match events at this specific step.
+            step_range: Only match events within this (min, max) step range.
+            limit: Maximum number of matches to return and display.
+                Default 3. Pass None for all matches.
+            print: Whether to print results to stdout (default True).
+
+        Returns:
+            List of EventMatch objects (up to ``limit``), sorted by the
+            step of the first event message.
+        """
+
+        def _entity_matches(raw_msgs: list[DebugMessage]) -> bool:
+            """Check if any message in an entity's trace matches."""
+            for msg in raw_msgs:
+                if keyword not in msg.content:
+                    continue
+                if step is not None and msg.step != step:
+                    continue
+                if step_range is not None:
+                    lo, hi = step_range
+                    if not (lo <= msg.step <= hi):
+                        continue
+                return True
+            return False
+
+        def _build_match(
+            entity_id: str, raw_msgs: list[DebugMessage]
+        ) -> EventMatch:
+            """Build a full EventMatch with context windows."""
+            trace = sorted(raw_msgs, key=lambda m: (m.step, m.line_number))
+
+            matched_indices: list[int] = []
+            for i, msg in enumerate(trace):
+                if keyword not in msg.content:
+                    continue
+                if step is not None and msg.step != step:
+                    continue
+                if step_range is not None:
+                    lo, hi = step_range
+                    if not (lo <= msg.step <= hi):
+                        continue
+                matched_indices.append(i)
+
+            event_messages = [trace[i] for i in matched_indices]
+
+            if before is None and after is None:
+                context = list(trace)
+            else:
+                included: set[int] = set()
+                for i in matched_indices:
+                    lo = max(0, i - before) if before is not None else 0
+                    hi = (
+                        min(len(trace) - 1, i + after)
+                        if after is not None
+                        else len(trace) - 1
+                    )
+                    included.update(range(lo, hi + 1))
+                context = [trace[i] for i in sorted(included)]
+
+            return EventMatch(
+                entity_id=entity_id,
+                location=(trace[0].x, trace[0].y),
+                event_messages=event_messages,
+                context=context,
+                full_trace=list(trace),
+            )
+
+        # Phase 1: cheap count + collect matching entity IDs
+        matching_ids: list[str] = []
+        for entity_id, raw_msgs in self._by_entity.items():
+            if entity_type is not None and raw_msgs[0].entity_type != entity_type:
+                continue
+            if _entity_matches(raw_msgs):
+                matching_ids.append(entity_id)
+
+        total_count = len(matching_ids)
+
+        # Phase 2: build EventMatch only for entities we'll return
+        ids_to_build = matching_ids if limit is None else matching_ids[:limit]
+        results: list[EventMatch] = []
+        for eid in ids_to_build:
+            results.append(_build_match(eid, self._by_entity[eid]))
+
+        results.sort(key=lambda m: m.event_messages[0].step)
+
+        if print:
+            import builtins
+
+            builtins.print(
+                f"Found {total_count} entities matching \"{keyword}\""
+            )
+            for match in results:
+                builtins.print()
+                builtins.print(match.format())
+            if limit is not None and total_count > limit:
+                builtins.print(
+                    f"\n... {total_count - limit} more "
+                    f"(use limit= to adjust)"
+                )
+
+        return results
+
+    def print_trace(
+        self,
+        entity_id: str,
+        *,
+        use_color: bool = False,
+        limit: int | None = 20,
+    ) -> None:
+        """Print an entity's trace to stdout.
+
+        Convenience wrapper around :func:`format_trace` that resolves the
+        entity ID (prefix match supported) and prints the result.
+
+        Args:
+            entity_id: Exact entity ID or unambiguous prefix.
+            use_color: Whether to apply ANSI color codes.
+            limit: Maximum number of messages to show. Default 20.
+                Pass None for the full trace.
+        """
+        resolved = self.resolve_entity_id(entity_id)
+        if resolved is None:
+            print(f"Entity ID '{entity_id}' not found.")
+            return
+        msgs = self.trace(resolved)
+        if not msgs:
+            print(f"No messages for entity '{resolved}'.")
+            return
+        print(format_trace(msgs, use_color=use_color, limit=limit))
 
     def __len__(self) -> int:
         return len(self.messages)
@@ -526,3 +779,52 @@ def format_message(msg: DebugMessage, use_color: bool = True) -> str:
         f"[Step {msg.step}, {msg.entity_type} @ {msg.entity_id} "
         f"({msg.x}, {msg.y})] {msg.content}"
     )
+
+
+def format_trace(
+    messages: list[DebugMessage],
+    *,
+    use_color: bool = False,
+    limit: int | None = None,
+) -> str:
+    """Format a list of debug messages as a readable trace.
+
+    Groups messages by step with separator lines. Typically called with
+    the output of :meth:`DebugMessageStore.trace`.
+
+    Args:
+        messages: Messages to format (should be sorted chronologically).
+        use_color: Whether to apply ANSI color codes.
+        limit: Maximum number of messages to include. None for all.
+
+    Returns:
+        Formatted multi-line string, or empty string if messages is empty.
+    """
+    if not messages:
+        return ""
+
+    if use_color:
+        _Ansi.enable()
+    a = _Ansi
+
+    show = messages if limit is None else messages[:limit]
+    lines: list[str] = []
+    current_step: int | None = None
+    for msg in show:
+        if msg.step != current_step:
+            current_step = msg.step
+            lines.append(
+                f"{a.DIM}--- {a.BOLD}{a.YELLOW}"
+                f"Step {current_step}{a.RESET}"
+                f" {a.DIM}{'─' * 30}{a.RESET}"
+            )
+        lines.append(format_message(msg, use_color=use_color))
+
+    if limit is not None and len(messages) > limit:
+        remaining = len(messages) - limit
+        lines.append(
+            f"{a.DIM}... {remaining} more messages "
+            f"(use limit= to adjust){a.RESET}"
+        )
+
+    return "\n".join(lines)
