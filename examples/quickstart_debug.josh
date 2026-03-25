@@ -1,5 +1,6 @@
 # Quickstart simulation with debug output enabled
-# Same as quickstart.josh but with debugFiles configured for tracing agent behavior
+# Extends quickstart.josh with lifecycle events (maturity, reproduction, death)
+# and debugFiles configured for tracing agent behavior.
 
 start simulation Main
 
@@ -9,7 +10,7 @@ start simulation Main
   grid.patch = "Default"
 
   steps.low = 0 count
-  steps.high = 10 count
+  steps.high = 25 count
 
   exportFiles.patch = "file:///tmp/quickstart_debug_output.csv"
   debugFiles.patch = "file:///tmp/quickstart_patch_debug.txt"
@@ -21,11 +22,24 @@ start patch Default
 
   ForeverTree.init = create 10 count of ForeverTree
 
-  export.treeCount.step = count(ForeverTree)
-  export.averageAge.step = mean(ForeverTree.age)
-  export.averageHeight.step = mean(ForeverTree.height)
+  # Filter dead trees and add offspring from reproducing trees
+  ForeverTree.step = {
+    const alive = prior.ForeverTree[prior.ForeverTree.alive]
+    const offspring = count(prior.ForeverTree[prior.ForeverTree.reproduces])
+    const newTrees = create offspring of ForeverTree
+    const d = debug("[patch]", count(alive), "trees alive,", offspring, "new offspring")
+    return alive | newTrees
+  }
 
-  dbg.step = debug("Patch step complete")
+  export.treeCount.step = count(ForeverTree)
+
+  export.averageAge.step
+    :if(export.treeCount > 0 count) = mean(ForeverTree.age)
+    :else = 0 years
+
+  export.averageHeight.step
+    :if(export.treeCount > 0 count) = mean(ForeverTree.height)
+    :else = 0 meters
 
 end patch
 
@@ -37,7 +51,34 @@ start organism ForeverTree
   height.init = 0 meters
   height.step = prior.height + sample uniform from 0 meters to 1 meters
 
-  dbg.step = debug("Tree age:", age, "height:", height)
+  mature.step = current.age >= 7 years
+
+  # Survival check first — only mature trees face mortality
+  alive.init = true
+  alive.step = {
+    if (current.mature) {
+      const r = sample uniform from 0.0 to 1.0
+      const survives = r < 0.9
+      const d = debug("[survival] age", current.age, "— survives?", survives, "(roll", r, "vs threshold 0.9)")
+      return survives
+    } else {
+      const d = debug("[growing] age", current.age, "height", current.height, "— still young")
+      return true
+    }
+  }
+
+  # Reproduction gated on survival — only living mature trees can reproduce
+  reproduces.init = false
+  reproduces.step = {
+    if (current.mature and current.alive) {
+      const r = sample uniform from 0.0 to 1.0
+      const result = r < 0.2
+      const d = debug("[reproduction] reproduces?", result, "(roll", r, "vs threshold 0.2)")
+      return result
+    } else {
+      return false
+    }
+  }
 
 end organism
 
