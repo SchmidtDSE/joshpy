@@ -20,6 +20,7 @@ from joshpy.jobs import (
     to_run_config,
     to_run_remote_config,
     run_sweep,
+    discover_jshd_files,
 )
 from joshpy.strategies import SweepExecutionError
 
@@ -542,13 +543,17 @@ class TestJobExpander(unittest.TestCase):
             self.assertTrue(output_dir.exists())
             self.assertIsNone(job_set.temp_dir)  # No temp dir created
 
-    def test_expand_requires_template(self):
-        """Expanding without template should raise ValueError."""
+    def test_expand_no_config_source(self):
+        """Expanding without any config source should produce empty config."""
         config = JobConfig()
         expander = JobExpander()
+        job_set = expander.expand(config)
 
-        with self.assertRaises(ValueError):
-            expander.expand(config)
+        try:
+            self.assertEqual(len(job_set), 1)
+            self.assertEqual(job_set.jobs[0].config_content, "")
+        finally:
+            job_set.cleanup()
 
     def test_expand_with_file_params(self):
         """Expanding with file parameters should update file_mappings."""
@@ -1945,6 +1950,289 @@ class TestJobExpanderWithCompoundParams(unittest.TestCase):
             self.assertEqual(sorted(combos), sorted(expected))
         finally:
             job_set.cleanup()
+
+
+class TestConfigPath(unittest.TestCase):
+    """Tests for config_path support (raw .jshc without templating)."""
+
+    def test_expand_with_config_path(self):
+        """config_path should produce single job with file content."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / "baseline.jshc"
+            config_file.write_text("maxGrowth = 50 meters\nfireYear = 75 count")
+
+            config = JobConfig(
+                config_path=config_file,
+                simulation="Main",
+            )
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 1)
+                job = job_set.jobs[0]
+                self.assertEqual(job.config_content, "maxGrowth = 50 meters\nfireYear = 75 count")
+                self.assertEqual(job.parameters, {})
+                self.assertEqual(job.config_name, "baseline.jshc")
+            finally:
+                job_set.cleanup()
+
+    def test_expand_config_path_with_file_sweep(self):
+        """config_path should work with FileSweepParameter."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_file = Path(tmpdir) / "config.jshc"
+            config_file.write_text("value = 42")
+            source_file = Path(tmpdir) / "sim.josh"
+            source_file.write_text("simulation")
+            file_a = Path(tmpdir) / "scenario_a.jshd"
+            file_b = Path(tmpdir) / "scenario_b.jshd"
+            file_a.write_bytes(b"data a")
+            file_b.write_bytes(b"data b")
+
+            config = JobConfig(
+                config_path=config_file,
+                source_path=source_file,
+                sweep=SweepConfig(file_parameters=[
+                    FileSweepParameter(name="climate", paths=[file_a, file_b])
+                ]),
+            )
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 2)
+                # Config content is the same for both (raw file, no rendering)
+                for job in job_set:
+                    self.assertEqual(job.config_content, "value = 42")
+                # But file_mappings differ
+                self.assertEqual(job_set.jobs[0].file_mappings["climate"], file_a)
+                self.assertEqual(job_set.jobs[1].file_mappings["climate"], file_b)
+            finally:
+                job_set.cleanup()
+
+    def test_config_path_mutual_exclusivity(self):
+        """config_path should be mutually exclusive with template_path/template_string."""
+        with self.assertRaises(ValueError):
+            JobConfig(
+                config_path=Path("config.jshc"),
+                template_path=Path("template.jshc.j2"),
+            )
+
+        with self.assertRaises(ValueError):
+            JobConfig(
+                config_path=Path("config.jshc"),
+                template_string="value = {{ x }}",
+            )
+
+    def test_config_path_serialization_roundtrip(self):
+        """config_path should survive to_dict/from_dict roundtrip."""
+        config = JobConfig(
+            config_path=Path("/some/path/config.jshc"),
+            simulation="Test",
+            replicates=3,
+        )
+        d = config.to_dict()
+        self.assertEqual(d["config_path"], "/some/path/config.jshc")
+
+        restored = JobConfig.from_dict(d)
+        self.assertEqual(restored.config_path, Path("/some/path/config.jshc"))
+        self.assertEqual(restored.simulation, "Test")
+        self.assertEqual(restored.replicates, 3)
+
+
+class TestSourceTemplatePath(unittest.TestCase):
+    """Tests for source_template_path and template_vars support."""
+
+    def test_source_template_rendering(self):
+        """source_template_path should render .josh.j2 with template_vars."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create josh template
+            josh_template = Path(tmpdir) / "model.josh.j2"
+            josh_template.write_text(
+                "start simulation {{ sim_name }}\n"
+                "  grid.size = {{ grid_size }} m\n"
+                "end simulation"
+            )
+            config_file = Path(tmpdir) / "config.jshc"
+            config_file.write_text("value = 42")
+
+            config = JobConfig(
+                source_template_path=josh_template,
+                template_vars={"sim_name": "TestSim", "grid_size": 30},
+                config_path=config_file,
+            )
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 1)
+                job = job_set.jobs[0]
+                # source_path should be the rendered .josh file
+                self.assertIsNotNone(job.source_path)
+                rendered_content = job.source_path.read_text()
+                self.assertIn("start simulation TestSim", rendered_content)
+                self.assertIn("grid.size = 30 m", rendered_content)
+            finally:
+                job_set.cleanup()
+
+    def test_source_template_mutual_exclusivity(self):
+        """source_template_path should be mutually exclusive with source_path."""
+        with self.assertRaises(ValueError):
+            JobConfig(
+                source_path=Path("model.josh"),
+                source_template_path=Path("model.josh.j2"),
+            )
+
+    def test_template_vars_passed_to_config_template(self):
+        """template_vars should be available in .jshc.j2 rendering too."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            josh_template = Path(tmpdir) / "model.josh.j2"
+            josh_template.write_text("simulation {{ sim_name }}")
+
+            config_template = Path(tmpdir) / "config.jshc.j2"
+            config_template.write_text(
+                "patchSize = {{ grid_size }} meters\n"
+                "maxGrowth = {{ maxGrowth }} meters"
+            )
+
+            config = JobConfig(
+                source_template_path=josh_template,
+                template_vars={"sim_name": "Test", "grid_size": 30},
+                template_path=config_template,
+                sweep=SweepConfig(config_parameters=[
+                    ConfigSweepParameter(name="maxGrowth", values=[10, 50]),
+                ]),
+            )
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 2)
+                # template_vars (grid_size) should be in rendered config
+                self.assertIn("patchSize = 30 meters", job_set.jobs[0].config_content)
+                # sweep params should vary
+                self.assertIn("maxGrowth = 10 meters", job_set.jobs[0].config_content)
+                self.assertIn("maxGrowth = 50 meters", job_set.jobs[1].config_content)
+            finally:
+                job_set.cleanup()
+
+    def test_sweep_params_override_template_vars(self):
+        """Sweep parameters should override template_vars of the same name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_template = Path(tmpdir) / "config.jshc.j2"
+            config_template.write_text("x = {{ x }}")
+
+            config = JobConfig(
+                template_path=config_template,
+                template_vars={"x": "default_value"},
+                sweep=SweepConfig(config_parameters=[
+                    ConfigSweepParameter(name="x", values=["swept_value"]),
+                ]),
+            )
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                self.assertEqual(len(job_set), 1)
+                # Sweep param should win over template_var
+                self.assertEqual(job_set.jobs[0].config_content, "x = swept_value")
+            finally:
+                job_set.cleanup()
+
+    def test_source_template_serialization_roundtrip(self):
+        """source_template_path and template_vars should survive serialization."""
+        config = JobConfig(
+            source_template_path=Path("/models/canonical.josh.j2"),
+            template_vars={"grid_size": 30, "debug": True},
+            config_path=Path("/configs/baseline.jshc"),
+        )
+        d = config.to_dict()
+        self.assertEqual(d["source_template_path"], "/models/canonical.josh.j2")
+        self.assertEqual(d["template_vars"], {"grid_size": 30, "debug": True})
+
+        restored = JobConfig.from_dict(d)
+        self.assertEqual(restored.source_template_path, Path("/models/canonical.josh.j2"))
+        self.assertEqual(restored.template_vars, {"grid_size": 30, "debug": True})
+
+    def test_josh_j2_extension_stripped(self):
+        """Rendered .josh file should strip .j2 extension from name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            josh_template = Path(tmpdir) / "model.josh.j2"
+            josh_template.write_text("simulation Main")
+            config_file = Path(tmpdir) / "config.jshc"
+            config_file.write_text("value = 1")
+
+            config = JobConfig(
+                source_template_path=josh_template,
+                config_path=config_file,
+            )
+            expander = JobExpander()
+            job_set = expander.expand(config)
+
+            try:
+                job = job_set.jobs[0]
+                # The rendered file should be named model.josh, not model.josh.j2
+                self.assertTrue(job.source_path.name.endswith(".josh"))
+                self.assertFalse(job.source_path.name.endswith(".j2"))
+            finally:
+                job_set.cleanup()
+
+
+class TestDiscoverJshdFiles(unittest.TestCase):
+    """Tests for discover_jshd_files utility."""
+
+    def test_flat_directory(self):
+        """Should discover .jshd files in a flat directory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "cover.jshd").write_bytes(b"data")
+            (Path(tmpdir) / "fire_rbr.jshd").write_bytes(b"data")
+            (Path(tmpdir) / "readme.txt").write_text("not a jshd")
+
+            result = discover_jshd_files(tmpdir)
+            self.assertEqual(len(result), 2)
+            self.assertIn("cover", result)
+            self.assertIn("fire_rbr", result)
+            self.assertTrue(result["cover"].is_absolute())
+
+    def test_recursive(self):
+        """Should discover .jshd files in subdirectories when recursive=True."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "cover.jshd").write_bytes(b"data")
+            monthly = Path(tmpdir) / "monthly"
+            monthly.mkdir()
+            (monthly / "tas_jan.jshd").write_bytes(b"data")
+            (monthly / "tas_feb.jshd").write_bytes(b"data")
+
+            # Non-recursive should only find top-level
+            result_flat = discover_jshd_files(tmpdir, recursive=False)
+            self.assertEqual(len(result_flat), 1)
+
+            # Recursive should find all
+            result_recursive = discover_jshd_files(tmpdir, recursive=True)
+            self.assertEqual(len(result_recursive), 3)
+            self.assertIn("tas_jan", result_recursive)
+
+    def test_missing_directory(self):
+        """Should raise FileNotFoundError for non-existent directory."""
+        with self.assertRaises(FileNotFoundError):
+            discover_jshd_files("/nonexistent/path")
+
+    def test_duplicate_stems(self):
+        """Should raise ValueError for duplicate stems in recursive mode."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "cover.jshd").write_bytes(b"data1")
+            subdir = Path(tmpdir) / "subdir"
+            subdir.mkdir()
+            (subdir / "cover.jshd").write_bytes(b"data2")
+
+            with self.assertRaises(ValueError):
+                discover_jshd_files(tmpdir, recursive=True)
+
+    def test_empty_directory(self):
+        """Should return empty dict for directory with no .jshd files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = discover_jshd_files(tmpdir)
+            self.assertEqual(result, {})
 
 
 if __name__ == '__main__':
