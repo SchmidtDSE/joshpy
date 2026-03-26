@@ -14,61 +14,71 @@ pip install joshpy[all]
 
 ## 2. Run a Simulation
 
-joshpy wraps the Josh CLI to run simulations. Here's a minimal example:
+joshpy's `SweepManager` is the standard way to run simulations — even for
+single runs. It handles execution, result loading, and DuckDB registry tracking
+in one workflow:
 
 ```{python}
 from pathlib import Path
-from joshpy.cli import JoshCLI, RunConfig
+from joshpy.jobs import JobConfig
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
 from joshpy.jar import JarMode
 
-# Create CLI (auto-downloads Josh JAR if needed)
-cli = JoshCLI(josh_jar=JarMode.DEV)
-
-# Run the quickstart simulation
-# Note: The .josh file defines the output path as /tmp/quickstart_output.csv
-result = cli.run(RunConfig(
-    script=Path("../../examples/quickstart.josh"),
+config = JobConfig(
+    source_path=Path("../../examples/quickstart.josh"),
     simulation="Main",
     replicates=1,
-))
+)
 
-print(f"Success: {result.success}")
-print(f"Exit code: {result.exit_code}")
-if not result.success:
-    error_msg = result.stderr.strip() if result.stderr else "No error message"
-    raise RuntimeError(f"Simulation failed:\n{error_msg}")
+manager = (
+    SweepManager.builder(config)
+    .with_registry(":memory:", experiment_name="quickstart")
+    .with_cli(JoshCLI(josh_jar=JarMode.DEV))
+    .build()
+)
+
+results = manager.run()
+print(f"Success: {results.succeeded}, Failed: {results.failed}")
+
+if results.failed > 0:
+    for job, result in results:
+        if not result.success:
+            raise RuntimeError(f"Simulation failed:\n{result.stderr}")
 ```
 
-## 3. Load and Plot Results
+## 3. Load and Query Results
 
-Load the simulation output into pandas and create a simple visualization:
+`load_results()` discovers output CSVs and imports them into the DuckDB
+registry. Then query with SQL or convenience methods:
+
+```{python}
+manager.load_results()
+
+# What's in the registry?
+summary = manager.registry.get_data_summary()
+print(summary)
+```
+
+```{python}
+# Query results as a DataFrame
+df = manager.query("averageHeight")
+df.head(10)
+```
+
+## 4. Visualize
 
 ```{python}
 #| label: fig-quickstart
-#| fig-cap: "Tree growth over 10 timesteps"
-import pandas as pd
-import matplotlib.pyplot as plt
-
-# Load results (path defined in quickstart.josh as exportFiles.patch)
-df = pd.read_csv("/tmp/quickstart_output.csv")
-print(f"Loaded {len(df)} rows")
-df.head()
-```
-
-```{python}
-#| label: fig-timeseries
 #| fig-cap: "Average tree height increases over time"
-# Plot tree height over time (aggregated across patches)
-summary = df.groupby("step")["averageHeight"].mean().reset_index()
+from joshpy.diagnostics import SimulationDiagnostics
 
-plt.figure(figsize=(8, 4))
-plt.plot(summary["step"], summary["averageHeight"], marker="o")
-plt.xlabel("Timestep")
-plt.ylabel("Average Height (m)")
-plt.title("Tree Growth Over Time")
-plt.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.show()
+diag = SimulationDiagnostics(manager.registry)
+diag.plot_timeseries(
+    "averageHeight",
+    run_hash=manager.job_set.jobs[0].run_hash,
+    title="Tree Growth Over Time",
+)
 ```
 
 ## What Just Happened?
@@ -88,17 +98,17 @@ print(Path("../../examples/quickstart.josh").read_text())
 
 ## What's Next?
 
-joshpy can do much more:
+| Feature | Tutorial |
+|---------|----------|
+| **Parameter Sweeps** | [SweepManager Workflow](../tutorials/sweep-manager.qmd) |
+| **Project Organization** | [Project Organization](../tutorials/project-organization.qmd) — directory layout, `.josh.j2` templates, data helpers |
+| **External Data** | [Preprocessing](../tutorials/preprocessing.qmd) and [Data Sweeps](../tutorials/external-data-sweep.qmd) |
+| **Analysis** | [Analysis & Visualization](../tutorials/analysis.qmd) |
+| **Best Practices** | [Registry design, error diagnosis](../best-practices.qmd) |
 
-| Feature | Description |
-|---------|-------------|
-| **Parameter Sweeps** | Run multiple configurations automatically |
-| **Experiment Registry** | Track runs, configs, and results in DuckDB |
-| **Result Analysis** | Query and visualize across parameter values |
-| **Diagnostic Plots** | Quick sanity-check visualizations |
+## Cleanup
 
-### Next Steps
-
-- [Manual Workflow Tutorial](../tutorials/manual-workflow.qmd) - Learn each joshpy component
-- [SweepManager Tutorial](../tutorials/sweep-manager.qmd) - High-level sweep orchestration  
-- [Analysis Tutorial](../tutorials/analysis.qmd) - Advanced visualization and queries
+```{python}
+manager.cleanup()
+manager.close()
+```

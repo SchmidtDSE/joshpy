@@ -1,0 +1,528 @@
+---
+title: "Project Organization"
+description: "Directory layout, model templating, and data management for josh projects"
+execute:
+  warning: false
+---
+
+## Introduction
+
+As josh projects grow beyond a single simulation, you need conventions for
+organizing model files, configs, data, and results. This guide covers:
+
+1. **Recommended directory layout** for multi-grid, multi-model projects
+2. **Model templating** (`.josh.j2`) to avoid duplicating model files
+3. **Config templating** (`.jshc.j2`) vs raw config files (`.jshc`)
+4. **Data directory helpers** to reduce file-mapping boilerplate
+5. **Cross-experiment tracking** with `ProjectCatalog`
+
+These features compose with `SweepManager` (see [SweepManager Workflow](sweep-manager.qmd))
+and work identically for local and remote execution.
+
+## Directory Layout
+
+```{.default}
+my-josh-project/
+├── models/
+│   ├── canonical.josh.j2              # Model template (one, not N copies)
+│   └── experimental_drought.josh.j2   # Model variant for testing
+├── configs/
+│   ├── baseline.jshc                  # Raw config for dev tinkering
+│   └── sweep_config.jshc.j2           # Jinja template for parameter sweeps
+├── data/
+│   ├── raw/                           # Source GeoTIFF/NetCDF
+│   └── grids/
+│       ├── dev_fine/                   # One dir per grid definition
+│       │   ├── cover.jshd
+│       │   ├── fire_rbr.jshd
+│       │   └── monthly/
+│       │       ├── tas_ssp245_jan.jshd
+│       │       └── ...
+│       ├── test_fine/
+│       └── full_fine/
+├── experiments/                        # One registry per experiment
+│   ├── baseline_dev_fine.duckdb
+│   └── fire_sweep_test_fine.duckdb
+├── grid_configs.py                     # Grid template_vars definitions
+└── notebooks/
+    ├── run.ipynb
+    └── analysis.ipynb
+```
+
+**Key conventions:**
+
+- **`models/`** -- One `.josh.j2` template per model variant, not one per grid.
+- **`configs/`** -- Raw `.jshc` files for single runs, `.jshc.j2` templates for sweeps.
+- **`data/grids/<grid_name>/`** -- All `.jshd` files for a grid in one directory. `discover_jshd_files()` reads from here.
+- **`experiments/`** -- One `.duckdb` registry per experiment. Named descriptively.
+- **`grid_configs.py`** -- Plain Python dicts, no joshpy imports needed.
+
+## Grid Configurations
+
+Grid-specific values (bounds, resolution, export paths, debug flags) are plain
+dicts that get passed as `template_vars`:
+
+```python
+# grid_configs.py
+
+GRIDS = {
+    "dev_fine": {
+        "simulation_name": "CanonicalDevFine",
+        "grid_size": 30,
+        "grid_low_lat": 33.902, "grid_low_lon": -116.0465,
+        "grid_high_lat": 33.908, "grid_high_lon": -116.0395,
+        "steps_high": 86,
+        "export_prefix": "canonical_dev_fine",
+        "debug": True,
+    },
+    "test_fine": {
+        "simulation_name": "CanonicalTestFine",
+        "grid_size": 30,
+        "grid_low_lat": 33.5, "grid_low_lon": -116.4,
+        "grid_high_lat": 34.0, "grid_high_lon": -115.4,
+        "steps_high": 86,
+        "export_prefix": "canonical_test_fine",
+        "debug": False,
+    },
+}
+```
+
+These dicts have no dependency on joshpy. They're just data.
+
+## Model Templating (.josh.j2)
+
+### The problem
+
+When the same model logic runs across multiple grid configurations, maintaining
+separate `.josh` files (one per grid) is error-prone. Any model logic change
+must be manually replicated across all copies. In practice this means copy-paste
+and subtle sync bugs.
+
+### The solution
+
+Use `source_template_path` to template the `.josh` file with Jinja2, just like
+`.jshc.j2` config templates. The template is rendered **once** with
+`template_vars` to produce a concrete `.josh` file.
+
+```jinja
+{# models/canonical.josh.j2 #}
+
+start simulation {{ simulation_name }}
+  grid.size = {{ grid_size }} m
+  grid.low = {{ grid_low_lat }} degrees latitude, {{ grid_low_lon }} degrees longitude
+  grid.high = {{ grid_high_lat }} degrees latitude, {{ grid_high_lon }} degrees longitude
+  steps.low = 0 count
+  steps.high = {{ steps_high }} count
+
+  exportFiles.patch = "file:///outputs/{{ export_prefix }}_{replicate}_{run_hash}.csv"
+  {% if debug %}
+  debugFiles.patch = "file:///outputs/debug_{{ export_prefix }}_patch.txt"
+  debugFiles.organism = "file:///outputs/debug_{{ export_prefix }}_organism.txt"
+  {% endif %}
+end simulation
+
+{# Everything below is shared across all grids -- written once, not N times #}
+
+start patch Default
+  Tree.init = create 10 count of Tree
+  export.treeCount.step = count(Tree)
+  export.averageHeight.step = mean(Tree.height)
+end patch
+
+start organism Tree
+  age.init = 0 years
+  age.step = prior.age + 1 year
+
+  {% if debug %}
+  const growthAmount = sample uniform from 0 meters to config sweep_config.maxGrowth
+  const d = debug("growth", growthAmount)
+  height.step = prior.height + growthAmount
+  {% else %}
+  height.step = prior.height + sample uniform from 0 meters to config sweep_config.maxGrowth
+  {% endif %}
+end organism
+```
+
+This collapses what would otherwise be multiple near-identical `.josh` files
+into one template plus a dict of grid-specific values.
+
+### Usage
+
+```python
+from pathlib import Path
+from joshpy.jobs import JobConfig, discover_jshd_files
+from joshpy.sweep import SweepManager
+
+config = JobConfig(
+    source_template_path=Path("models/canonical.josh.j2"),
+    template_vars=GRIDS["dev_fine"],  # From grid_configs.py
+    config_path=Path("configs/baseline.jshc"),
+    file_mappings=discover_jshd_files("data/grids/dev_fine", recursive=True),
+)
+
+with SweepManager.from_config(config, registry="experiments/baseline_dev_fine.duckdb") as mgr:
+    mgr.run()
+    mgr.load_results()
+```
+
+Switching grids is just changing the dict and data directory:
+
+```python
+config = JobConfig(
+    source_template_path=Path("models/canonical.josh.j2"),
+    template_vars=GRIDS["test_fine"],  # Different grid
+    config_path=Path("configs/baseline.jshc"),
+    file_mappings=discover_jshd_files("data/grids/test_fine", recursive=True),
+)
+```
+
+### Live demo: template rendering
+
+Let's see `.josh.j2` rendering in action. We create a small template and
+render it with two different grid configs:
+
+```{python}
+#| label: template-demo
+import tempfile
+from pathlib import Path
+from joshpy.jobs import JobConfig, JobExpander
+
+# Create a josh template in a temp directory
+tmpdir = tempfile.mkdtemp()
+
+josh_template = Path(tmpdir) / "model.josh.j2"
+josh_template.write_text("""start simulation {{ simulation_name }}
+  grid.size = {{ grid_size }} m
+  grid.low = {{ grid_low_lat }} degrees latitude, {{ grid_low_lon }} degrees longitude
+  grid.high = {{ grid_high_lat }} degrees latitude, {{ grid_high_lon }} degrees longitude
+  steps.low = 0 count
+  steps.high = {{ steps_high }} count
+  {% if debug %}debugFiles.patch = "file:///tmp/debug.txt"{% endif %}
+end simulation
+
+start patch Default
+end patch
+""")
+
+config_file = Path(tmpdir) / "config.jshc"
+config_file.write_text("maxGrowth = 50 meters")
+
+# Render with "dev_fine" grid (debug=True)
+config_dev = JobConfig(
+    source_template_path=josh_template,
+    template_vars={
+        "simulation_name": "DevFine", "grid_size": 30,
+        "grid_low_lat": 33.902, "grid_low_lon": -116.046,
+        "grid_high_lat": 33.908, "grid_high_lon": -116.039,
+        "steps_high": 86, "debug": True,
+    },
+    config_path=config_file,
+)
+
+expander = JobExpander()
+job_set = expander.expand(config_dev)
+print("=== dev_fine (debug=True) ===")
+print(job_set.jobs[0].source_path.read_text())
+job_set.cleanup()
+
+# Render with "test_fine" grid (debug=False)
+config_test = JobConfig(
+    source_template_path=josh_template,
+    template_vars={
+        "simulation_name": "TestFine", "grid_size": 30,
+        "grid_low_lat": 33.5, "grid_low_lon": -116.4,
+        "grid_high_lat": 34.0, "grid_high_lon": -115.4,
+        "steps_high": 86, "debug": False,
+    },
+    config_path=config_file,
+)
+
+job_set = expander.expand(config_test)
+print("=== test_fine (debug=False) ===")
+print(job_set.jobs[0].source_path.read_text())
+job_set.cleanup()
+```
+
+One template, two different rendered `.josh` files. The debug line only appears
+in the dev_fine version.
+
+## Config Files: Raw (.jshc) vs Template (.jshc.j2)
+
+### Raw config (single runs)
+
+Use `config_path` when you have a pre-written `.jshc` file and don't need
+parameter substitution:
+
+```python
+config = JobConfig(
+    config_path=Path("configs/baseline.jshc"),
+    source_path=Path("model.josh"),
+)
+```
+
+The file content is used as-is -- no Jinja rendering. This is the simplest path
+for dev tinkering: edit the `.jshc`, re-run, inspect results.
+
+### Template config (parameter sweeps)
+
+Use `template_path` when you need to sweep over config values:
+
+```python
+config = JobConfig(
+    template_path=Path("configs/sweep_config.jshc.j2"),
+    source_path=Path("model.josh"),
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100]),
+        ],
+    ),
+)
+```
+
+`template_vars` are available in `.jshc.j2` rendering alongside sweep
+parameters. If a sweep parameter has the same name as a template var, the
+sweep value wins.
+
+### Mutual exclusivity
+
+`config_path`, `template_path`, and `template_string` are mutually exclusive --
+use exactly one. Similarly, `source_path` and `source_template_path` are
+mutually exclusive.
+
+## Discovering Data Files
+
+`discover_jshd_files()` auto-builds a `file_mappings` dict from a directory,
+mapping each `.jshd` file's stem to its absolute path:
+
+```{python}
+#| label: discover-demo
+import tempfile
+from pathlib import Path
+from joshpy.jobs import discover_jshd_files
+
+# Create a mock data directory
+data_dir = Path(tempfile.mkdtemp())
+(data_dir / "cover.jshd").write_bytes(b"mock cover data")
+(data_dir / "fire_rbr.jshd").write_bytes(b"mock fire data")
+monthly = data_dir / "monthly"
+monthly.mkdir()
+(monthly / "tas_ssp245_jan.jshd").write_bytes(b"mock temp data")
+(monthly / "pr_ssp245_jan.jshd").write_bytes(b"mock precip data")
+
+# Flat discovery (top-level only)
+flat = discover_jshd_files(data_dir)
+print(f"Flat: {len(flat)} files")
+for name, path in sorted(flat.items()):
+    print(f"  {name} -> {path.name}")
+
+# Recursive discovery (includes subdirectories)
+recursive = discover_jshd_files(data_dir, recursive=True)
+print(f"\nRecursive: {len(recursive)} files")
+for name, path in sorted(recursive.items()):
+    print(f"  {name} -> {path.name}")
+```
+
+Raises `ValueError` if duplicate stems are found in recursive mode. Use unique
+filenames or separate directories.
+
+## Cross-Experiment Comparison with ProjectCatalog
+
+When you have many experiments across grids and model variants, `ProjectCatalog`
+provides a lightweight provenance index that tracks what was run with what inputs,
+and where results live.
+
+### Setup
+
+```{python}
+#| label: catalog-setup
+import tempfile
+from pathlib import Path
+from joshpy.catalog import ProjectCatalog
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+
+# Create catalog and test fixtures
+catalog = ProjectCatalog(":memory:")
+fixture_dir = Path(tempfile.mkdtemp())
+
+# Create mock project files
+model_v1 = fixture_dir / "canonical_v1.josh"
+model_v1.write_text("start simulation Main\n  grid.size = 30 m\nend simulation")
+
+model_v2 = fixture_dir / "canonical_v2.josh"
+model_v2.write_text("start simulation Main\n  grid.size = 30 m\n  # drought fix\nend simulation")
+
+config_file = fixture_dir / "baseline.jshc"
+config_file.write_text("maxGrowth = 50 meters\nfireYear = 75 count")
+
+data_a = fixture_dir / "cover.jshd"
+data_a.write_bytes(b"cover data for dev_fine grid")
+data_b = fixture_dir / "fire.jshd"
+data_b.write_bytes(b"fire data for dev_fine grid")
+
+print("Fixtures created")
+```
+
+### Registering models and data
+
+```{python}
+#| label: catalog-register
+# Register models
+h1 = catalog.register_model(model_v1, name="canonical_v1")
+h2 = catalog.register_model(model_v2, name="canonical_v2")
+print(f"Model v1 hash: {h1}")
+print(f"Model v2 hash: {h2}")
+print(f"Different content = different hash: {h1 != h2}")
+
+# Register data manifest
+dh = catalog.register_data(
+    {"cover": data_a, "fire": data_b},
+    name="dev_fine",
+)
+print(f"\nData manifest hash: {dh}")
+
+# Check what was registered
+info = catalog.get_data_manifest(dh)
+print(f"Data set '{info.name}': {info.file_count} files, {info.total_size} bytes")
+```
+
+### Registering experiments
+
+```{python}
+#| label: catalog-experiments
+# Register two experiments with different models
+config_a = JobConfig(
+    config_path=config_file,
+    source_path=model_v1,
+    simulation="Main",
+    file_mappings={"cover": data_a, "fire": data_b},
+)
+
+config_b = JobConfig(
+    config_path=config_file,
+    source_path=model_v2,
+    simulation="Main",
+    file_mappings={"cover": data_a, "fire": data_b},
+)
+
+exp1 = catalog.register_experiment(
+    config_a,
+    registry_path="experiments/baseline_v1.duckdb",
+    name="baseline_v1",
+)
+catalog.update_experiment_status(exp1, "completed", summary={"succeeded": 1, "failed": 0})
+
+exp2 = catalog.register_experiment(
+    config_b,
+    registry_path="experiments/baseline_v2.duckdb",
+    name="baseline_v2",
+)
+catalog.update_experiment_status(exp2, "completed", summary={"succeeded": 1, "failed": 0})
+
+print(f"Registered experiment: {exp1} (baseline_v1)")
+print(f"Registered experiment: {exp2} (baseline_v2)")
+```
+
+### Deduplication: "Did I already run this?"
+
+```{python}
+#| label: catalog-dedup
+# Check if config_a was already run
+existing = catalog.find_experiment(config_a)
+if existing and existing.status == "completed":
+    print(f"Already run: '{existing.name}' -> {existing.registry_path}")
+else:
+    print("Not found -- would need to run")
+
+# A different config won't match
+different_config_file = fixture_dir / "different.jshc"
+different_config_file.write_text("maxGrowth = 100 meters")
+config_c = JobConfig(
+    config_path=different_config_file,
+    source_path=model_v1,
+    simulation="Main",
+    file_mappings={"cover": data_a, "fire": data_b},
+)
+print(f"Different config matches: {catalog.find_experiment(config_c) is not None}")
+```
+
+### Listing and filtering
+
+```{python}
+#| label: catalog-list
+# List all experiments
+print("All experiments:")
+for exp in catalog.list_experiments():
+    print(f"  {exp.name}: status={exp.status}, registry={exp.registry_path}")
+
+# Filter by status
+completed = catalog.list_experiments(status="completed")
+print(f"\nCompleted: {len(completed)}")
+
+# Filter by model name
+v1_exps = catalog.list_experiments(model_name="canonical_v1")
+print(f"Using canonical_v1: {len(v1_exps)}")
+```
+
+### Orchestration metadata
+
+Each joshpy-created experiment automatically stores provenance metadata:
+
+```{python}
+#| label: catalog-orchestration
+exp = catalog.get_experiment(exp1)
+orch = exp.orchestration
+print(f"Tool: {orch['tool']}")
+print(f"JobConfig keys: {list(orch['job_config'].keys())}")
+```
+
+This metadata is in an optional `orchestration` JSON field. The core catalog
+fields (model_hash, config_hash, data_manifest_hash) are josh-agnostic -- any
+tool can produce and consume them.
+
+### SweepManager integration
+
+The catalog can be wired into `SweepManager` directly via the builder. It
+auto-registers the experiment on `build()` and updates status after `run()`:
+
+```python
+catalog = ProjectCatalog("catalog.duckdb")
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiments/sweep.duckdb")
+    .with_catalog(catalog, experiment_name="fire_sensitivity_dev_fine")
+    .build()  # Registers experiment as "running"
+)
+results = manager.run()  # Updates to "completed" or "failed"
+```
+
+### Cross-experiment queries
+
+The catalog can open multiple experiment registries simultaneously via DuckDB
+`ATTACH`, enabling cross-experiment SQL:
+
+```python
+experiments = catalog.list_experiments(status="completed")
+
+with catalog.open_registries(experiments) as conn:
+    df = conn.execute("""
+        SELECT 'baseline' as experiment, step, AVG(averageHeight) as mean_height
+        FROM exp_0.cell_data GROUP BY step
+        UNION ALL
+        SELECT 'drought_fix' as experiment, step, AVG(averageHeight) as mean_height
+        FROM exp_1.cell_data GROUP BY step
+    """).df()
+```
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+catalog.close()
+```
+
+## Related
+
+- [SweepManager Workflow](sweep-manager.qmd) -- Parameter sweep orchestration
+- [Sweeping Over External Data](external-data-sweep.qmd) -- `FileSweepParameter` for data file sweeps
+- [Best Practices](../best-practices.qmd) -- Registry lifecycle, error diagnosis

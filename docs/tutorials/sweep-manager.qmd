@@ -233,6 +233,18 @@ diag.plot_comparison(
 )
 ```
 
+## Single Runs, Templating & Project Layout
+
+SweepManager also supports single runs (no sweep) using raw `.jshc` files, and
+`.josh.j2` model templating to avoid duplicating model files across grid
+configurations. See the **[Project Organization](project-organization.qmd)**
+tutorial for the full guide, including:
+
+- `config_path` for raw `.jshc` files (no Jinja rendering)
+- `source_template_path` for `.josh.j2` model templates
+- `discover_jshd_files()` for auto-building file mappings
+- Recommended directory layout for multi-grid projects
+
 ## Summary
 
 This demo illustrated the `SweepManager` workflow:
@@ -271,6 +283,7 @@ manager = (
 **Related Tutorials:**
 
 - [Manual Workflow](manual-workflow.qmd) - Step-by-step control using individual components
+- [Sweeping Over External Data Files](external-data-sweep.qmd) - FileSweepParameter for data file sweeps
 - [Analysis & Visualization](analysis.qmd) - Analysis and visualization (decoupled from orchestration)
 
 ## Cleanup

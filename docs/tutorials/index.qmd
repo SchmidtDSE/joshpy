@@ -29,6 +29,18 @@ Use the high-level `SweepManager` class that handles:
 
 Best for: Production workflows where you want simplicity.
 
+### [Project Organization](project-organization.qmd)
+
+Structure multi-grid, multi-model projects with minimal boilerplate:
+
+- Recommended directory layout
+- `.josh.j2` model templates to avoid file duplication
+- `config_path` for raw `.jshc` files (single runs, no Jinja)
+- `discover_jshd_files()` for auto-building data mappings
+- Grid configs as reusable dicts
+
+Best for: Real projects with multiple grids, data directories, or model variants.
+
 ### [Adaptive Parameter Optimization](adaptive-sweep.qmd)
 
 Use Optuna's Bayesian optimization for intelligent parameter search:
@@ -148,16 +160,17 @@ All tutorials assume:
 
 1. [Manual Workflow](manual-workflow.qmd) - understand the components
 2. [SweepManager](sweep-manager.qmd) - see the simplified workflow
-3. [Analysis](analysis.qmd) - learn visualization patterns
+3. [Project Organization](project-organization.qmd) - directory layout, templates, data helpers
+4. [Analysis](analysis.qmd) - learn visualization patterns
 
 **Advanced Topics:**
 
-4. [Switching Josh Versions](switching-versions.qmd) - use stable vs development builds
-5. [Running on Josh Cloud](remote-execution.qmd) - parallel cloud execution
-6. [Preprocessing](preprocessing.qmd) - work with external geospatial data
-7. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
-8. [Timestep Interventions](timestep-interventions.qmd) - init-time and discrete event data
-9. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
+5. [Switching Josh Versions](switching-versions.qmd) - use stable vs development builds
+6. [Running on Josh Cloud](remote-execution.qmd) - parallel cloud execution
+7. [Preprocessing](preprocessing.qmd) - work with external geospatial data
+8. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
+9. [Timestep Interventions](timestep-interventions.qmd) - init-time and discrete event data
+10. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
 
 **Reference:**
 

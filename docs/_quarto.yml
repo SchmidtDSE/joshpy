@@ -10,6 +10,7 @@ project:
     - tutorials/index.qmd
     - tutorials/manual-workflow.qmd      # Creates demo_registry.duckdb
     - tutorials/sweep-manager.qmd        # Also creates demo_registry.duckdb
+    - tutorials/project-organization.qmd # Non-executable guide
     - tutorials/analysis.qmd             # Depends on demo_registry.duckdb
     - tutorials/preprocessing.qmd           # Creates .jshd files
     - tutorials/external-data-sweep.qmd     # Depends on preprocessing output
@@ -38,6 +39,8 @@ website:
             href: tutorials/manual-workflow.qmd
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
+          - text: "Project Organization"
+            href: tutorials/project-organization.qmd
           - text: "Switching Josh Versions"
             href: tutorials/switching-versions.qmd
           - text: "Remote Runs in Parallel"
@@ -89,6 +92,7 @@ website:
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
+            - tutorials/project-organization.qmd
             - tutorials/switching-versions.qmd
             - tutorials/remote-execution.qmd
         - section: "External Data"

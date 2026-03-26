@@ -61,7 +61,7 @@ joshpy/
 - `debug/`: `DebugMessage`, `DebugMessageStore`, `DebugSummary`, `parse_debug_line`, `load_debug_file`, `load_debug_from_script`, `format_message`
 
 **Requires joshpy[jobs]:**
-- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`
+- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `discover_jshd_files`
 - `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `SweepExecutionError`, `cv_objective`
 
 **Requires joshpy[registry]:**
@@ -71,6 +71,7 @@ joshpy/
 
 **Requires joshpy[all] (jobs + registry):**
 - `sweep.py`: `SweepManager`, `SweepManagerBuilder`, `recover_sweep_results`, `load_job_results`, `LoadConfig`, `ResultLoadError`
+- `catalog.py`: `ProjectCatalog`, `ExperimentInfo`, `ModelInfo`, `DataManifestInfo`, `compute_model_hash`, `compute_config_hash`, `compute_data_manifest_hash`
 
 ---
 
@@ -655,6 +656,92 @@ config = JobConfig(
 )
 ```
 
+### Raw Config Files (No Templating)
+
+Use a pre-written `.jshc` file directly with `config_path`. No Jinja rendering is performed.
+This is useful for single runs or when sweeping only over data files:
+
+```python
+config = JobConfig(
+    config_path=Path("configs/baseline.jshc"),
+    source_path=Path("simulation.josh"),
+    simulation="Main",
+    replicates=1,
+    file_mappings={"cover": Path("data/cover.jshd")},
+)
+
+# Produces a single job with the raw config content
+job_set = JobExpander().expand(config)
+```
+
+`config_path` is mutually exclusive with `template_path` and `template_string`.
+
+### Josh Source Templating (.josh.j2)
+
+Use `source_template_path` to template `.josh` source files, avoiding duplication
+when only grid bounds, export paths, or debug flags vary across configurations:
+
+```python
+config = JobConfig(
+    source_template_path=Path("models/canonical.josh.j2"),
+    template_vars={
+        "simulation_name": "CanonicalDevFine",
+        "grid_size": 30,
+        "grid_low_lat": 33.902, "grid_low_lon": -116.0465,
+        "grid_high_lat": 33.908, "grid_high_lon": -116.0395,
+        "export_prefix": "canonical_dev_fine",
+        "debug": True,
+    },
+    config_path=Path("configs/baseline.jshc"),
+)
+```
+
+The `.josh.j2` template uses standard Jinja2 syntax:
+
+```jinja
+start simulation {{ simulation_name }}
+  grid.size = {{ grid_size }} m
+  grid.low = {{ grid_low_lat }} degrees latitude, {{ grid_low_lon }} degrees longitude
+  grid.high = {{ grid_high_lat }} degrees latitude, {{ grid_high_lon }} degrees longitude
+  steps.low = 0 count
+  steps.high = 86 count
+  exportFiles.patch = "file:///outputs/{{ export_prefix }}_{replicate}_{run_hash}.csv"
+  {% if debug %}
+  debugFiles.patch = "file:///outputs/debug_patch.txt"
+  {% endif %}
+end simulation
+```
+
+`source_template_path` is mutually exclusive with `source_path`. The `.josh.j2` is
+rendered once with `template_vars` (not per sweep combination). When combined with
+a `.jshc.j2` template, `template_vars` are also available in config rendering, with
+sweep parameters overriding on collision.
+
+### Discovering JSHD Data Files
+
+Use `discover_jshd_files()` to auto-build `file_mappings` from a directory of `.jshd` files:
+
+```python
+from joshpy.jobs import discover_jshd_files
+
+# Maps filename stems to absolute paths
+mappings = discover_jshd_files("data/grids/dev_fine")
+# {"cover": Path("/abs/data/grids/dev_fine/cover.jshd"),
+#  "fire_rbr": Path("/abs/data/grids/dev_fine/fire_rbr.jshd"), ...}
+
+# With subdirectories (e.g., monthly/ folder)
+mappings = discover_jshd_files("data/grids/dev_fine", recursive=True)
+
+# Use directly in JobConfig
+config = JobConfig(
+    config_path=Path("configs/baseline.jshc"),
+    source_path=Path("model.josh"),
+    file_mappings=mappings,
+)
+```
+
+Raises `ValueError` if duplicate stems are found in recursive mode.
+
 ### Range Specifications
 
 Define parameter ranges instead of explicit values:
@@ -727,9 +814,12 @@ Note: `parameters` is a deprecated alias for `config_parameters`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `template_path` | Path | Path to Jinja template file |
+| `template_path` | Path | Path to Jinja template file (.jshc.j2) |
 | `template_string` | str | Inline Jinja template |
+| `config_path` | Path | Path to raw .jshc config file (no templating). Mutually exclusive with template_path/template_string |
 | `source_path` | Path | Path to .josh source file |
+| `source_template_path` | Path | Path to .josh.j2 Jinja template. Rendered once with template_vars. Mutually exclusive with source_path |
+| `template_vars` | dict[str, Any] | Static template variables rendered into source_template_path and/or template_path. Unlike sweep parameters, these do not vary per job |
 | `simulation` | str | Simulation name (default: "Main") |
 | `replicates` | int | Replicates per job (default: 1) |
 | `sweep` | SweepConfig | Parameter sweep configuration |
@@ -1140,6 +1230,80 @@ rows_loaded = recover_sweep_results(
     export_type="patch",
 )
 ```
+
+---
+
+## Project Catalog
+
+The `catalog` module provides a project-level provenance index that sits above RunRegistry.
+It tracks which models, configs, and data were used in which experiments, and where results live.
+
+**Requires joshpy[registry]** (duckdb).
+
+### Basic Usage
+
+```python
+from joshpy.catalog import ProjectCatalog
+
+catalog = ProjectCatalog("project.duckdb")
+
+# Register model and data
+model_hash = catalog.register_model(Path("model.josh"))
+data_hash = catalog.register_data(
+    discover_jshd_files("data/grids/dev_fine", recursive=True),
+    name="dev_fine",
+)
+
+# Register experiment
+exp_id = catalog.register_experiment(
+    config=job_config,
+    registry_path="experiments/baseline.duckdb",
+    name="baseline_dev_fine",
+)
+
+# Check if already run (deduplication)
+existing = catalog.find_experiment(job_config)
+if existing and existing.status == "completed":
+    print(f"Already run: {existing.registry_path}")
+
+# List experiments
+for exp in catalog.list_experiments(status="completed"):
+    print(f"{exp.name}: {exp.registry_path}")
+
+# Cross-experiment queries via DuckDB ATTACH
+experiments = catalog.list_experiments(status="completed")
+with catalog.open_registries(experiments) as conn:
+    df = conn.execute("""
+        SELECT step, AVG(averageHeight) FROM exp_0.cell_data GROUP BY step
+        UNION ALL
+        SELECT step, AVG(averageHeight) FROM exp_1.cell_data GROUP BY step
+    """).df()
+```
+
+### SweepManager Integration
+
+```python
+catalog = ProjectCatalog("project.duckdb")
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiments/sweep.duckdb")
+    .with_catalog(catalog, experiment_name="fire_sensitivity")
+    .build()  # Automatically registers experiment
+)
+results = manager.run()  # Automatically updates catalog status
+```
+
+### Schema
+
+The catalog stores josh-agnostic core fields (model_hash, config_hash, data_manifest_hash,
+simulation, replicates, registry_path) plus an optional `orchestration` JSON field with
+joshpy-specific metadata (JobConfig, sweep structure, template provenance).
+
+### Key Exports
+
+- `ProjectCatalog` — DuckDB-backed catalog class
+- `ExperimentInfo`, `ModelInfo`, `DataManifestInfo` — Data classes for query results
+- `compute_model_hash(path)`, `compute_config_hash(content)`, `compute_data_manifest_hash(file_mappings)` — Hashing utilities
 
 ---
 
