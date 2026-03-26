@@ -459,6 +459,8 @@ class SweepManager:
     session_id: str
     _owns_registry: bool = field(default=False, repr=False)
     _owns_cli: bool = field(default=False, repr=False)
+    _catalog: Any | None = field(default=None, repr=False)  # ProjectCatalog
+    _experiment_id: str | None = field(default=None, repr=False)
 
     # Entry points
     @classmethod
@@ -615,7 +617,7 @@ class SweepManager:
             )
         else:
             # Use batch runner
-            return run_sweep(
+            result = run_sweep(
                 cli=self.cli,
                 job_set=self.job_set,
                 registry=self.registry,
@@ -629,6 +631,21 @@ class SweepManager:
                 quiet=quiet,
                 jfr=jfr,
             )
+
+            # Update catalog status if configured
+            if self._catalog is not None and self._experiment_id is not None and not dry_run:
+                status = "completed" if result.failed == 0 else "failed"
+                self._catalog.update_experiment_status(
+                    self._experiment_id,
+                    status,
+                    summary={
+                        "total_jobs": result.succeeded + result.failed,
+                        "succeeded": result.succeeded,
+                        "failed": result.failed,
+                    },
+                )
+
+            return result
 
     def load_results(
         self,
@@ -775,6 +792,8 @@ class SweepManagerBuilder:
         self._session_id: str | None = None
         self._owns_registry = False
         self._owns_cli = False
+        self._catalog: Any | None = None  # ProjectCatalog
+        self._catalog_experiment_name: str | None = None
 
     def with_registry(
         self,
@@ -873,6 +892,38 @@ class SweepManagerBuilder:
         self.with_cli(jar_path=jar_path)
         return self
 
+    def with_catalog(
+        self,
+        catalog: Any,  # ProjectCatalog
+        *,
+        experiment_name: str | None = None,
+    ) -> SweepManagerBuilder:
+        """Configure an optional ProjectCatalog for cross-experiment tracking.
+
+        When a catalog is configured, the experiment is automatically registered
+        on build() and its status is updated after run().
+
+        Args:
+            catalog: A ProjectCatalog instance.
+            experiment_name: Human-readable name for the experiment in the catalog.
+
+        Returns:
+            Self for chaining.
+
+        Examples:
+            >>> from joshpy.catalog import ProjectCatalog
+            >>> catalog = ProjectCatalog("project.duckdb")
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_registry("experiment.duckdb")
+            ...     .with_catalog(catalog, experiment_name="baseline_dev_fine")
+            ...     .build()
+            ... )
+        """
+        self._catalog = catalog
+        self._catalog_experiment_name = experiment_name
+        return self
+
     def build(self) -> SweepManager:
         """Build the SweepManager instance.
 
@@ -942,6 +993,17 @@ class SweepManagerBuilder:
                         parameters=job.parameters,
                     )
 
+        # Register with catalog if configured
+        experiment_id = None
+        if self._catalog is not None:
+            registry_path = self._registry.path if hasattr(self._registry, "path") else ""
+            experiment_id = self._catalog.register_experiment(
+                config=self._config,
+                registry_path=registry_path,
+                name=self._catalog_experiment_name,
+            )
+            self._catalog.update_experiment_status(experiment_id, "running")
+
         return SweepManager(
             config=self._config,
             registry=self._registry,
@@ -950,6 +1012,8 @@ class SweepManagerBuilder:
             session_id=session_id,
             _owns_registry=self._owns_registry,
             _owns_cli=self._owns_cli,
+            _catalog=self._catalog,
+            _experiment_id=experiment_id,
         )
 
     def _convert_file_mappings(

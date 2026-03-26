@@ -74,6 +74,7 @@ try:
         to_run_config,
         to_run_remote_config,
         run_sweep,
+        discover_jshd_files,
     )
     from joshpy.strategies import (
         SweepStrategy,
@@ -126,6 +127,21 @@ try:
 except ImportError:
     HAS_SWEEP = False
 
+# Optional catalog module (requires duckdb)
+try:
+    from joshpy.catalog import (
+        ProjectCatalog,
+        ExperimentInfo,
+        ModelInfo,
+        DataManifestInfo,
+        compute_model_hash,
+        compute_config_hash,
+        compute_data_manifest_hash,
+    )
+    HAS_CATALOG = True
+except ImportError:
+    HAS_CATALOG = False
+
 __all__ = [
     # Jar management
     "JarMode",
@@ -177,6 +193,7 @@ __all__ = [
     "to_run_config",
     "to_run_remote_config",
     "run_sweep",
+    "discover_jshd_files",
     "HAS_JOBS",
     # Strategies (optional, part of jobs)
     "SweepStrategy",
@@ -210,4 +227,13 @@ __all__ = [
     "LoadConfig",
     "ResultLoadError",
     "HAS_SWEEP",
+    # Catalog (optional)
+    "ProjectCatalog",
+    "ExperimentInfo",
+    "ModelInfo",
+    "DataManifestInfo",
+    "compute_model_hash",
+    "compute_config_hash",
+    "compute_data_manifest_hash",
+    "HAS_CATALOG",
 ]

@@ -183,6 +183,58 @@ def _compute_run_hash(
     return hasher.hexdigest()[:12]
 
 
+def discover_jshd_files(
+    directory: str | Path,
+    *,
+    recursive: bool = False,
+) -> dict[str, Path]:
+    """Discover .jshd files in a directory and build a file_mappings dict.
+
+    Maps each file's stem (name without extension) to its absolute path.
+    This dict can be passed directly to ``JobConfig.file_mappings``.
+
+    Args:
+        directory: Path to directory containing .jshd files.
+        recursive: If True, search subdirectories recursively.
+
+    Returns:
+        Dict mapping file stems to absolute paths, e.g.,
+        ``{"cover": Path("/data/cover.jshd"), "fire_rbr": Path("/data/fire_rbr.jshd")}``.
+
+    Raises:
+        FileNotFoundError: If directory does not exist.
+        ValueError: If duplicate stems are found (e.g., ``data/cover.jshd``
+            and ``data/monthly/cover.jshd`` both have stem ``cover``).
+
+    Examples:
+        >>> from joshpy.jobs import discover_jshd_files
+        >>> mappings = discover_jshd_files("data/grids/dev_fine")
+        >>> config = JobConfig(
+        ...     config_path=Path("config.jshc"),
+        ...     source_path=Path("model.josh"),
+        ...     file_mappings=mappings,
+        ... )
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise FileNotFoundError(f"Directory not found: {directory}")
+
+    pattern = "**/*.jshd" if recursive else "*.jshd"
+    files = sorted(directory.glob(pattern))
+
+    result: dict[str, Path] = {}
+    for f in files:
+        stem = f.stem
+        if stem in result:
+            raise ValueError(
+                f"Duplicate .jshd stem '{stem}' found: {result[stem]} and {f}. "
+                "Use unique filenames or organize into separate directories."
+            )
+        result[stem] = f.resolve()
+
+    return result
+
+
 def _normalize_values(values: Any) -> list[Any]:
     """Normalize parameter values to a list.
 
@@ -701,10 +753,18 @@ class JobConfig:
     Attributes:
         template_path: Path to Jinja template file (.jshc.j2).
         template_string: Jinja template as string (alternative to template_path).
+        config_path: Path to a raw .jshc config file (no templating). Mutually
+            exclusive with template_path and template_string.
         simulation: Name of simulation to run.
         replicates: Number of replicates per job.
         sweep: Parameter sweep configuration.
         source_path: Path to .josh source file.
+        source_template_path: Path to a .josh.j2 Jinja template. Rendered once
+            with template_vars to produce the effective .josh source file.
+            Mutually exclusive with source_path.
+        template_vars: Static template variables rendered into source_template_path
+            and/or template_path. Unlike sweep parameters, these do not vary
+            per job — they produce a single rendered file.
         file_mappings: Map of data file names to paths.
         upload_source_path: Template for uploading source files.
         upload_config_path: Template for uploading config files.
@@ -720,14 +780,19 @@ class JobConfig:
         Josh resolves {param} from --custom-tag arguments and {replicate} automatically.
     """
 
-    # Template source (one of these required for sweep)
+    # Config source (one of template_path, template_string, or config_path)
     template_path: Path | None = None
     template_string: str | None = None
+    config_path: Path | None = None
 
     # Core simulation settings
     simulation: str = "Main"
     replicates: int = 1
     source_path: Path | None = None
+
+    # Josh source templating (mutually exclusive with source_path)
+    source_template_path: Path | None = None
+    template_vars: dict[str, Any] = field(default_factory=dict)
 
     # Parameter sweep config (optional)
     sweep: SweepConfig | None = None
@@ -746,6 +811,21 @@ class JobConfig:
     crs: str | None = None
     use_float64: bool = False
 
+    def __post_init__(self) -> None:
+        """Validate mutually exclusive fields."""
+        config_sources = sum(
+            x is not None for x in [self.template_path, self.template_string, self.config_path]
+        )
+        if config_sources > 1:
+            raise ValueError(
+                "Only one of template_path, template_string, or config_path may be provided"
+            )
+
+        if self.source_path is not None and self.source_template_path is not None:
+            raise ValueError(
+                "Only one of source_path or source_template_path may be provided"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization."""
         result: dict[str, Any] = {}
@@ -754,12 +834,18 @@ class JobConfig:
             result["template_path"] = str(self.template_path)
         if self.template_string:
             result["template_string"] = self.template_string
+        if self.config_path:
+            result["config_path"] = str(self.config_path)
         if self.simulation != "Main":
             result["simulation"] = self.simulation
         if self.replicates != 1:
             result["replicates"] = self.replicates
         if self.source_path:
             result["source_path"] = str(self.source_path)
+        if self.source_template_path:
+            result["source_template_path"] = str(self.source_template_path)
+        if self.template_vars:
+            result["template_vars"] = self.template_vars
         if self.sweep:
             result["sweep"] = self.sweep.to_dict()
         if self.file_mappings:
@@ -790,12 +876,18 @@ class JobConfig:
             kwargs["template_path"] = Path(data["template_path"])
         if "template_string" in data:
             kwargs["template_string"] = data["template_string"]
+        if "config_path" in data:
+            kwargs["config_path"] = Path(data["config_path"])
         if "simulation" in data:
             kwargs["simulation"] = data["simulation"]
         if "replicates" in data:
             kwargs["replicates"] = data["replicates"]
         if "source_path" in data:
             kwargs["source_path"] = Path(data["source_path"])
+        if "source_template_path" in data:
+            kwargs["source_template_path"] = Path(data["source_template_path"])
+        if "template_vars" in data:
+            kwargs["template_vars"] = data["template_vars"]
         if "sweep" in data:
             kwargs["sweep"] = SweepConfig.from_dict(data["sweep"])
         if "file_mappings" in data:
@@ -967,17 +1059,6 @@ class JobExpander:
         """
         _check_jinja2()
 
-        # Load template
-        if config.template_path:
-            template_dir = config.template_path.parent
-            template_name = config.template_path.name
-            env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
-            template = env.get_template(template_name)
-        elif config.template_string:
-            template = self.jinja_env.from_string(config.template_string)
-        else:
-            raise ValueError("Either template_path or template_string must be provided")
-
         # Create output directory
         if output_dir:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -985,6 +1066,42 @@ class JobExpander:
         else:
             temp_dir = Path(tempfile.mkdtemp(prefix="josh_sweep_"))
             output_dir = temp_dir
+
+        # Resolve source_template_path -> rendered .josh file
+        effective_source_path = config.source_path
+        if config.source_template_path:
+            template_dir = config.source_template_path.parent
+            template_name = config.source_template_path.name
+            env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
+            source_template = env.get_template(template_name)
+            rendered_josh = source_template.render(**config.template_vars)
+
+            # Write rendered .josh to output directory
+            rendered_josh_path = output_dir / config.source_template_path.stem
+            # Strip .j2 extension if present (e.g., model.josh.j2 -> model.josh)
+            if not rendered_josh_path.suffix:
+                rendered_josh_path = rendered_josh_path.with_suffix(".josh")
+            rendered_josh_path.write_text(rendered_josh)
+            effective_source_path = rendered_josh_path
+
+        # Load config template or raw config
+        template = None
+        raw_config_content: str | None = None
+
+        if config.template_path:
+            template_dir = config.template_path.parent
+            template_name = config.template_path.name
+            env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
+            template = env.get_template(template_name)
+        elif config.template_string:
+            template = self.jinja_env.from_string(config.template_string)
+        elif config.config_path:
+            raw_config_content = config.config_path.read_text()
+            config_name = config.config_path.name
+        else:
+            # No config source — produce empty config (valid for simulations
+            # that don't reference any config variables)
+            raw_config_content = ""
 
         # Get parameter combinations
         if config.sweep:
@@ -1023,12 +1140,18 @@ class JobExpander:
                     config_params[key] = value
                     custom_tags[str(key)] = str(value)
 
-            # Render template with config params only
-            rendered = template.render(**config_params)
+            # Render or use raw config content
+            if template is not None:
+                # Merge template_vars with sweep params (sweep params override)
+                render_vars = {**config.template_vars, **config_params}
+                rendered = template.render(**render_vars)
+            else:
+                # Raw config_path — no rendering
+                rendered = raw_config_content  # type: ignore[assignment]
 
             # Compute run_hash (includes josh + config + file_mappings)
             run_hash = _compute_run_hash(
-                josh_path=config.source_path,
+                josh_path=effective_source_path,
                 config_content=rendered,
                 file_mappings=file_mappings if file_mappings else None,
             )
@@ -1039,20 +1162,20 @@ class JobExpander:
             # Write config file
             config_subdir = output_dir / f"job_{i:04d}_{run_hash}"
             config_subdir.mkdir(parents=True, exist_ok=True)
-            config_path = config_subdir / config_name
-            config_path.write_text(rendered)
+            written_config_path = config_subdir / config_name
+            written_config_path.write_text(rendered)
 
             # Create expanded job
             # Note: config_name must include .jshc extension for --data flag
             job = ExpandedJob(
                 config_content=rendered,
-                config_path=config_path,
+                config_path=written_config_path,
                 config_name=config_name,
                 run_hash=run_hash,
                 parameters=config_params,  # Only config params here
                 simulation=config.simulation,
                 replicates=config.replicates,
-                source_path=config.source_path,
+                source_path=effective_source_path,
                 file_mappings=file_mappings,
                 custom_tags=custom_tags,
                 upload_source_path=config.upload_source_path,
