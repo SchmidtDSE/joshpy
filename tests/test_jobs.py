@@ -1956,7 +1956,7 @@ class TestConfigPath(unittest.TestCase):
     """Tests for config_path support (raw .jshc without templating)."""
 
     def test_expand_with_config_path(self):
-        """config_path should produce single job with file content."""
+        """config_path should produce single job with file content and auto-parsed params."""
         with tempfile.TemporaryDirectory() as tmpdir:
             config_file = Path(tmpdir) / "baseline.jshc"
             config_file.write_text("maxGrowth = 50 meters\nfireYear = 75 count")
@@ -1972,8 +1972,10 @@ class TestConfigPath(unittest.TestCase):
                 self.assertEqual(len(job_set), 1)
                 job = job_set.jobs[0]
                 self.assertEqual(job.config_content, "maxGrowth = 50 meters\nfireYear = 75 count")
-                self.assertEqual(job.parameters, {})
-                self.assertEqual(job.config_name, "baseline.jshc")
+                # Parameters are auto-parsed from .jshc content
+                self.assertEqual(job.parameters, {"maxGrowth": 50, "fireYear": 75})
+                # config_name is the logical Josh namespace (with .jshc appended)
+                self.assertEqual(job.config_name, "sweep_config.jshc")
             finally:
                 job_set.cleanup()
 
