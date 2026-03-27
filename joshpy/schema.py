@@ -19,8 +19,10 @@ CREATE TABLE IF NOT EXISTS job_configs (
     josh_path       TEXT,
     config_content  TEXT,
     file_mappings   JSON,
+    label           VARCHAR,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
 
 CREATE TABLE IF NOT EXISTS config_parameters (
     run_hash        VARCHAR(12) PRIMARY KEY REFERENCES job_configs(run_hash)
