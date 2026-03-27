@@ -13,11 +13,57 @@ who have completed at least one tutorial.
 
 **What this covers:**
 
-1. [DuckDB Schema & Querying](#duckdb-schema-querying-patterns) - Understanding the registry structure
-2. [Registry Lifecycle](#registry-lifecycle) - One registry per experiment
-3. [Preprocessing & Grid Alignment](#preprocessing-grid-alignment) - When to regenerate JSHD files
-4. [Error Diagnosis](#error-diagnosis) - Josh vs. joshpy vs. user responsibility
-5. [Additional Best Practices](#additional-best-practices) - Development workflow, templates, performance
+1. [Workflow Patterns](#workflow-patterns) - Ad-hoc iteration vs. systematic sweeps
+2. [DuckDB Schema & Querying](#duckdb-schema-querying-patterns) - Understanding the registry structure
+3. [Registry Lifecycle](#registry-lifecycle) - One registry per experiment
+4. [Preprocessing & Grid Alignment](#preprocessing-grid-alignment) - When to regenerate JSHD files
+5. [Error Diagnosis](#error-diagnosis) - Josh vs. joshpy vs. user responsibility
+6. [Additional Best Practices](#additional-best-practices) - Development workflow, templates, performance
+
+## Workflow Patterns
+
+joshpy supports two primary workflows. Both produce the same RunRegistry format --
+the difference is in how experiments are configured and compared.
+
+### Ad-hoc Iteration
+
+Run a model, tweak a config parameter, run again, compare by label. Best for
+exploratory research and debugging.
+
+```{mermaid}
+flowchart LR
+    GS[GridSpec] --> JC1["JobConfig<br/>(config_path)"]
+    JC1 --> SM1("SweepManager<br/>.with_label('baseline')")
+    SM1 --> RR[(RunRegistry)]
+
+    GS --> JC2["JobConfig<br/>(config_path, tweaked)"]
+    JC2 --> SM2("SweepManager<br/>.with_label('high_mortality')")
+    SM2 --> RR
+
+    RR --> Compare["plot_comparison(<br/>group_by='label')"]
+    RR --> Export["export_config() →<br/>IDE diff"]
+```
+
+See tutorial: [Single Run & Iteration](tutorials/manual-workflow.qmd)
+
+### Systematic Sweep
+
+Define a parameter space, sweep exhaustively or adaptively, compare by parameter
+value. Best for sensitivity analysis and calibration.
+
+```{mermaid}
+flowchart LR
+    GS[GridSpec] --> JC["JobConfig<br/>(template_path,<br/>SweepConfig)"]
+    JC --> SM("SweepManager<br/>.with_catalog(catalog)")
+    SM --> RR[(RunRegistry)]
+    SM -.-> PC[(ProjectCatalog)]
+
+    RR --> Compare["plot_comparison(<br/>group_by='maxGrowth')"]
+    PC --> Recall["list_experiments()<br/>find_experiment()<br/>open_registries()"]
+```
+
+See tutorials: [SweepManager Workflow](tutorials/sweep-manager.qmd),
+[Multi-Session Experiments](tutorials/multi-session-experiments.qmd)
 
 ## DuckDB Schema & Querying Patterns
 

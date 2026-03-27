@@ -11,10 +11,12 @@ As josh projects grow beyond a single simulation, you need conventions for
 organizing model files, configs, data, and results. This guide covers:
 
 1. **Recommended directory layout** for multi-grid, multi-model projects
-2. **Model templating** (`.josh.j2`) to avoid duplicating model files
-3. **Config templating** (`.jshc.j2`) vs raw config files (`.jshc`)
-4. **Data directory helpers** to reduce file-mapping boilerplate
-5. **Cross-experiment tracking** with `ProjectCatalog`
+2. **Grid specifications** (`GridSpec`) for managing grid geometry and data manifests
+3. **Model templating** (`.josh.j2`) to avoid duplicating model files
+4. **Config templating** (`.jshc.j2`) vs raw config files (`.jshc`)
+5. **Data directory helpers** to reduce file-mapping boilerplate
+6. **Run labels** for ad-hoc iteration and comparison
+7. **Cross-experiment tracking** with `ProjectCatalog`
 
 These features compose with `SweepManager` (see [SweepManager Workflow](sweep-manager.qmd))
 and work identically for local and remote execution.
@@ -33,6 +35,7 @@ my-josh-project/
 │   ├── raw/                           # Source GeoTIFF/NetCDF
 │   └── grids/
 │       ├── dev_fine/                   # One dir per grid definition
+│       │   ├── grid.yaml              # GridSpec manifest
 │       │   ├── cover.jshd
 │       │   ├── fire_rbr.jshd
 │       │   └── monthly/
@@ -43,7 +46,6 @@ my-josh-project/
 ├── experiments/                        # One registry per experiment
 │   ├── baseline_dev_fine.duckdb
 │   └── fire_sweep_test_fine.duckdb
-├── grid_configs.py                     # Grid template_vars definitions
 └── notebooks/
     ├── run.ipynb
     └── analysis.ipynb
@@ -53,66 +55,78 @@ my-josh-project/
 
 - **`models/`** -- One `.josh.j2` template per model variant, not one per grid.
 - **`configs/`** -- Raw `.jshc` files for single runs, `.jshc.j2` templates for sweeps.
-- **`data/grids/<grid_name>/`** -- All `.jshd` files for a grid in one directory. `discover_jshd_files()` reads from here.
+- **`data/grids/<grid_name>/`** -- All `.jshd` files for a grid, plus a `grid.yaml` manifest.
 - **`experiments/`** -- One `.duckdb` registry per experiment. Named descriptively.
-- **`grid_configs.py`** -- Plain Python dicts, no joshpy imports needed.
 
-## Grid Configurations
+## Grid Specifications (GridSpec)
 
-Grid-specific values (bounds, resolution, export paths, debug flags) are plain
-dicts that get passed as `template_vars`:
+Each grid permutation is defined by a `grid.yaml` file co-located with its data
+directory. This file declares grid geometry AND inventories the data files
+preprocessed for that grid:
+
+```yaml
+# data/grids/dev_fine/grid.yaml
+name: dev_fine
+grid:
+  size_m: 30
+  low: [33.902, -116.0465]
+  high: [33.908, -116.0395]
+  steps: 86
+
+files:
+  cover:
+    path: cover.jshd
+    units: percent
+  fireRbr:
+    path: fireRbr.jshd
+    units: rbr
+  futureTempJan:
+    path: monthly/futureTempJan.jshd
+    units: K
+```
+
+Load it and use directly in JobConfig:
 
 ```python
-# grid_configs.py
+from joshpy.grid import GridSpec
 
-GRIDS = {
-    "dev_fine": {
-        "simulation_name": "CanonicalDevFine",
-        "grid_size": 30,
-        "grid_low_lat": 33.902, "grid_low_lon": -116.0465,
-        "grid_high_lat": 33.908, "grid_high_lon": -116.0395,
-        "steps_high": 86,
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+config = JobConfig(
+    source_template_path=Path("models/canonical.josh.j2"),
+    template_vars={
+        **grid.template_vars,                    # grid geometry
+        "simulation_name": "CanonicalDevFine",   # model concern, not grid concern
         "export_prefix": "canonical_dev_fine",
         "debug": True,
     },
-    "test_fine": {
-        "simulation_name": "CanonicalTestFine",
-        "grid_size": 30,
-        "grid_low_lat": 33.5, "grid_low_lon": -116.4,
-        "grid_high_lat": 34.0, "grid_high_lon": -115.4,
-        "steps_high": 86,
-        "export_prefix": "canonical_test_fine",
-        "debug": False,
-    },
-}
+    file_mappings=grid.file_mappings,            # all .jshd files for this grid
+    config_path=Path("configs/baseline.jshc"),
+)
 ```
 
-These dicts have no dependency on joshpy. They're just data.
+GridSpec also handles preprocessing -- see the [Preprocessing](preprocessing.qmd)
+tutorial for details.
+
+For the ad-hoc iteration workflow (run, tweak, compare with labels), see the
+[Single Run & Iteration](manual-workflow.qmd) tutorial.
 
 ## Model Templating (.josh.j2)
 
-### The problem
-
-When the same model logic runs across multiple grid configurations, maintaining
-separate `.josh` files (one per grid) is error-prone. Any model logic change
-must be manually replicated across all copies. In practice this means copy-paste
-and subtle sync bugs.
-
-### The solution
-
-Use `source_template_path` to template the `.josh` file with Jinja2, just like
-`.jshc.j2` config templates. The template is rendered **once** with
+When the same model logic runs across multiple grid configurations, use
+`source_template_path` to template the `.josh` file with Jinja2 rather than
+maintaining separate copies. The template is rendered **once** with
 `template_vars` to produce a concrete `.josh` file.
 
 ```jinja
 {# models/canonical.josh.j2 #}
 
 start simulation {{ simulation_name }}
-  grid.size = {{ grid_size }} m
-  grid.low = {{ grid_low_lat }} degrees latitude, {{ grid_low_lon }} degrees longitude
-  grid.high = {{ grid_high_lat }} degrees latitude, {{ grid_high_lon }} degrees longitude
+  grid.size = {{ size_m }} m
+  grid.low = {{ low_lat }} degrees latitude, {{ low_lon }} degrees longitude
+  grid.high = {{ high_lat }} degrees latitude, {{ high_lon }} degrees longitude
   steps.low = 0 count
-  steps.high = {{ steps_high }} count
+  steps.high = {{ steps }} count
 
   exportFiles.patch = "file:///outputs/{{ export_prefix }}_{replicate}_{run_hash}.csv"
   {% if debug %}

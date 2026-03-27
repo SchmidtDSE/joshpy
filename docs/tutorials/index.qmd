@@ -4,135 +4,28 @@ title: "Tutorials"
 
 Step-by-step guides for learning joshpy.
 
-## Orchestration
+## Getting Started
 
-Tutorials for running parameter sweeps and managing simulations.
+### [Single Run & Iteration](manual-workflow.qmd)
 
-### [Manual Workflow](manual-workflow.qmd)
+The essential workflow: run a simulation, tweak parameters, compare results.
 
-Learn each component of joshpy by using them directly:
+- Load a `GridSpec` for grid geometry and data files
+- Use raw `.jshc` config files with auto-parsed parameters
+- Label runs with `.with_label()` for easy comparison
+- Compare with `plot_comparison(group_by="label")`
 
-- `JobConfig`, `SweepConfig`, `SweepParameter` for configuration
-- `JobExpander` for expanding parameter combinations
-- `RunRegistry` for experiment tracking
-- `run_sweep()` for execution
-
-Best for: Understanding how joshpy works under the hood.
+Best for: Day-to-day research iteration. **Start here.**
 
 ### [SweepManager Workflow](sweep-manager.qmd)
 
-Use the high-level `SweepManager` class that handles:
+Systematic parameter sweeps using `SweepManager`:
 
-- Expansion, execution, and result collection
-- Automatic registry management
-- Context manager for cleanup
+- Builder pattern for configuration
+- Automatic registry management and result loading
+- Cartesian product of parameter combinations
 
-Best for: Production workflows where you want simplicity.
-
-### [Project Organization](project-organization.qmd)
-
-Structure multi-grid, multi-model projects with minimal boilerplate:
-
-- Recommended directory layout
-- `.josh.j2` model templates to avoid file duplication
-- `config_path` for raw `.jshc` files (single runs, no Jinja)
-- `discover_jshd_files()` for auto-building data mappings
-- Grid configs as reusable dicts
-
-Best for: Real projects with multiple grids, data directories, or model variants.
-
-### [Adaptive Parameter Optimization](adaptive-sweep.qmd)
-
-Use Optuna's Bayesian optimization for intelligent parameter search:
-
-- `OptunaStrategy` for adaptive sampling
-- Objective functions for optimization
-- Efficient exploration of large parameter spaces
-
-Best for: Finding optimal parameters without exhaustive grid search.
-
-### [Switching Josh Versions](switching-versions.qmd)
-
-Switch between stable, development, and custom Josh builds:
-
-- Use stable (PROD) for reliable production runs
-- Use development (DEV) to test latest features
-- Custom builds for Josh team development
-
-Best for: Testing new Josh features or pinning versions for reproducibility.
-
-### [Running on Josh Cloud](remote-execution.qmd)
-
-Distribute simulations across Josh Cloud for parallel execution:
-
-- Free community infrastructure from DSE
-- Replicates run in parallel on cloud workers
-- Local JAR coordinates, cloud does computation
-
-Best for: Large sweeps where local execution would be too slow.
-
-## External Data
-
-Tutorials for working with external geospatial data.
-
-### [Preprocessing External Data](preprocessing.qmd)
-
-Convert geospatial data to Josh's optimized `.jshd` format:
-
-- Create synthetic test data with spatial patterns
-- Preprocess NetCDF files with `cli.preprocess()`
-- Verify data with `load_jshd()`
-
-Best for: Preparing external data for simulations.
-
-### [Sweeping Over External Data](external-data-sweep.qmd)
-
-Run simulations with different input data files:
-
-- Use `external` keyword in Josh simulations
-- `FileSweepParameter` for data file sweeps
-- Visualize how input patterns affect outputs
-
-Best for: Comparing climate scenarios, sensitivity to input data.
-
-### [Timestep Interventions](timestep-interventions.qmd)
-
-Use single-time external data for initialization and discrete events:
-
-- Initialize populations from spatial inventory data (init-time)
-- Apply disturbance events at specific timesteps (fire severity)
-- Conditional logic with `meta.stepCount`
-
-Best for: Initial conditions from COGs, discrete disturbance events.
-
-## Debugging
-
-Tutorials for tracing, inspecting, and profiling simulations.
-
-### [Debug Output Inspection](debug-inspection.qmd)
-
-Trace agent behavior with structured debug log analysis:
-
-- Parse and filter debug output programmatically
-- `python -m joshpy.debug` CLI with colored terminal output
-- Auto-discover debug paths from `.josh` scripts
-- Trace individual entities across timesteps
-
-Best for: Understanding why agents behave a certain way, debugging simulation logic.
-
-### [JVM Profiling with Flight Recorder](jfr-profiling.qmd)
-
-Diagnose performance issues using Java Flight Recorder (JFR):
-
-- Enable JFR on any CLI operation with `JfrConfig`
-- Get text summaries with `summarize_jfr()` (no IDE needed)
-- Attach `.jfr` files to GitHub issues for detailed analysis
-
-Best for: Diagnosing slow simulations or preprocessing, reporting performance issues.
-
-## Analysis
-
-Tutorials for exploring and visualizing results.
+Best for: When you know what to sweep and want to cover the space.
 
 ### [Analysis & Visualization](analysis.qmd)
 
@@ -146,31 +39,140 @@ Explore and visualize simulation results:
 
 Best for: Understanding the analysis layer (works with any registry).
 
+## External Data
+
+### [Preprocessing External Data](preprocessing.qmd)
+
+Convert geospatial data to Josh's optimized `.jshd` format:
+
+- Preprocess NetCDF, GeoTIFF, and CSV files with `cli.preprocess()`
+- Verify data with `load_jshd()`
+- Spatial alignment to simulation grids
+
+Best for: Preparing climate, land cover, or other external data.
+
+### [Sweeping Over External Data](external-data-sweep.qmd)
+
+Run simulations with different input data files:
+
+- `FileSweepParameter` for data file sweeps
+- `CompoundSweepParameter` for co-varying file groups
+- Compare scenarios (e.g., SSP126 vs SSP245)
+
+Best for: Comparing climate scenarios, sensitivity to input data.
+
+### [Timestep Interventions](timestep-interventions.qmd)
+
+Use single-time external data for initialization and discrete events:
+
+- Initialize populations from spatial inventory data
+- Apply disturbance events at specific timesteps
+- Conditional logic with `meta.stepCount`
+
+Best for: Initial conditions from COGs, discrete disturbance events.
+
+## Project Structure
+
+### [Project Organization](project-organization.qmd)
+
+Structure multi-grid, multi-model projects:
+
+- Recommended directory layout
+- `GridSpec` for grid geometry and data manifests
+- `.josh.j2` model templates to avoid file duplication
+
+Best for: Real projects with multiple grids or model variants.
+
+### [Multi-Session Experiments](multi-session-experiments.qmd)
+
+Track labeled ad-hoc runs across sessions with `ProjectCatalog`:
+
+- Accumulate runs in a shared registry across sessions
+- Find past registries via the catalog
+- Compare labeled runs with `group_by="label"`
+
+Best for: Iterative research where you tweak and compare across days.
+
+### [Multi-Session Sweeps](multi-session-sweeps.qmd)
+
+Track parameter sweeps across sessions with `ProjectCatalog`:
+
+- One registry per sweep, catalog indexes them all
+- Deduplication: check if a sweep was already run
+- Recall past sweep registries for analysis
+
+Best for: Projects with multiple systematic sweeps to keep organized.
+
+## Debugging & Profiling
+
+### [Debug Output Inspection](debug-inspection.qmd)
+
+Trace agent behavior with structured debug log analysis:
+
+- Parse and filter debug output programmatically
+- `python -m joshpy.debug` CLI with colored terminal output
+- Trace individual entities across timesteps
+
+Best for: Understanding why agents behave a certain way.
+
+### [JVM Profiling with Flight Recorder](jfr-profiling.qmd)
+
+Diagnose performance issues using Java Flight Recorder (JFR):
+
+- Enable JFR on any CLI operation with `JfrConfig`
+- Text summaries with `summarize_jfr()` (no IDE needed)
+
+Best for: Diagnosing slow simulations or preprocessing.
+
+## Advanced
+
+### [Adaptive Parameter Optimization](adaptive-sweep.qmd)
+
+Use Optuna's Bayesian optimization for intelligent parameter search:
+
+- `OptunaStrategy` for adaptive sampling
+- Custom objective functions
+- Efficient exploration of large parameter spaces
+
+Best for: Finding optimal parameters without exhaustive grid search.
+
+### [Low-Level Components](low-level-components.qmd)
+
+Use joshpy's individual components directly:
+
+- `JobExpander` for manual job expansion
+- `RunRegistry` for direct registry management
+- `run_sweep()` for custom execution loops
+
+Best for: Understanding internals or building custom workflows.
+
+### [Switching Josh Versions](switching-versions.qmd)
+
+Switch between stable, development, and custom Josh builds.
+
+Best for: Testing new Josh features or pinning versions.
+
+### [Running on Josh Cloud](remote-execution.qmd)
+
+Distribute simulations across Josh Cloud for parallel execution.
+
+Best for: Large sweeps where local execution would be too slow.
+
 ## Prerequisites
 
 All tutorials assume:
 
-1. joshpy is installed with all dependencies: `pip install joshpy[all]`
+1. joshpy is installed with all dependencies: `pip install joshpy[full]`
 2. Josh JAR is available (auto-downloaded if needed)
 3. Java 17+ is installed
 
 ## Recommended Order
 
-**Getting Started:**
-
-1. [Manual Workflow](manual-workflow.qmd) - understand the components
-2. [SweepManager](sweep-manager.qmd) - see the simplified workflow
-3. [Project Organization](project-organization.qmd) - directory layout, templates, data helpers
-4. [Analysis](analysis.qmd) - learn visualization patterns
-
-**Advanced Topics:**
-
-5. [Switching Josh Versions](switching-versions.qmd) - use stable vs development builds
-6. [Running on Josh Cloud](remote-execution.qmd) - parallel cloud execution
-7. [Preprocessing](preprocessing.qmd) - work with external geospatial data
-8. [External Data Sweeps](external-data-sweep.qmd) - sweep over data files
-9. [Timestep Interventions](timestep-interventions.qmd) - init-time and discrete event data
-10. [Adaptive Optimization](adaptive-sweep.qmd) - intelligent parameter search
+1. [Single Run & Iteration](manual-workflow.qmd) -- the tinkering workflow
+2. [SweepManager](sweep-manager.qmd) -- systematic parameter sweeps
+3. [Analysis](analysis.qmd) -- visualization and queries
+4. [Project Organization](project-organization.qmd) -- multi-grid/model structure
+5. [Preprocessing](preprocessing.qmd) -- external geospatial data
 
 **Reference:**
 
