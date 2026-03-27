@@ -47,6 +47,9 @@ from joshpy.jshd import (
     plot_jshd,
 )
 
+# Config parser (always available, no external deps)
+from joshpy.config_parser import parse_jshc, parse_jshc_content
+
 # Debug log parsing module (always available)
 from joshpy.debug import (
     DebugMessage,
@@ -89,6 +92,8 @@ try:
         get_exit_code_diagnostic,
         cv_objective,
     )
+    from joshpy.grid import GridSpec
+
     HAS_JOBS = True
 except ImportError:
     HAS_JOBS = False
@@ -171,6 +176,9 @@ __all__ = [
     "JshdData",
     "load_jshd",
     "plot_jshd",
+    # Config parser
+    "parse_jshc",
+    "parse_jshc_content",
     # Debug log parsing
     "DebugMessage",
     "DebugMessageStore",
@@ -194,6 +202,7 @@ __all__ = [
     "to_run_remote_config",
     "run_sweep",
     "discover_jshd_files",
+    "GridSpec",
     "HAS_JOBS",
     # Strategies (optional, part of jobs)
     "SweepStrategy",
