@@ -1,0 +1,5 @@
+# High growth configuration for iteration tutorial
+# Same as baseline but with maxGrowth increased from 50 to 100
+
+initialTreeCount = 10 count
+maxGrowth = 100 meters
