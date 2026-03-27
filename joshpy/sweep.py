@@ -794,6 +794,7 @@ class SweepManagerBuilder:
         self._owns_cli = False
         self._catalog: Any | None = None  # ProjectCatalog
         self._catalog_experiment_name: str | None = None
+        self._label: str | None = None
 
     def with_registry(
         self,
@@ -924,6 +925,29 @@ class SweepManagerBuilder:
         self._catalog_experiment_name = experiment_name
         return self
 
+    def with_label(self, label: str) -> SweepManagerBuilder:
+        """Set a label for this run (single-job configs only).
+
+        The label is applied at build() time when the job is registered.
+        For multi-job sweeps, raises ValueError at build() time.
+
+        Args:
+            label: Human-readable label for this run.
+
+        Returns:
+            Self for chaining.
+
+        Examples:
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_registry("experiment.duckdb")
+            ...     .with_label("baseline")
+            ...     .build()
+            ... )
+        """
+        self._label = label
+        return self
+
     def build(self) -> SweepManager:
         """Build the SweepManager instance.
 
@@ -993,10 +1017,22 @@ class SweepManagerBuilder:
                         parameters=job.parameters,
                     )
 
+                # Apply label if set
+                if self._label is not None:
+                    if len(job_set.jobs) != 1:
+                        raise ValueError(
+                            f"with_label() requires a single-job config, but this "
+                            f"config expands to {len(job_set.jobs)} jobs. Label "
+                            f"individual runs via registry.label_run()."
+                        )
+                    self._registry.label_run(
+                        job_set.jobs[0].run_hash, self._label
+                    )
+
         # Register with catalog if configured
         experiment_id = None
         if self._catalog is not None:
-            registry_path = self._registry.path if hasattr(self._registry, "path") else ""
+            registry_path = str(self._registry.db_path) if hasattr(self._registry, "db_path") else ""
             experiment_id = self._catalog.register_experiment(
                 config=self._config,
                 registry_path=registry_path,
