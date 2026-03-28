@@ -1,0 +1,228 @@
+---
+title: "Multi-Session Sweeps"
+description: "Track parameter sweeps across sessions with ProjectCatalog"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Overview
+
+When running parameter sweeps across multiple sessions -- a baseline sweep today,
+a wider sweep tomorrow -- the **ProjectCatalog** keeps track of what's been run
+and prevents duplicate work.
+
+Unlike [ad-hoc iteration](multi-session-experiments.qmd) where runs accumulate in
+a single registry, each sweep typically gets its own registry. The catalog indexes
+them all.
+
+## Setup
+
+```{python}
+#| echo: false
+import os
+for f in ["sweep_catalog.duckdb", "sweep_baseline.duckdb", "sweep_wide.duckdb",
+          "sweep_baseline.duckdb.wal", "sweep_wide.duckdb.wal"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+```{python}
+from pathlib import Path
+
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.catalog import ProjectCatalog
+
+SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
+TEMPLATE_PATH = Path("../../examples/templates/sweep_config.jshc.j2")
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+catalog = ProjectCatalog("sweep_catalog.duckdb")
+```
+
+## Session 1: Baseline Sweep
+
+A focused sweep over a narrow parameter range:
+
+```{python}
+config_baseline = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=2,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[25, 50, 75]),
+        ],
+    ),
+)
+
+manager = (
+    SweepManager.builder(config_baseline)
+    .with_registry("sweep_baseline.duckdb", experiment_name="baseline_sweep")
+    .with_cli(cli)
+    .with_catalog(catalog, experiment_name="baseline_sweep")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"Baseline sweep: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        raise RuntimeError("Sweep failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+### Analyze within this sweep
+
+Each sweep is self-contained -- analyze it with its own registry:
+
+```{python}
+#| label: fig-baseline-sweep
+#| fig-cap: "Baseline sweep: average height across maxGrowth values."
+
+from joshpy.registry import RunRegistry
+from joshpy.diagnostics import SimulationDiagnostics
+
+registry = RunRegistry("sweep_baseline.duckdb")
+diag = SimulationDiagnostics(registry)
+diag.plot_comparison("averageHeight", group_by="maxGrowth",
+                     title="Baseline Sweep")
+registry.close()
+```
+
+## Session 2: Wider Sweep
+
+Based on the baseline results, you decide to explore higher values:
+
+```{python}
+config_wide = JobConfig(
+    template_path=TEMPLATE_PATH,
+    source_path=SOURCE_PATH,
+    simulation="Main",
+    replicates=2,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[100, 150, 200]),
+        ],
+    ),
+)
+
+manager = (
+    SweepManager.builder(config_wide)
+    .with_registry("sweep_wide.duckdb", experiment_name="wide_sweep")
+    .with_cli(cli)
+    .with_catalog(catalog, experiment_name="wide_sweep")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"Wide sweep: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        raise RuntimeError("Sweep failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+## Session 3: Recall What's Been Done
+
+The catalog tells you what sweeps exist across all sessions:
+
+```{python}
+catalog = ProjectCatalog("sweep_catalog.duckdb")
+
+experiments = catalog.list_experiments()
+print(f"Registered experiments: {len(experiments)}\n")
+for exp in experiments:
+    print(f"  {exp.name}")
+    print(f"    status: {exp.status}")
+    print(f"    registry: {exp.registry_path}")
+    print()
+```
+
+### Check before re-running
+
+```{python}
+existing = catalog.find_experiment(config_baseline)
+if existing:
+    print(f"Already run: '{existing.name}'")
+    print(f"  Results at: {existing.registry_path}")
+    print(f"  Status: {existing.status}")
+else:
+    print("Not yet run")
+```
+
+### Open a past registry
+
+```{python}
+#| label: fig-wide-sweep
+#| fig-cap: "Wide sweep results, opened from a later session."
+
+# Find the wide sweep and open its registry
+wide_exp = [e for e in experiments if e.name == "wide_sweep"][0]
+registry = RunRegistry(wide_exp.registry_path)
+diag = SimulationDiagnostics(registry)
+diag.plot_comparison("averageHeight", group_by="maxGrowth",
+                     title="Wide Sweep (recalled from catalog)")
+registry.close()
+```
+
+## Key Concepts
+
+### One registry per sweep
+
+Each sweep produces a self-contained registry. Analysis happens within that
+registry using `group_by="maxGrowth"` (or whatever parameter was swept).
+You don't need cross-experiment queries for sweep analysis.
+
+### Catalog as bookkeeper
+
+The catalog answers project-level questions:
+
+- `list_experiments()` -- What sweeps have been run?
+- `find_experiment(config)` -- Has this exact sweep been run before?
+- `exp.registry_path` -- Where are the results?
+
+### When to use ad-hoc vs sweep multi-session
+
+| Pattern | Multiple runs → same registry | Multiple sweeps → separate registries |
+|---------|------------------------------|--------------------------------------|
+| **Use case** | Exploratory tinkering | Systematic parameter exploration |
+| **Comparison** | `group_by="label"` | `group_by="maxGrowth"` |
+| **Catalog role** | Find the iteration registry | Index all sweep registries |
+| **Tutorial** | [Multi-Session Experiments](multi-session-experiments.qmd) | This page |
+
+## Next Steps
+
+- [Multi-Session Experiments](multi-session-experiments.qmd) -- Ad-hoc iteration across sessions
+- [SweepManager Workflow](sweep-manager.qmd) -- In-depth sweep tutorial
+- [Architecture](../architecture.qmd) -- How all abstractions fit together
+
+## Cleanup
+
+```{python}
+catalog.close()
+```
+
+```{python}
+#| echo: false
+import os
+for f in ["sweep_catalog.duckdb", "sweep_baseline.duckdb", "sweep_wide.duckdb",
+          "sweep_baseline.duckdb.wal", "sweep_wide.duckdb.wal"]:
+    if os.path.exists(f):
+        os.remove(f)
+```

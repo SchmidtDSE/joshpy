@@ -503,7 +503,14 @@ class SimulationDiagnostics:
         export_vars = self.registry.list_export_variables()
 
         needs_config_params = False  # Whether we need to join config_parameters
-        if group_by in config_params:
+        needs_job_configs = False  # Whether we need to join job_configs
+        label_filter = ""  # Extra WHERE clause for label grouping
+        if group_by == "label":
+            group_source = "label"
+            group_expr = "jc.label"
+            needs_job_configs = True
+            label_filter = " AND jc.label IS NOT NULL"
+        elif group_by in config_params:
             group_source = "config_parameter"
             group_expr = f"cp.{_quote_identifier(group_by)}"
             needs_config_params = True
@@ -515,7 +522,8 @@ class SimulationDiagnostics:
             raise ValueError(
                 f"'{group_by}' not found.\n"
                 f"  Config parameters: {config_params}\n"
-                f"  Export variables: {export_vars}"
+                f"  Export variables: {export_vars}\n"
+                f"  (Also supported: 'label' for run labels)"
             )
 
         agg_func = aggregate.upper()
@@ -538,10 +546,11 @@ class SimulationDiagnostics:
         where_clause = ""
         if param_conditions:
             where_clause = " AND " + " AND ".join(param_conditions)
+        where_clause += label_filter
 
         # Build join clauses
         join_clause = ""
-        if session_id or param_conditions:
+        if session_id or param_conditions or needs_job_configs:
             join_clause += "JOIN job_configs jc ON cd.run_hash = jc.run_hash\n"
         if needs_config_params:
             join_clause += "JOIN config_parameters cp ON cd.run_hash = cp.run_hash\n"

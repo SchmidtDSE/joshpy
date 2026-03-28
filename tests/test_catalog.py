@@ -391,5 +391,59 @@ class TestProjectCatalogLifecycle(unittest.TestCase):
                 self.assertEqual(info.name, "persistent")
 
 
+class TestGetFileMappings(unittest.TestCase):
+    """Tests for ProjectCatalog.get_file_mappings()."""
+
+    def test_get_file_mappings_by_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = Path(tmpdir) / "cover.jshd"
+            f1.write_bytes(b"cover data")
+            f2 = Path(tmpdir) / "fire.jshd"
+            f2.write_bytes(b"fire data")
+
+            catalog = ProjectCatalog(":memory:")
+            mappings = {"cover": f1, "fire": f2}
+            catalog.register_data(mappings, name="dev_fine")
+
+            result = catalog.get_file_mappings("dev_fine")
+            self.assertEqual(set(result.keys()), {"cover", "fire"})
+            self.assertEqual(result["cover"], f1.resolve())
+            catalog.close()
+
+    def test_get_file_mappings_by_hash(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = Path(tmpdir) / "data.jshd"
+            f1.write_bytes(b"test data")
+
+            catalog = ProjectCatalog(":memory:")
+            mappings = {"data": f1}
+            manifest_hash = catalog.register_data(mappings, name="test")
+
+            result = catalog.get_file_mappings(manifest_hash)
+            self.assertEqual(set(result.keys()), {"data"})
+            catalog.close()
+
+    def test_get_file_mappings_missing(self):
+        catalog = ProjectCatalog(":memory:")
+        with self.assertRaises(KeyError):
+            catalog.get_file_mappings("nonexistent")
+        catalog.close()
+
+    def test_get_file_mappings_file_deleted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f1 = Path(tmpdir) / "data.jshd"
+            f1.write_bytes(b"test data")
+
+            catalog = ProjectCatalog(":memory:")
+            catalog.register_data({"data": f1}, name="test")
+
+            # Delete the file
+            f1.unlink()
+
+            with self.assertRaises(FileNotFoundError):
+                catalog.get_file_mappings("test")
+            catalog.close()
+
+
 if __name__ == "__main__":
     unittest.main()

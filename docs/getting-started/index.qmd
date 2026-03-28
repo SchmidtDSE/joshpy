@@ -16,9 +16,9 @@ sweep in under 5 minutes.
 
 ## Next Steps
 
-After completing the quickstart, explore the [Tutorials](../tutorials/index.qmd)
-for more in-depth workflows:
+After completing the quickstart:
 
-- [Manual Workflow](../tutorials/manual-workflow.qmd) - Full control over each step
-- [SweepManager](../tutorials/sweep-manager.qmd) - Simplified high-level interface
-- [Analysis & Visualization](../tutorials/analysis.qmd) - Explore and visualize results
+1. Read [Architecture](../architecture.qmd) to understand how joshpy's abstractions fit together
+2. Follow [Single Run & Iteration](../tutorials/manual-workflow.qmd) for the daily research workflow
+3. Try [SweepManager](../tutorials/sweep-manager.qmd) for systematic parameter sweeps
+4. See [Analysis & Visualization](../tutorials/analysis.qmd) to explore results

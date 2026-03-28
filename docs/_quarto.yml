@@ -19,7 +19,11 @@ project:
     - tutorials/debug-inspection.qmd     # Debug output inspection
     - tutorials/jfr-profiling.qmd       # JVM profiling with Flight Recorder
     - tutorials/switching-versions.qmd   # Josh version switching
+    - tutorials/multi-session-experiments.qmd # ProjectCatalog for ad-hoc runs
+    - tutorials/multi-session-sweeps.qmd    # ProjectCatalog for sweeps
     - tutorials/remote-execution.qmd     # Josh Cloud execution
+    - tutorials/low-level-components.qmd # Advanced: manual component usage
+    - architecture.qmd
     - best-practices.qmd
     - reference/
 
@@ -34,17 +38,13 @@ website:
       - text: "Tutorials"
         menu:
           - text: "---"
-          - text: "Orchestration"
-          - text: "Manual Workflow"
+          - text: "Getting Started"
+          - text: "Single Run & Iteration"
             href: tutorials/manual-workflow.qmd
           - text: "SweepManager"
             href: tutorials/sweep-manager.qmd
-          - text: "Project Organization"
-            href: tutorials/project-organization.qmd
-          - text: "Switching Josh Versions"
-            href: tutorials/switching-versions.qmd
-          - text: "Remote Runs in Parallel"
-            href: tutorials/remote-execution.qmd
+          - text: "Analysis & Visualization"
+            href: tutorials/analysis.qmd
           - text: "---"
           - text: "External Data"
           - text: "Preprocessing"
@@ -54,19 +54,29 @@ website:
           - text: "Timestep Interventions"
             href: tutorials/timestep-interventions.qmd
           - text: "---"
-          - text: "Optimization"
+          - text: "Project Structure"
+          - text: "Project Organization"
+            href: tutorials/project-organization.qmd
+          - text: "Multi-Session Experiments"
+            href: tutorials/multi-session-experiments.qmd
+          - text: "Multi-Session Sweeps"
+            href: tutorials/multi-session-sweeps.qmd
+          - text: "---"
+          - text: "Advanced"
           - text: "Adaptive Sweeps"
             href: tutorials/adaptive-sweep.qmd
-          - text: "---"
-          - text: "Debugging"
+          - text: "Low-Level Components"
+            href: tutorials/low-level-components.qmd
           - text: "Debug Output Inspection"
             href: tutorials/debug-inspection.qmd
           - text: "JVM Profiling (JFR)"
             href: tutorials/jfr-profiling.qmd
-          - text: "---"
-          - text: "Analysis"
-          - text: "Analysis & Visualization"
-            href: tutorials/analysis.qmd
+          - text: "Switching Josh Versions"
+            href: tutorials/switching-versions.qmd
+          - text: "Remote Execution"
+            href: tutorials/remote-execution.qmd
+      - text: "Architecture"
+        href: architecture.qmd
       - text: "Best Practices"
         href: best-practices.qmd
       - text: "Reference"
@@ -88,29 +98,36 @@ website:
     - title: "Tutorials"
       contents:
         - tutorials/index.qmd
-        - section: "Orchestration"
+        - section: "Getting Started"
           contents:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
-            - tutorials/project-organization.qmd
-            - tutorials/switching-versions.qmd
-            - tutorials/remote-execution.qmd
+            - tutorials/analysis.qmd
         - section: "External Data"
           contents:
             - tutorials/preprocessing.qmd
             - tutorials/external-data-sweep.qmd
             - tutorials/timestep-interventions.qmd
-        - section: "Optimization"
+        - section: "Project Structure"
           contents:
-            - tutorials/adaptive-sweep.qmd
-        - section: "Debugging"
+            - tutorials/project-organization.qmd
+            - tutorials/multi-session-experiments.qmd
+            - tutorials/multi-session-sweeps.qmd
+        - section: "Debugging & Profiling"
           contents:
             - tutorials/debug-inspection.qmd
             - tutorials/jfr-profiling.qmd
-        - section: "Analysis"
+        - section: "Advanced"
           contents:
-            - tutorials/analysis.qmd
+            - tutorials/adaptive-sweep.qmd
+            - tutorials/low-level-components.qmd
+            - tutorials/switching-versions.qmd
+            - tutorials/remote-execution.qmd
     
+    - title: "Architecture"
+      contents:
+        - architecture.qmd
+
     - title: "Best Practices"
       contents:
         - best-practices.qmd

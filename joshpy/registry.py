@@ -38,6 +38,7 @@ Example usage:
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -69,6 +70,30 @@ def _check_duckdb() -> None:
         raise ImportError(
             "duckdb is required for the registry module. Install with: pip install joshpy[registry]"
         )
+
+
+def _get_git_hash() -> str | None:
+    """Get current git HEAD hash, or None if not in a git repo."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        head = result.stdout.strip()
+        if not head or result.returncode != 0:
+            return None
+        dirty_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        dirty = dirty_result.stdout.strip()
+        return f"{head[:12]}+dirty" if dirty else head[:12]
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
 
 
 # Sparsity warning thresholds (configurable module globals)
@@ -205,6 +230,7 @@ class ConfigInfo:
         config_content: Full text content of the configuration.
         file_mappings: Dict mapping names to {"path": "...", "hash": "..."}.
         parameters: Parameter values used to generate this config.
+        label: Optional human-readable label for this run.
         created_at: When the config was registered.
     """
 
@@ -214,6 +240,7 @@ class ConfigInfo:
     config_content: str
     file_mappings: dict[str, dict[str, str]] | None
     parameters: dict[str, Any]
+    label: str | None
     created_at: datetime
 
 
@@ -453,6 +480,7 @@ class RunRegistry:
             db_str = str(self.db_path)
             self._conn = duckdb.connect(db_str)
             self._init_schema()
+            self._migrate_schema()
             if self.enable_spatial:
                 self._init_spatial()
 
@@ -471,6 +499,14 @@ class RunRegistry:
     def _init_schema(self) -> None:
         """Create database schema if it doesn't exist."""
         self._conn.execute(SCHEMA_SQL)
+
+    def _migrate_schema(self) -> None:
+        """Apply schema migrations for forward compatibility with older databases."""
+        # Add label column to job_configs if missing (added in v0.X)
+        try:
+            self._conn.execute("SELECT label FROM job_configs LIMIT 0")
+        except Exception:
+            self._conn.execute("ALTER TABLE job_configs ADD COLUMN label VARCHAR")
 
     def _init_spatial(self) -> None:
         """Initialize DuckDB spatial extension and geometry column."""
@@ -738,6 +774,9 @@ class RunRegistry:
 
         # Auto-compute metadata from config
         metadata = {"job_config": config.to_dict()}
+        git_hash = _get_git_hash()
+        if git_hash:
+            metadata["git_hash"] = git_hash
         metadata_json = json.dumps(metadata)
 
         self.conn.execute(
@@ -966,7 +1005,8 @@ class RunRegistry:
         """
         result = self.conn.execute(
             """
-            SELECT run_hash, session_id, josh_path, config_content, file_mappings, created_at
+            SELECT run_hash, session_id, josh_path, config_content,
+                   file_mappings, label, created_at
             FROM job_configs
             WHERE run_hash = ?
             """,
@@ -986,7 +1026,8 @@ class RunRegistry:
             config_content=result[3],
             file_mappings=json.loads(result[4]) if result[4] else None,
             parameters=parameters,
-            created_at=result[5],
+            label=result[5],
+            created_at=result[6],
         )
 
     def get_configs_for_session(self, session_id: str) -> list[ConfigInfo]:
@@ -1001,7 +1042,8 @@ class RunRegistry:
         # First get the run_hashes and basic config info
         result = self.conn.execute(
             """
-            SELECT run_hash, session_id, josh_path, config_content, file_mappings, created_at
+            SELECT run_hash, session_id, josh_path, config_content,
+                   file_mappings, label, created_at
             FROM job_configs
             WHERE session_id = ?
             ORDER BY created_at
@@ -1021,10 +1063,119 @@ class RunRegistry:
                     config_content=row[3],
                     file_mappings=json.loads(row[4]) if row[4] else None,
                     parameters=parameters,
-                    created_at=row[5],
+                    label=row[5],
+                    created_at=row[6],
                 )
             )
         return configs
+
+    # ========== Labels ==========
+
+    def label_run(self, run_hash: str, label: str, force: bool = False) -> None:
+        """Assign a human-readable label to a run configuration.
+
+        Labels are unique within a registry. Use ``force=True`` to reassign
+        a label that is already in use.
+
+        Args:
+            run_hash: The run hash to label.
+            label: Human-readable label (e.g., "baseline", "high_mortality").
+            force: If True, reassign the label even if already taken.
+
+        Raises:
+            KeyError: If run_hash does not exist.
+            ValueError: If label is already assigned to a different run
+                and force is False.
+        """
+        # Verify run_hash exists
+        existing = self.conn.execute(
+            "SELECT run_hash FROM job_configs WHERE run_hash = ?", [run_hash]
+        ).fetchone()
+        if existing is None:
+            raise KeyError(f"No run found with hash '{run_hash}'")
+
+        # Check if label is already taken
+        taken = self.conn.execute(
+            "SELECT run_hash FROM job_configs WHERE label = ?", [label]
+        ).fetchone()
+        if taken is not None and taken[0] != run_hash:
+            if not force:
+                raise ValueError(
+                    f"Label '{label}' already assigned to run {taken[0]}. "
+                    f"Use force=True to reassign, or choose a different label."
+                )
+            # Clear old assignment
+            self.conn.execute(
+                "UPDATE job_configs SET label = NULL WHERE label = ?", [label]
+            )
+
+        self.conn.execute(
+            "UPDATE job_configs SET label = ? WHERE run_hash = ?", [label, run_hash]
+        )
+
+    def list_labels(self) -> list[tuple[str, str]]:
+        """List all labeled runs.
+
+        Returns:
+            List of (label, run_hash) tuples, sorted by label.
+        """
+        result = self.conn.execute(
+            "SELECT label, run_hash FROM job_configs "
+            "WHERE label IS NOT NULL ORDER BY label"
+        ).fetchall()
+        return [(row[0], row[1]) for row in result]
+
+    def resolve_label(self, label: str) -> str:
+        """Get the run_hash for a labeled run.
+
+        Args:
+            label: The label to look up.
+
+        Returns:
+            The run_hash associated with the label.
+
+        Raises:
+            KeyError: If no run has this label.
+        """
+        result = self.conn.execute(
+            "SELECT run_hash FROM job_configs WHERE label = ?", [label]
+        ).fetchone()
+        if result is None:
+            raise KeyError(f"No run found with label '{label}'")
+        return result[0]
+
+    def export_config(self, label_or_hash: str, output_dir: str | Path) -> Path:
+        """Export a run's config content to a file for IDE diffing.
+
+        Resolves by label first, falls back to run_hash.
+
+        Args:
+            label_or_hash: Label or run_hash to look up.
+            output_dir: Directory to write the config file to.
+
+        Returns:
+            Path to the written file.
+
+        Raises:
+            KeyError: If no matching run is found.
+        """
+        # Try label first, fall back to hash
+        try:
+            run_hash = self.resolve_label(label_or_hash)
+            filename = f"{label_or_hash}.jshc"
+        except KeyError:
+            run_hash = label_or_hash
+            filename = f"{run_hash}.jshc"
+
+        config = self.get_config_by_hash(run_hash)
+        if config is None:
+            raise KeyError(f"No run found for '{label_or_hash}'")
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / filename
+        output_path.write_text(config.config_content)
+        return output_path
 
     # ========== Run Tracking ==========
 

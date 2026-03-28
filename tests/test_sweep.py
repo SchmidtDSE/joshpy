@@ -837,5 +837,81 @@ class TestSweepManagerAdaptiveDispatch(unittest.TestCase):
                 manager.close()
 
 
+class TestSweepManagerCatalogIntegration(unittest.TestCase):
+    """Tests for SweepManager + ProjectCatalog integration."""
+
+    def test_catalog_stores_registry_path(self):
+        """with_catalog() should store the registry path in the catalog (regression for db_path bug)."""
+        from joshpy.catalog import ProjectCatalog
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = str(Path(tmpdir) / "experiment.duckdb")
+            catalog_path = str(Path(tmpdir) / "catalog.duckdb")
+
+            config = JobConfig(
+                template_string="maxGrowth = {{ maxGrowth }} meters",
+                simulation="Main",
+            )
+
+            catalog = ProjectCatalog(catalog_path)
+            try:
+                manager = (
+                    SweepManagerBuilder(config)
+                    .with_registry(registry_path, experiment_name="test_exp")
+                    .with_catalog(catalog, experiment_name="test_exp")
+                    .build()
+                )
+
+                # Verify the catalog recorded the registry path
+                experiments = catalog.list_experiments()
+                self.assertEqual(len(experiments), 1)
+                self.assertEqual(experiments[0].registry_path, registry_path)
+                self.assertNotEqual(experiments[0].registry_path, "")
+
+                manager.cleanup()
+                manager.close()
+            finally:
+                catalog.close()
+
+    def test_with_label_single_job(self):
+        """with_label() should apply label to a single-job config."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = JobConfig(
+                template_string="maxGrowth = 50 meters",
+                simulation="Main",
+            )
+
+            manager = (
+                SweepManagerBuilder(config)
+                .with_registry(":memory:", experiment_name="test")
+                .with_label("baseline")
+                .build()
+            )
+
+            try:
+                labels = manager.registry.list_labels()
+                self.assertEqual(len(labels), 1)
+                self.assertEqual(labels[0][0], "baseline")
+            finally:
+                manager.cleanup()
+                manager.close()
+
+    def test_with_label_multi_job_raises(self):
+        """with_label() should raise for multi-job sweeps."""
+        config = JobConfig(
+            template_string="maxGrowth = {{ maxGrowth }} meters",
+            simulation="Main",
+            sweep=SweepConfig(
+                config_parameters=[
+                    ConfigSweepParameter(name="maxGrowth", values=[10, 20, 30]),
+                ],
+            ),
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            SweepManagerBuilder(config).with_registry(":memory:").with_label("test").build()
+        self.assertIn("single-job", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -36,7 +36,9 @@ pip install joshpy[all]
 joshpy/
 ├── __init__.py      # Public API exports
 ├── cli.py           # CLI wrapper (JoshCLI, RunConfig, etc.)
+├── config_parser.py # .jshc file parsing (parse_jshc, parse_jshc_content)
 ├── debug/           # Debug output parsing (DebugMessage, DebugMessageStore, CLI)
+├── grid.py          # Grid specification (GridSpec: geometry + data manifest + preprocessing)
 ├── jshd.py          # JSHD file loading (load_jshd, plot_jshd)
 ├── jobs.py          # Parameter sweep orchestration (JobConfig, JobExpander, etc.)
 ├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy, cv_objective)
@@ -57,12 +59,14 @@ joshpy/
 **Always available:**
 - `jar.py`: `JarMode`, `JarManager`, `get_jar`, `download_jars`, `get_jar_hash`, `get_jar_version`
 - `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `NetcdfPreprocessConfig`, `GeotiffPreprocessConfig`, `CsvPreprocessConfig`, `PreprocessConfig` (type alias), `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
+- `config_parser.py`: `parse_jshc`, `parse_jshc_content`
 - `jshd.py`: `JshdMetadata`, `JshdData`, `load_jshd`, `plot_jshd`
 - `debug/`: `DebugMessage`, `DebugMessageStore`, `DebugSummary`, `parse_debug_line`, `load_debug_file`, `load_debug_from_script`, `format_message`
 
 **Requires joshpy[jobs]:**
 - `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `discover_jshd_files`
 - `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `SweepExecutionError`, `cv_objective`
+- `grid.py`: `GridSpec`
 
 **Requires joshpy[registry]:**
 - `registry.py`: `RunRegistry`, `RegistryCallback`, `SessionInfo`, `ConfigInfo`, `RunInfo`, `SessionSummary`, `DataSummary`
@@ -1233,6 +1237,168 @@ rows_loaded = recover_sweep_results(
 
 ---
 
+## Config Parser
+
+The `config_parser` module parses Josh configuration files (`.jshc` format) into Python dicts.
+
+### parse_jshc / parse_jshc_content
+
+```python
+from joshpy.config_parser import parse_jshc, parse_jshc_content
+
+# From file
+params = parse_jshc(Path("configs/baseline.jshc"))
+# {"coverHighThreshold": 2, "seedBankSurvival": 35, "patchSizeMeters": 30, ...}
+
+# From string
+params = parse_jshc_content("maxGrowth = 50 meters\nfireYear = 75 count")
+# {"maxGrowth": 50, "fireYear": 75}
+```
+
+Parses `name = value unit` lines. Comments (`#`) and blank lines are skipped.
+Returns `int` for values without a decimal point, `float` otherwise. Units are discarded.
+
+When `JobConfig.config_path` is used (raw .jshc, no sweep), parameters are auto-parsed
+and stored in `config_parameters` for SQL querying and `group_by` in diagnostics.
+
+---
+
+## Grid Specification (GridSpec)
+
+A `GridSpec` defines the spatial geometry of a simulation grid and maintains an inventory
+of data files preprocessed for that grid. It bridges preprocessing and model execution.
+
+### YAML Format
+
+```yaml
+# data/grids/dev_fine/grid.yaml
+name: dev_fine
+grid:
+  size_m: 30
+  low: [33.902, -116.0465]    # [lat, lon]
+  high: [33.908, -116.0395]
+  steps: 86
+
+files:
+  cover:
+    path: cover.jshd
+    units: percent
+  fireRbr:
+    path: fireRbr.jshd
+    units: rbr
+  futureTempJan:
+    path: monthly/futureTempJan.jshd
+    units: K
+```
+
+Paths are relative to the YAML file's directory. Keys are josh external names.
+
+### Usage
+
+```python
+from joshpy.grid import GridSpec
+
+# Create from scratch (before preprocessing)
+grid = GridSpec(
+    name="dev_fine",
+    output_dir=Path("data/grids/dev_fine"),
+    size_m=30,
+    low=(33.902, -116.0465),
+    high=(33.908, -116.0395),
+    steps=86,
+)
+
+# Preprocess data — grid handles boilerplate .josh file internally
+grid.preprocess_geotiff(cli, josh_name="cover", data_file=tif_path,
+                        band=0, units="percent", timestep=0)
+grid.preprocess_netcdf(cli, josh_name="futureTempJan", data_file=nc_path,
+                       variable="tas", units="K", subdirectory="monthly")
+grid.save()  # writes grid.yaml
+
+# Load later for model runs
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+# Properties for JobConfig integration
+grid.file_mappings   # {"cover": Path("/abs/cover.jshd"), ...}
+grid.template_vars   # {"size_m": 30, "low_lat": 33.902, ...}
+
+# Use in JobConfig
+config = JobConfig(
+    source_template_path=Path("models/canonical.josh.j2"),
+    template_vars={**grid.template_vars, "simulation_name": "MyModel"},
+    file_mappings=grid.file_mappings,
+)
+```
+
+A grid is NOT a model — it has no simulation name. Multiple models share the same grid.
+The simulation name goes in `template_vars` at `JobConfig` construction time.
+
+### Preprocess Methods
+
+| Method | Input Format | Required Params |
+|--------|-------------|-----------------|
+| `preprocess_geotiff()` | GeoTIFF/COG | `band`, `timestep` |
+| `preprocess_netcdf()` | NetCDF | `variable` |
+| `preprocess_csv()` | CSV | `variable`, `timestep` |
+
+All accept: `josh_name`, `data_file`, `units`, `crs`, `parallel`, `amend`, `subdirectory`.
+Internally renders a temp `.josh` file with grid geometry, calls `cli.preprocess()`,
+records the result in `grid.files` on success, and cleans up the temp file.
+
+---
+
+## Run Labels
+
+Runs can be labeled with human-readable names for ad-hoc iteration workflows.
+
+### Registry Methods
+
+```python
+# Label a run
+registry.label_run("abc123", "baseline")
+registry.label_run("def456", "high_mortality")
+
+# List labels
+registry.list_labels()  # [("baseline", "abc123"), ("high_mortality", "def456")]
+
+# Resolve label to hash
+registry.resolve_label("baseline")  # "abc123"
+
+# Export config for IDE diffing
+registry.export_config("baseline", Path("tmp/"))
+registry.export_config("high_mortality", Path("tmp/"))
+# $ code --diff tmp/baseline.jshc tmp/high_mortality.jshc
+```
+
+Labels are unique within a registry. `force=True` reassigns an existing label.
+
+### SweepManager Integration
+
+```python
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiment.duckdb", experiment_name="baseline")
+    .with_cli(cli)
+    .with_label("baseline")    # applied at build() time
+    .build()
+)
+```
+
+`with_label()` works for single-job configs. For multi-job sweeps, label
+individual runs after the fact via `registry.label_run()`.
+
+### Diagnostics Integration
+
+```python
+# Compare labeled runs
+diag.plot_comparison("treeCount", group_by="label")
+
+# Also works with DiagnosticQueries
+df = queries.get_parameter_comparison("treeCount", param_name="label")
+```
+
+---
+
 ## Project Catalog
 
 The `catalog` module provides a project-level provenance index that sits above RunRegistry.
@@ -1253,6 +1419,10 @@ data_hash = catalog.register_data(
     discover_jshd_files("data/grids/dev_fine", recursive=True),
     name="dev_fine",
 )
+
+# Retrieve file_mappings from catalog (round-trip)
+file_mappings = catalog.get_file_mappings("dev_fine")
+# {"cover": Path("/abs/.../cover.jshd"), "fire_rbr": Path("/abs/.../fire_rbr.jshd"), ...}
 
 # Register experiment
 exp_id = catalog.register_experiment(

@@ -516,7 +516,8 @@ class DiagnosticQueries:
 
         Args:
             variable: Variable name to analyze (e.g., "treeCount", "avg.height").
-            param_name: Parameter name to group by.
+            param_name: Parameter name to group by. Use ``"label"`` to group
+                by run labels assigned via ``registry.label_run()``.
             step: Optional timestep filter (if None, groups by step).
             aggregation: Aggregation function (AVG, MIN, MAX, SUM).
             show_sql: If True, print the SQL query for copy/paste modification.
@@ -527,23 +528,39 @@ class DiagnosticQueries:
         _check_pandas()
 
         quoted_var = _quote_identifier(variable)
-        quoted_param = _quote_identifier(param_name)
         step_filter = "AND cd.step = ?" if step else ""
         step_group = "" if step else ", cd.step"
 
-        query = f"""
-            SELECT
-                cp.{quoted_param} as param_value,
-                cd.step,
-                {aggregation}({quoted_var}) as mean_value,
-                STDDEV({quoted_var}) as std_value,
-                COUNT(*) as n_cells
-            FROM cell_data cd
-            JOIN config_parameters cp ON cd.run_hash = cp.run_hash
-            WHERE 1=1 {step_filter}
-            GROUP BY cp.{quoted_param}{step_group}
-            ORDER BY param_value, cd.step
-        """
+        if param_name == "label":
+            # Group by run labels from job_configs table
+            query = f"""
+                SELECT
+                    jc.label as param_value,
+                    cd.step,
+                    {aggregation}({quoted_var}) as mean_value,
+                    STDDEV({quoted_var}) as std_value,
+                    COUNT(*) as n_cells
+                FROM cell_data cd
+                JOIN job_configs jc ON cd.run_hash = jc.run_hash
+                WHERE jc.label IS NOT NULL {step_filter}
+                GROUP BY jc.label{step_group}
+                ORDER BY param_value, cd.step
+            """
+        else:
+            quoted_param = _quote_identifier(param_name)
+            query = f"""
+                SELECT
+                    cp.{quoted_param} as param_value,
+                    cd.step,
+                    {aggregation}({quoted_var}) as mean_value,
+                    STDDEV({quoted_var}) as std_value,
+                    COUNT(*) as n_cells
+                FROM cell_data cd
+                JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+                WHERE 1=1 {step_filter}
+                GROUP BY cp.{quoted_param}{step_group}
+                ORDER BY param_value, cd.step
+            """
 
         params: list[Any] = [step] if step else []
 

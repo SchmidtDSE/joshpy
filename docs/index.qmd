@@ -19,16 +19,16 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 
 - [Installation](getting-started/installation.qmd) - Install joshpy
 - [Quickstart](getting-started/quickstart.qmd) - Run your first simulation
+- [Architecture](architecture.qmd) - How GridSpec, JobConfig, SweepManager, RunRegistry, and ProjectCatalog fit together
 - [Tutorials](tutorials/index.qmd) - Step-by-step guides
 
 ## Tutorials
 
-### Orchestration
+### Getting Started
 
-- [Manual Workflow](tutorials/manual-workflow.qmd) - Step-by-step parameter sweep using individual components for maximum control
-- [SweepManager Workflow](tutorials/sweep-manager.qmd) - Simplified workflow using high-level `SweepManager` class
-- [Switching Josh Versions](tutorials/switching-versions.qmd) - Use stable, development, or custom Josh builds
-- [Remote Runs in Parallel](tutorials/remote-execution.qmd) - Distribute simulations across Josh Cloud
+- [Single Run & Iteration](tutorials/manual-workflow.qmd) - Run, tweak, compare: the daily research workflow
+- [SweepManager Workflow](tutorials/sweep-manager.qmd) - Systematic parameter sweeps
+- [Analysis & Visualization](tutorials/analysis.qmd) - Explore results with queries, plots, and R/ggplot2
 
 ### External Data
 
@@ -36,14 +36,20 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 - [External Data Sweeps](tutorials/external-data-sweep.qmd) - Sweep over different input data files
 - [Timestep Interventions](tutorials/timestep-interventions.qmd) - Single-time data for initialization and discrete events
 
-### Debugging
+### Project Structure
 
-- [Debug Output Inspection](tutorials/debug-inspection.qmd) - Trace agent behavior with structured debug log analysis
+- [Project Organization](tutorials/project-organization.qmd) - Directory layout, model templating, GridSpec
+- [Multi-Session Experiments](tutorials/multi-session-experiments.qmd) - Track ad-hoc runs across sessions
+- [Multi-Session Sweeps](tutorials/multi-session-sweeps.qmd) - Track sweeps across sessions
 
-### Optimization & Analysis
+### Advanced
 
 - [Adaptive Optimization](tutorials/adaptive-sweep.qmd) - Bayesian parameter optimization with Optuna
-- [Analysis & Visualization](tutorials/analysis.qmd) - Explore results with queries, plots, and R/ggplot2
+- [Low-Level Components](tutorials/low-level-components.qmd) - JobExpander, manual registry, internals
+- [Debug Output Inspection](tutorials/debug-inspection.qmd) - Trace agent behavior with structured debug log analysis
+- [JVM Profiling](tutorials/jfr-profiling.qmd) - Diagnose performance with Java Flight Recorder
+- [Switching Josh Versions](tutorials/switching-versions.qmd) - Stable vs development builds
+- [Remote Execution](tutorials/remote-execution.qmd) - Distribute simulations across Josh Cloud
 
 ## Links
 

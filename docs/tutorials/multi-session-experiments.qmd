@@ -1,0 +1,278 @@
+---
+title: "Multi-Session Experiments"
+description: "Track ad-hoc runs across sessions with ProjectCatalog"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Overview
+
+The [Single Run & Iteration](manual-workflow.qmd) tutorial shows how to label
+runs and compare them within a single session. But research often spans multiple
+sessions -- running a baseline today, a model variant tomorrow, and coming back
+next week to recall what was done.
+
+**ProjectCatalog** is a persistent DuckDB database that indexes your experiments.
+It tracks which models, configs, and data were used, where results live, and
+whether an experiment was already run. It does NOT store simulation data -- that
+stays in per-experiment RunRegistry files.
+
+This tutorial walks through:
+
+1. Running labeled ad-hoc runs and registering them in a catalog
+2. Coming back later to find and recall past experiments
+3. Continuing to add runs to an existing registry
+
+## Setup
+
+```{python}
+#| echo: false
+import os
+for f in ["catalog_demo.duckdb", "iteration_demo.duckdb",
+          "iteration_demo.duckdb.wal"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+```{python}
+from pathlib import Path
+
+from joshpy.jobs import JobConfig
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.catalog import ProjectCatalog
+
+SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+catalog = ProjectCatalog("catalog_demo.duckdb")
+REGISTRY_PATH = "iteration_demo.duckdb"
+```
+
+## Session 1: Baseline Run
+
+We run a single simulation with a raw `.jshc` config and register it in both
+the registry (for results) and the catalog (for tracking).
+
+```{python}
+config_baseline = JobConfig(
+    source_path=SOURCE_PATH,
+    config_path=Path("../../examples/configs/baseline.jshc"),
+    simulation="Main",
+    replicates=3,
+)
+
+manager = (
+    SweepManager.builder(config_baseline)
+    .with_registry(REGISTRY_PATH, experiment_name="baseline")
+    .with_cli(cli)
+    .with_label("baseline")
+    .with_catalog(catalog, experiment_name="iteration_dev_fine")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"Baseline: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        raise RuntimeError("Run failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+## Session 2: High Growth Variant
+
+In a later session, we try a different config. We point at the **same registry**
+so both runs are queryable together.
+
+```{python}
+config_high = JobConfig(
+    source_path=SOURCE_PATH,
+    config_path=Path("../../examples/configs/high_growth.jshc"),
+    simulation="Main",
+    replicates=3,
+)
+
+manager = (
+    SweepManager.builder(config_high)
+    .with_registry(REGISTRY_PATH, experiment_name="high_growth")
+    .with_cli(cli)
+    .with_label("high_growth")
+    .with_catalog(catalog, experiment_name="iteration_dev_fine")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"High growth: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        raise RuntimeError("Run failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+## Session 3: Recall and Compare
+
+Days later, you come back. The catalog and registry tell you what's been done.
+
+### List experiments in the catalog
+
+```{python}
+catalog = ProjectCatalog("catalog_demo.duckdb")
+
+experiments = catalog.list_experiments()
+print(f"Total experiments: {len(experiments)}\n")
+for exp in experiments:
+    print(f"  {exp.name}: status={exp.status}, registry={exp.registry_path}")
+```
+
+### Check for duplicates
+
+Before running a new experiment, check if it's already been done:
+
+```{python}
+existing = catalog.find_experiment(config_baseline)
+if existing:
+    print(f"Already run: '{existing.name}' at {existing.registry_path}")
+else:
+    print("Not yet run")
+```
+
+### Open the registry and compare labeled runs
+
+Since both runs share the same registry, comparison is straightforward:
+
+```{python}
+from joshpy.registry import RunRegistry
+from joshpy.diagnostics import SimulationDiagnostics
+
+registry = RunRegistry(REGISTRY_PATH)
+print(f"Labels: {registry.list_labels()}")
+print(f"Parameters: {registry.list_config_parameters()}")
+```
+
+```{python}
+#| label: fig-label-comparison
+#| fig-cap: "Comparing baseline and high growth runs by label."
+
+diag = SimulationDiagnostics(registry)
+diag.plot_comparison(
+    "averageHeight",
+    group_by="label",
+    title="Average Height: Baseline vs High Growth",
+)
+```
+
+```{python}
+#| label: fig-param-comparison
+#| fig-cap: "Same data grouped by the auto-parsed maxGrowth parameter."
+
+diag.plot_comparison(
+    "averageHeight",
+    group_by="maxGrowth",
+    title="Average Height by maxGrowth Value",
+)
+```
+
+### Export configs for diffing
+
+```{python}
+import tempfile
+
+tmpdir = tempfile.mkdtemp()
+p1 = registry.export_config("baseline", tmpdir)
+p2 = registry.export_config("high_growth", tmpdir)
+
+print(f"--- {p1.name} ---")
+print(p1.read_text())
+print(f"--- {p2.name} ---")
+print(p2.read_text())
+```
+
+```{python}
+registry.close()
+```
+
+::: {.callout-note collapse="true" title="Advanced: Cross-registry queries"}
+## Combining results across registries
+
+If different researchers maintain separate registries (or you used separate
+registries for each run), `catalog.open_registries()` can combine them via
+DuckDB ATTACH:
+
+```python
+experiments = catalog.list_experiments(status="completed")
+
+with catalog.open_registries(experiments) as conn:
+    # Build query dynamically — experiment order may vary
+    parts = []
+    for i, exp in enumerate(experiments):
+        parts.append(
+            f"SELECT '{exp.name}' as experiment, step, "
+            f"AVG(averageHeight) as mean_height "
+            f"FROM exp_{i}.cell_data GROUP BY step"
+        )
+    sql = " UNION ALL ".join(parts) + " ORDER BY experiment, step"
+    df = conn.execute(sql).df()
+```
+
+For multi-researcher collaboration, a natural extension is joining catalogs --
+each researcher maintains their own catalog, and a shared catalog aggregates
+pointers to everyone's registries.
+:::
+
+## Key Concepts
+
+### Catalog vs Registry
+
+| | ProjectCatalog | RunRegistry |
+|---|---|---|
+| **Stores** | Hashes and pointers | Simulation data |
+| **Scope** | One per project | One per experiment |
+| **Persistence** | Across all sessions | Across sessions for one experiment |
+| **Primary use** | "What have I run?" | "What were the results?" |
+
+### Same registry, multiple sessions
+
+The ad-hoc iteration pattern accumulates labeled runs in a single registry.
+The catalog records where that registry lives so you can find it later.
+You don't need a new registry for each session -- just point `with_registry()`
+at the existing file and add more labeled runs.
+
+### Content-based deduplication
+
+`find_experiment()` matches on the content hash of model + config + data files.
+If you change a single line in your `.josh` or `.jshc` file, it's a new experiment.
+If you re-run with identical inputs, it detects the duplicate.
+
+## Next Steps
+
+- [Multi-Session Sweeps](multi-session-sweeps.qmd) -- Catalog as bookkeeper for parameter sweeps
+- [Project Organization](project-organization.qmd) -- Directory layout and GridSpec
+- [Architecture](../architecture.qmd) -- How all abstractions fit together
+
+## Cleanup
+
+```{python}
+catalog.close()
+```
+
+```{python}
+#| echo: false
+import os
+for f in ["catalog_demo.duckdb", "iteration_demo.duckdb",
+          "iteration_demo.duckdb.wal"]:
+    if os.path.exists(f):
+        os.remove(f)
+```

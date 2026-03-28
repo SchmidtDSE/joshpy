@@ -1,0 +1,5 @@
+# Baseline configuration for iteration tutorial
+# All parameters are auto-parsed by joshpy
+
+initialTreeCount = 10 count
+maxGrowth = 50 meters

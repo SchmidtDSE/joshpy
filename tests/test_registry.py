@@ -764,6 +764,7 @@ class TestDataClasses(unittest.TestCase):
             config_content="content",
             file_mappings={"data": {"path": "/path/to/data.jshd", "hash": "abc"}},
             parameters={"x": 1},
+            label=None,
             created_at=datetime.now(),
         )
         self.assertEqual(config.run_hash, "abc123")
@@ -1386,6 +1387,133 @@ class TestTypedConfigParameters(unittest.TestCase):
         
         self.assertIsNotNone(result)
         self.assertEqual(result[0], 50)
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestLabelSystem(unittest.TestCase):
+    """Tests for the run label system."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        config = _make_config()
+        self.session_id = self.registry.create_session(config=config)
+        # Register two runs
+        self.registry.register_run(
+            self.session_id, "hash_aaa111", "/sim.josh",
+            "param = 10 count", None, {"param": 10},
+        )
+        self.registry.register_run(
+            self.session_id, "hash_bbb222", "/sim.josh",
+            "param = 20 count", None, {"param": 20},
+        )
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_label_run_basic(self):
+        self.registry.label_run("hash_aaa111", "baseline")
+        labels = self.registry.list_labels()
+        self.assertEqual(labels, [("baseline", "hash_aaa111")])
+
+    def test_label_multiple_runs(self):
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run("hash_bbb222", "high_mortality")
+        labels = self.registry.list_labels()
+        self.assertEqual(len(labels), 2)
+        self.assertIn(("baseline", "hash_aaa111"), labels)
+        self.assertIn(("high_mortality", "hash_bbb222"), labels)
+
+    def test_label_uniqueness_error(self):
+        self.registry.label_run("hash_aaa111", "baseline")
+        with self.assertRaises(ValueError) as ctx:
+            self.registry.label_run("hash_bbb222", "baseline")
+        self.assertIn("already assigned", str(ctx.exception))
+        self.assertIn("force=True", str(ctx.exception))
+
+    def test_label_force_reassign(self):
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run("hash_bbb222", "baseline", force=True)
+        labels = self.registry.list_labels()
+        self.assertEqual(labels, [("baseline", "hash_bbb222")])
+
+    def test_label_same_run_same_label_ok(self):
+        """Re-labeling the same run with the same label should succeed."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run("hash_aaa111", "baseline")  # no error
+
+    def test_label_run_missing_hash(self):
+        with self.assertRaises(KeyError):
+            self.registry.label_run("nonexistent", "baseline")
+
+    def test_resolve_label(self):
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.assertEqual(self.registry.resolve_label("baseline"), "hash_aaa111")
+
+    def test_resolve_label_missing(self):
+        with self.assertRaises(KeyError):
+            self.registry.resolve_label("nonexistent")
+
+    def test_list_labels_empty(self):
+        self.assertEqual(self.registry.list_labels(), [])
+
+    def test_export_config_by_label(self):
+        import tempfile
+
+        self.registry.label_run("hash_aaa111", "baseline")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self.registry.export_config("baseline", tmpdir)
+            self.assertTrue(path.exists())
+            self.assertEqual(path.name, "baseline.jshc")
+            self.assertEqual(path.read_text(), "param = 10 count")
+
+    def test_export_config_by_hash(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self.registry.export_config("hash_aaa111", tmpdir)
+            self.assertTrue(path.exists())
+            self.assertEqual(path.name, "hash_aaa111.jshc")
+
+    def test_export_config_missing(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaises(KeyError):
+                self.registry.export_config("nonexistent", tmpdir)
+
+    def test_config_info_includes_label(self):
+        self.registry.label_run("hash_aaa111", "baseline")
+        config = self.registry.get_config_by_hash("hash_aaa111")
+        self.assertEqual(config.label, "baseline")
+
+    def test_config_info_label_none_by_default(self):
+        config = self.registry.get_config_by_hash("hash_aaa111")
+        self.assertIsNone(config.label)
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestGitHash(unittest.TestCase):
+    """Tests for git hash capture in session metadata."""
+
+    def test_git_hash_in_session_metadata(self):
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+        config = _make_config()
+        session_id = registry.create_session(config=config)
+        session = registry.get_session(session_id)
+        # We're in a git repo, so git_hash should be present
+        import json
+        metadata = json.loads(session.metadata) if isinstance(session.metadata, str) else session.metadata
+        self.assertIn("git_hash", metadata)
+        git_hash = metadata["git_hash"]
+        # Should be 12 hex chars, optionally with +dirty
+        base = git_hash.replace("+dirty", "")
+        self.assertEqual(len(base), 12)
+        self.assertTrue(all(c in "0123456789abcdef" for c in base))
+        registry.close()
 
 
 if __name__ == "__main__":

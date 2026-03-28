@@ -1,0 +1,378 @@
+---
+title: "Architecture"
+description: "How joshpy's abstractions fit together"
+---
+
+## Overview
+
+joshpy is a Python orchestration layer for [Josh](https://joshsim.org) ecological
+simulations. It handles the lifecycle from data preparation through execution to
+analysis, with provenance tracking at every step.
+
+The two persistent artifacts are the **ProjectCatalog** (project-level index) and
+**RunRegistry** (per-experiment results). **SweepManager** is the ephemeral
+orchestrator that creates registries and reports back to the catalog.
+
+```{mermaid}
+flowchart TD
+    PC[(ProjectCatalog)]
+    GS[GridSpec]
+    JC[JobConfig]
+    SM(SweepManager)
+    RR[(RunRegistry)]
+    A["Analysis &<br/>Diagnostics"]
+
+    PC -. "context<br/>(find_experiment,<br/>get_file_mappings)" .-> SM
+    GS -- "file_mappings,<br/>template_vars" --> JC
+    JC --> SM
+    SM -- "creates &<br/>writes to" --> RR
+    SM -. "registers<br/>experiment" .-> PC
+    RR --> A
+```
+
+| Abstraction | Lifecycle | Role |
+|------------|-----------|------|
+| [**GridSpec**](#gridspec) | Persistent (YAML file) | Grid geometry + data file manifest |
+| [**JobConfig**](#jobconfig) | Ephemeral (per setup) | Binds model + config + data into a runnable spec |
+| [**SweepManager**](#sweepmanager) | Ephemeral (per execution) | Orchestrates job expansion, execution, result loading |
+| [**RunRegistry**](#runregistry) | Persistent (DuckDB file) | Stores results for one experiment |
+| [**ProjectCatalog**](#projectcatalog) | Persistent (DuckDB file) | Indexes experiments across a project |
+
+---
+
+## GridSpec
+
+::: {.callout-note title="Grid geometry + data file manifest"}
+A YAML file that defines a simulation grid's spatial geometry and inventories all
+data files preprocessed for that grid.
+:::
+
+Josh simulations operate on spatial grids defined by bounds and resolution. External
+data (`.jshd` files) must be preprocessed to match a specific grid. GridSpec keeps
+grid geometry and its associated data files together in one place, eliminating
+manual `file_mappings` dicts and boilerplate preprocessing scripts.
+
+```yaml
+# data/grids/dev_fine/grid.yaml
+name: dev_fine
+grid:
+  size_m: 30
+  low: [33.902, -116.0465]
+  high: [33.908, -116.0395]
+  steps: 86
+
+files:
+  cover:
+    path: cover.jshd
+    units: percent
+  futureTempJan:
+    path: monthly/futureTempJan.jshd
+    units: K
+```
+
+```python
+from joshpy.grid import GridSpec
+
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+grid.file_mappings   # {"cover": Path("/abs/.../cover.jshd"), ...}
+grid.template_vars   # {"size_m": 30, "low_lat": 33.902, ...}
+```
+
+GridSpec also handles preprocessing: `grid.preprocess_geotiff(cli, ...)` renders
+a temporary `.josh` file with the grid geometry, calls `cli.preprocess()`, and
+records the result in the manifest. See the [Preprocessing](tutorials/preprocessing.qmd)
+tutorial.
+
+GridSpec is **optional**. A Josh model can define its grid inline in the `.josh`
+file, and you can pass `file_mappings` as a plain dict to `JobConfig`. But when
+you want to iterate on multiple models that share the same grid, GridSpec avoids
+duplicating grid definitions and data file mappings across every model file. It
+also eliminates the boilerplate `.josh` preprocessing scripts (one per grid
+permutation) by rendering them internally.
+
+A grid is not a model -- it has no simulation name, no export paths. The
+`simulation_name`, `debug` flag, and other model-specific values are passed via
+`template_vars` at `JobConfig` construction time.
+
+API: [GridSpec](reference/index.qmd)
+| Tutorial: [Project Organization](tutorials/project-organization.qmd)
+
+---
+
+## JobConfig
+
+::: {.callout-note title="Complete specification for one or more simulation runs"}
+Binds a model (`.josh`), config (`.jshc`), data files, and optional sweep
+parameters into a single object that SweepManager can execute.
+:::
+
+```{mermaid}
+flowchart TD
+    subgraph JC ["JobConfig"]
+        SP["source_path / source_template_path"]
+        CP["config_path / template_path"]
+        FM["file_mappings"]
+        SW["sweep (optional)"]
+    end
+
+    JC --> Expand["JobExpander.expand()"]
+    Expand --> Jobs["ExpandedJob[]\none per parameter combination"]
+
+    style JC fill:#fff3e0,color:#333
+    style SP fill:#fff,color:#333
+    style CP fill:#fff,color:#333
+    style FM fill:#fff,color:#333
+    style SW fill:#fff,color:#333
+    style Expand fill:#e3f2fd,color:#333
+    style Jobs fill:#e8f5e9,color:#333
+```
+
+Three ways to provide configuration:
+
+| Field | Use case | Templating |
+|-------|----------|-----------|
+| `config_path` | Ad-hoc tinkering with a raw `.jshc` file | None -- file used as-is, params auto-parsed |
+| `template_path` | Parameter sweeps with Jinja2 `.jshc.j2` | Sweep params injected via `{{ maxGrowth }}` |
+| `template_string` | Inline config for testing | Same as `template_path` |
+
+`config_name` controls the Josh config namespace (the `<name>` in
+`config <name>.paramName`). Defaults to `None`, which falls back to `"sweep_config"`
+during expansion. Override if your model uses a different namespace.
+
+When `config_path` is used, joshpy auto-parses all `name = value unit` lines
+and stores them as typed parameters in the registry. This enables
+`group_by="maxGrowth"` in diagnostics without defining a sweep.
+
+API: [JobConfig](reference/jobs.JobConfig.qmd)
+| Tutorial: [Single Run & Iteration](tutorials/manual-workflow.qmd)
+
+---
+
+## SweepManager
+
+::: {.callout-note title="Ephemeral orchestrator for job execution and result loading"}
+Coordinates job expansion, CLI execution, result loading, and registry lifecycle.
+Created via a builder pattern, used for one execution session, then discarded.
+:::
+
+The builder pattern configures what resources the manager uses:
+
+| Builder method | What it configures | joshpy object |
+|---|---|---|
+| `.with_registry(path, experiment_name)` | Where results are stored | Creates `RunRegistry` |
+| `.with_cli(cli)` | How simulations are executed | Uses provided `JoshCLI` (or creates one) |
+| `.with_label("name")` | Human-readable name for this run | Applied to `job_configs.label` column |
+| `.with_catalog(catalog)` | Project-level experiment tracking | Uses provided `ProjectCatalog` |
+| `.with_defaults(...)` | Convenience shorthand | Creates both `RunRegistry` + `JoshCLI` |
+
+The lifecycle has three phases:
+
+```{mermaid}
+flowchart LR
+    subgraph build ["build()"]
+        direction TB
+        B1["Expand JobConfig → ExpandedJob[]"]
+        B2["Create session in RunRegistry"]
+        B3["Register each job's config, params, file hashes"]
+        B4["Apply label (if single-job)"]
+        B5["Register experiment in ProjectCatalog"]
+        B1 --> B2 --> B3 --> B4 --> B5
+    end
+
+    subgraph run ["run()"]
+        direction TB
+        R1["Set session status → 'running'"]
+        R2["For each job: cli.run(job)"]
+        R3["Record timing, exit code, output path"]
+        R4["Set session status → 'completed' / 'failed'"]
+        R1 --> R2 --> R3 --> R4
+    end
+
+    subgraph load ["load_results()"]
+        direction TB
+        L1["Discover export CSV paths from .josh"]
+        L2["Resolve {run_hash}, {replicate} templates"]
+        L3["Load CSVs into registry cell_data table"]
+        L1 --> L2 --> L3
+    end
+
+    build --> run --> load
+
+    style build fill:#e8f5e9,color:#333
+    style run fill:#e3f2fd,color:#333
+    style load fill:#f3e5f5,color:#333
+    style B1 fill:#fff,color:#333
+    style B2 fill:#fff,color:#333
+    style B3 fill:#fff,color:#333
+    style B4 fill:#fff,color:#333
+    style B5 fill:#fff,color:#333
+    style R1 fill:#fff,color:#333
+    style R2 fill:#fff,color:#333
+    style R3 fill:#fff,color:#333
+    style R4 fill:#fff,color:#333
+    style L1 fill:#fff,color:#333
+    style L2 fill:#fff,color:#333
+    style L3 fill:#fff,color:#333
+```
+
+Labels assigned via `.with_label()` are applied at `build()` time (before
+execution), not after. This avoids the error-prone pattern of labeling after the
+fact. Labels are unique within a registry and enable `group_by="label"` in
+diagnostics. For multi-job sweeps, label individual runs after the fact with
+`registry.label_run(run_hash, "name")`.
+
+API: [SweepManager](reference/sweep.SweepManager.qmd),
+[SweepManagerBuilder](reference/sweep.SweepManagerBuilder.qmd)
+| Tutorial: [Single Run & Iteration](tutorials/manual-workflow.qmd),
+[SweepManager Workflow](tutorials/sweep-manager.qmd)
+
+---
+
+## RunRegistry
+
+::: {.callout-note title="DuckDB database storing results for one experiment"}
+Stores session metadata, job configs with parameter values, execution records,
+and spatiotemporal simulation output. One registry per experiment.
+:::
+
+```{mermaid}
+erDiagram
+    sweep_sessions ||--o{ job_configs : contains
+    job_configs ||--|| config_parameters : "typed params"
+    job_configs ||--o{ job_runs : executions
+    job_runs ||--o{ cell_data : "simulation output"
+
+    sweep_sessions {
+        varchar session_id PK
+        varchar experiment_name
+        varchar status
+        json metadata
+    }
+    job_configs {
+        varchar run_hash PK
+        varchar session_id FK
+        text config_content
+        json file_mappings
+        varchar label
+    }
+    config_parameters {
+        varchar run_hash PK
+        double maxGrowth
+        double survivalProb
+    }
+    job_runs {
+        varchar run_id PK
+        varchar run_hash FK
+        integer replicate
+        integer exit_code
+    }
+    cell_data {
+        bigint cell_id PK
+        varchar run_hash
+        integer step
+        integer replicate
+        double longitude
+        double latitude
+        double averageHeight
+        double treeCount
+    }
+```
+
+Key design decisions:
+
+- **One registry per experiment.** Reusing registries across unrelated experiments
+  causes hash collisions and query ambiguity.
+- **`run_hash` is the universal key.** A deterministic 12-char hash of josh source +
+  config content + data file hashes. Same inputs = same hash.
+- **Typed parameter columns.** `config_parameters` has one column per parameter
+  (e.g., `maxGrowth DOUBLE`), added dynamically. This enables direct SQL:
+  `WHERE cp.maxGrowth > 50`.
+- **Typed export columns.** `cell_data` has one column per exported variable
+  (e.g., `averageHeight DOUBLE`), added when data is loaded.
+- **Labels.** The `label` column on `job_configs` gives human-readable names to
+  runs for ad-hoc iteration workflows.
+
+::: {.callout-tip title="Git provenance"}
+`create_session()` automatically records the current git HEAD hash (plus dirty
+state) in session metadata. Combined with `josh_path` on each `job_configs` row,
+this gives you a pointer back to the exact code that produced a result: the git
+commit identifies the repo state, and the josh path identifies which model file
+was used.
+
+This is useful for forensics but not foolproof -- if you have uncommitted changes
+(`+dirty`) or haven't pushed to a remote, the code won't be recoverable from
+another machine. For important experiments, commit and push before running.
+:::
+
+Analysis tools built on the registry:
+
+- [SimulationDiagnostics](reference/diagnostics.SimulationDiagnostics.qmd) -- matplotlib plots
+  (`plot_timeseries`, `plot_comparison`, `plot_spatial`)
+- [DiagnosticQueries](reference/cell_data.DiagnosticQueries.qmd) -- pandas DataFrames
+  (`get_parameter_comparison`, `get_replicate_uncertainty`)
+- `registry.query(sql)` -- direct DuckDB SQL access
+- R can connect directly: `dbConnect(duckdb(), "experiment.duckdb", read_only = TRUE)`
+
+API: [RunRegistry](reference/registry.RunRegistry.qmd)
+| Tutorial: [Analysis & Visualization](tutorials/analysis.qmd)
+| Reference: [Best Practices](best-practices.qmd)
+
+---
+
+## ProjectCatalog
+
+::: {.callout-note title="Project-level index of experiments, models, and data"}
+Tracks which models, configs, and data were used in which experiments, and where
+the results live. Persists across sessions as a DuckDB file.
+:::
+
+When you have many experiments across grids and model variants, you need to answer
+questions like "did I already run this?", "which experiments used model v2?", and
+"let me compare results from two experiments." ProjectCatalog provides
+content-hash-based deduplication and cross-experiment SQL.
+
+```{mermaid}
+flowchart TD
+    subgraph PC ["ProjectCatalog (catalog.duckdb)"]
+        Models["models"]
+        Data["data_manifests"]
+        Exps["experiments"]
+    end
+
+    Exps --> R1[(baseline.duckdb)]
+    Exps --> R2[(drought_fix.duckdb)]
+    Exps --> R3[(fire_sweep.duckdb)]
+
+    style PC fill:#fce4ec,color:#333
+    style Models fill:#fff,color:#333
+    style Data fill:#fff,color:#333
+    style Exps fill:#fff,color:#333
+    style R1 fill:#f3e5f5,color:#333
+    style R2 fill:#f3e5f5,color:#333
+    style R3 fill:#f3e5f5,color:#333
+```
+
+Key operations:
+
+| Method | Purpose |
+|--------|---------|
+| `register_model(path)` | Hash and store a `.josh` file |
+| `register_data(file_mappings, name)` | Hash and store a data manifest |
+| `register_experiment(config, registry_path)` | Record an experiment with its model, config, and data hashes |
+| `find_experiment(config)` | Check if this exact combination was already run |
+| `get_file_mappings(name)` | Reconstruct a `file_mappings` dict from a stored manifest |
+| `list_experiments(status=, model_name=)` | Filter experiments |
+| `open_registries(experiments)` | DuckDB ATTACH for cross-experiment SQL |
+
+A ProjectCatalog is an *index* -- it stores hashes and pointers, not simulation
+data. Each experiment's actual results live in a separate RunRegistry (`.duckdb`
+file). The catalog tells you *where* results are; the registry contains *what*
+the results are.
+
+SweepManager integrates via `.with_catalog(catalog, experiment_name="...")` on the
+builder, which auto-registers the experiment on `build()` and updates status after
+`run()`.
+
+API: [ProjectCatalog](reference/index.qmd)
+| Tutorial: [Project Organization](tutorials/project-organization.qmd),
+[Multi-Session Experiments](tutorials/multi-session-experiments.qmd)

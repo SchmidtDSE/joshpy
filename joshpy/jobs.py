@@ -785,6 +785,12 @@ class JobConfig:
     template_string: str | None = None
     config_path: Path | None = None
 
+    # Logical config name for the Josh runtime (the namespace in
+    # "config <name>.paramName"). If None, defaults to "sweep_config"
+    # during job expansion. The actual filename on disk can be anything.
+    # The .jshc extension is added automatically by the expander.
+    config_name: str | None = None
+
     # Core simulation settings
     simulation: str = "Main"
     replicates: int = 1
@@ -836,6 +842,8 @@ class JobConfig:
             result["template_string"] = self.template_string
         if self.config_path:
             result["config_path"] = str(self.config_path)
+        if self.config_name is not None:
+            result["config_name"] = self.config_name
         if self.simulation != "Main":
             result["simulation"] = self.simulation
         if self.replicates != 1:
@@ -878,6 +886,8 @@ class JobConfig:
             kwargs["template_string"] = data["template_string"]
         if "config_path" in data:
             kwargs["config_path"] = Path(data["config_path"])
+        if "config_name" in data:
+            kwargs["config_name"] = data["config_name"]
         if "simulation" in data:
             kwargs["simulation"] = data["simulation"]
         if "replicates" in data:
@@ -1045,19 +1055,24 @@ class JobExpander:
         self,
         config: JobConfig,
         output_dir: Path | None = None,
-        config_name: str = "sweep_config.jshc",
     ) -> JobSet:
         """Expand a JobConfig into a JobSet with one ExpandedJob per parameter combo.
 
         Args:
             config: The job configuration to expand.
             output_dir: Directory to write configs to (uses temp dir if None).
-            config_name: Name for the generated config file.
 
         Returns:
             JobSet containing all expanded jobs.
         """
         _check_jinja2()
+
+        # Logical config name for Josh runtime namespace.
+        # Fallback to "sweep_config" for backward compatibility.
+        config_name = config.config_name or "sweep_config"
+        # Ensure .jshc extension (required by Josh CLI --data flag).
+        if not config_name.endswith(".jshc"):
+            config_name = config_name + ".jshc"
 
         # Create output directory
         if output_dir:
@@ -1097,7 +1112,6 @@ class JobExpander:
             template = self.jinja_env.from_string(config.template_string)
         elif config.config_path:
             raw_config_content = config.config_path.read_text()
-            config_name = config.config_path.name
         else:
             # No config source — produce empty config (valid for simulations
             # that don't reference any config variables)
@@ -1138,7 +1152,6 @@ class JobExpander:
                 else:
                     # Config parameter
                     config_params[key] = value
-                    custom_tags[str(key)] = str(value)
 
             # Render or use raw config content
             if template is not None:
@@ -1148,6 +1161,22 @@ class JobExpander:
             else:
                 # Raw config_path — no rendering
                 rendered = raw_config_content  # type: ignore[assignment]
+
+            # Auto-parse .jshc parameters for ad-hoc runs (config_path, no sweep)
+            if raw_config_content and not config_params:
+                try:
+                    from joshpy.config_parser import parse_jshc_content
+
+                    parsed = parse_jshc_content(raw_config_content)
+                    config_params.update(parsed)
+                except Exception:
+                    pass  # Parsing failures must not break job expansion
+
+            # Sync config_params → custom_tags (Josh uses these for export
+            # path template resolution like {maxGrowth})
+            for k, v in config_params.items():
+                if str(k) not in custom_tags:  # don't overwrite file param tags
+                    custom_tags[str(k)] = str(v)
 
             # Compute run_hash (includes josh + config + file_mappings)
             run_hash = _compute_run_hash(

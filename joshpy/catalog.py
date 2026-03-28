@@ -374,6 +374,56 @@ class ProjectCatalog:
             metadata=json.loads(row[7]) if row[7] else None,
         )
 
+    def get_file_mappings(self, name_or_hash: str) -> dict[str, Path]:
+        """Retrieve file_mappings dict from a registered data manifest.
+
+        Looks up by name first, then by manifest hash. Validates that all
+        files still exist at the recorded paths.
+
+        Args:
+            name_or_hash: Name or manifest hash to look up.
+
+        Returns:
+            Dict mapping josh external names to absolute file Paths.
+
+        Raises:
+            KeyError: If no manifest matches.
+            FileNotFoundError: If any recorded file no longer exists.
+        """
+        # Try by name first
+        row = self._conn.execute(
+            "SELECT file_inventory FROM data_manifests WHERE name = ?",
+            [name_or_hash],
+        ).fetchone()
+
+        # Fall back to hash
+        if row is None:
+            row = self._conn.execute(
+                "SELECT file_inventory FROM data_manifests WHERE manifest_hash = ?",
+                [name_or_hash],
+            ).fetchone()
+
+        if row is None:
+            raise KeyError(f"No data manifest found for '{name_or_hash}'")
+
+        file_inventory = json.loads(row[0])
+        result: dict[str, Path] = {}
+        missing: list[str] = []
+
+        for name, info in file_inventory.items():
+            p = Path(info["path"])
+            if not p.exists():
+                missing.append(f"  {name}: {p}")
+            result[name] = p
+
+        if missing:
+            raise FileNotFoundError(
+                f"Files from manifest '{name_or_hash}' no longer exist:\n"
+                + "\n".join(missing)
+            )
+
+        return result
+
     # -- Experiments ------------------------------------------------------
 
     def register_experiment(
