@@ -1,0 +1,391 @@
+---
+title: "GridSpec Variant Sweeps"
+description: "Automate file sweeps with GridSpec variant declarations"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+library(dplyr)
+```
+
+## Introduction
+
+In [Sweeping Over External Data](external-data-sweep.qmd), you built
+`FileSweepParameter` objects by hand -- listing each `.jshd` path explicitly.
+That works well for a few files, but scales poorly. A real climate project might
+have 24 monthly files per scenario across three SSP pathways: 72 paths to
+manage, and they all need to switch together per scenario.
+
+**GridSpec variants** solve this. You declare variant axes (e.g., `pattern`,
+`scenario`) in your `grid.yaml`, use `template_path` placeholders in file
+entries, and let `variant_sweep()` generate the entire `CompoundSweepParameter`
+automatically.
+
+This tutorial demonstrates:
+
+1. Writing a `grid.yaml` with variant declarations
+2. Exploring the variant API (`file_mappings`, `file_mappings_for`, `variant_sweep`)
+3. Combining `variant_sweep()` with `ConfigSweepParameter` for a cartesian sweep
+4. Using a `.josh.j2` model template with `GridSpec.template_vars`
+5. Running and analyzing results with `SweepManager`
+
+**Prerequisites**:
+
+- Complete [Preprocessing External Data](preprocessing.qmd) first to create the `.jshd` files
+- joshpy installed with `pip install joshpy[all]`
+
+## The Grid Manifest
+
+A `grid.yaml` with variants has three sections: grid geometry, variant axes, and
+file inventory. Here we declare a `pattern` axis with three values -- each
+corresponding to a soil quality `.jshd` file created in the preprocessing
+tutorial:
+
+```{python}
+#| label: show-grid-yaml
+from pathlib import Path
+
+GRID_YAML = Path("../../examples/external_data/variant_sweep_grid.yaml")
+
+print(GRID_YAML.read_text())
+```
+
+**Key rules:**
+
+- **`template_path`** contains `{variant_name}` placeholders. Each variant value
+  resolves to a concrete file path.
+- **`path`** (not used here) is for static files that don't vary by scenario.
+- **`variants`** declares each axis with `values` (allowed values) and `default`
+  (used when no variant is specified).
+
+See [Project Organization](project-organization.qmd#variant-data-files) for
+the full YAML specification.
+
+## Step 1: Explore the Variant API
+
+Load the manifest and inspect what GridSpec provides:
+
+```{python}
+#| label: load-gridspec
+from joshpy.grid import GridSpec
+
+grid = GridSpec.from_yaml(GRID_YAML)
+
+print(f"Grid: {grid.name}")
+print(f"Variant axes: {list(grid.variants.keys())}")
+print(f"Pattern values: {grid.variants['pattern']['values']}")
+print(f"Default: {grid.variants['pattern']['default']}")
+```
+
+### Default file mappings
+
+`file_mappings` resolves `template_path` entries using each axis's default value:
+
+```{python}
+#| label: file-mappings-default
+for name, path in grid.file_mappings.items():
+    print(f"  {name}: {path.name}")
+```
+
+### Scenario-specific mappings
+
+`file_mappings_for()` resolves for a specific variant value:
+
+```{python}
+#| label: file-mappings-for
+for pattern in grid.variants["pattern"]["values"]:
+    mappings = grid.file_mappings_for(pattern=pattern)
+    print(f"  pattern={pattern}: {mappings['soil_quality'].name}")
+```
+
+### Template variables
+
+`template_vars` provides the grid geometry dict used by `.josh.j2` model
+templates:
+
+```{python}
+#| label: template-vars
+for key, value in grid.template_vars.items():
+    print(f"  {key}: {value}")
+```
+
+### Generate a sweep parameter
+
+`variant_sweep()` builds a `CompoundSweepParameter` that zips all
+`template_path` files referencing the axis:
+
+```{python}
+#| label: variant-sweep-preview
+param = grid.variant_sweep("pattern")
+
+print(f"Type: {type(param).__name__}")
+print(f"Name: {param.name}")
+print(f"Labels: {param.labels}")
+print(f"Inner parameters: {len(param.parameters)}")
+
+for fp in param.parameters:
+    print(f"\n  {fp.name}:")
+    for path in fp.paths:
+        print(f"    {path.name}")
+```
+
+Each label corresponds to one scenario. All inner `FileSweepParameter` objects
+are zipped -- they switch together, not cartesian.
+
+## Step 2: Configure the Sweep
+
+Now combine `variant_sweep()` with a `ConfigSweepParameter`. The variant axis
+and config parameter expand as a cartesian product: 3 patterns x 3 growth rates
+= 9 jobs.
+
+```{python}
+#| label: configure-sweep
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.strategies import CartesianStrategy
+
+SOURCE_TEMPLATE = Path("../../examples/variant_sweep.josh.j2")
+CONFIG_TEMPLATE = Path("../../examples/templates/sweep_config.jshc.j2")
+
+config = JobConfig(
+    # Model template -- grid geometry injected from GridSpec
+    source_template_path=SOURCE_TEMPLATE,
+    template_vars={
+        **grid.template_vars,
+        "simulation_name": "Main",
+    },
+
+    # Config template -- maxGrowth swept per job
+    template_path=CONFIG_TEMPLATE,
+
+    # Data files -- defaults from GridSpec, overridden per scenario by sweep
+    file_mappings=grid.file_mappings,
+
+    simulation="Main",
+    replicates=2,
+
+    # Sweep: 3 growth rates x 3 soil patterns = 9 jobs x 2 replicates = 18 runs
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[5, 10, 15]),
+        ],
+        compound_parameters=[
+            grid.variant_sweep("pattern"),
+        ],
+        strategy=CartesianStrategy(),
+    ),
+)
+
+n_jobs = len(config.sweep.config_parameters[0].values) * len(grid.variants["pattern"]["values"])
+print(f"Config parameter: maxGrowth = {config.sweep.config_parameters[0].values}")
+print(f"Variant axis: pattern = {grid.variants['pattern']['values']}")
+print(f"Jobs: {n_jobs}")
+print(f"Replicates per job: {config.replicates}")
+print(f"Total simulation runs: {n_jobs * config.replicates}")
+```
+
+::: {.callout-note}
+## How the pieces fit together
+
+| Template type | Source | Resolves | What varies |
+|---------------|--------|----------|-------------|
+| Model (`.josh.j2`) | `source_template_path` | Grid geometry via `template_vars` | Grid bounds, resolution |
+| Config (`.jshc.j2`) | `template_path` | Parameter values via `ConfigSweepParameter` | `maxGrowth` |
+| Data paths | `file_mappings` + `variant_sweep()` | File paths via `CompoundSweepParameter` | Soil quality pattern |
+
+For more on how these three template types converge, see [Templating](../templating.qmd).
+:::
+
+## Step 3: Run with SweepManager
+
+```{python}
+#| label: build-manager
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+REGISTRY_PATH = "variant_sweep.duckdb"
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry(REGISTRY_PATH, experiment_name="variant_sweep_tutorial")
+    .with_cli(JoshCLI(josh_jar=JarMode.DEV))
+    .build()
+)
+
+print(f"Session ID: {manager.session_id}")
+print(f"Total jobs: {manager.job_set.total_jobs}")
+print(f"Total replicates: {manager.job_set.total_replicates}")
+```
+
+### Inspect expanded jobs
+
+Each job has a unique combination of `maxGrowth` and `pattern`:
+
+```{python}
+#| label: show-jobs
+for job in manager.job_set.jobs:
+    tags = job.custom_tags
+    print(f"Job {job.run_hash[:8]}: maxGrowth={tags.get('maxGrowth', '?')}, pattern={tags.get('pattern', '?')}")
+```
+
+### Execute
+
+```{python}
+#| label: run-sweep
+results = manager.run()
+
+print(f"\nSweep complete!")
+print(f"Succeeded: {results.succeeded}")
+print(f"Failed: {results.failed}")
+
+if results.failed > 0:
+    errors = []
+    for job, result in results:
+        if not result.success:
+            error_msg = result.stderr.strip() if result.stderr else "No error message"
+            errors.append(f"Job {job.run_hash}: {error_msg[:500]}")
+    error_detail = "\n".join(errors)
+    raise RuntimeError(f"Sweep failed: {results.failed} job(s) failed\n\n{error_detail}")
+```
+
+## Step 4: Load Results
+
+```{python}
+#| label: load-results
+manager.load_results()
+
+summary = manager.registry.get_data_summary()
+print(summary)
+```
+
+```{python}
+#| label: discovery
+print("Export variables:", manager.registry.list_export_variables())
+print("Config parameters:", manager.registry.list_config_parameters())
+```
+
+## Step 5: Analysis
+
+### Compare patterns (variant axis)
+
+```{python}
+#| label: fig-pattern-comparison
+#| fig-cap: "Tree height trajectories grouped by soil quality pattern"
+
+from joshpy.diagnostics import SimulationDiagnostics
+
+diag = SimulationDiagnostics(manager.registry)
+
+diag.plot_comparison(
+    "average_height",
+    group_by="pattern",
+    title="Tree Height by Soil Quality Pattern",
+)
+```
+
+### Compare growth rates (config parameter)
+
+```{python}
+#| label: fig-growth-comparison
+#| fig-cap: "Tree height trajectories grouped by maximum growth rate"
+
+diag.plot_comparison(
+    "average_height",
+    group_by="maxGrowth",
+    title="Tree Height by Max Growth Rate",
+)
+```
+
+### Cross-tabulation via SQL
+
+The variant label (`pattern`) and config parameter (`maxGrowth`) are both stored
+in `config_parameters`, so you can query the full cartesian product:
+
+```{python}
+#| label: sql-analysis
+result = manager.registry.query("""
+    SELECT
+        cp.pattern,
+        cp.maxGrowth,
+        MAX(cd.step) as final_step,
+        AVG(cd.average_height) as mean_final_height
+    FROM cell_data cd
+    JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+    WHERE cd.step = (SELECT MAX(step) FROM cell_data)
+    GROUP BY cp.pattern, cp.maxGrowth
+    ORDER BY cp.pattern, cp.maxGrowth
+""")
+result.df()
+```
+
+## Summary
+
+### Before: manual `FileSweepParameter`
+
+```python
+# From external-data-sweep tutorial -- paths listed by hand
+sweep=SweepConfig(
+    file_parameters=[
+        FileSweepParameter(
+            name="soil_quality",
+            paths=[
+                DATA_DIR / "soil_quality_gradient.jshd",
+                DATA_DIR / "soil_quality_triangle.jshd",
+                DATA_DIR / "soil_quality_stripes.jshd",
+            ],
+        ),
+    ],
+)
+```
+
+### After: `variant_sweep()`
+
+```python
+# Paths declared once in grid.yaml, resolved automatically
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+sweep=SweepConfig(
+    compound_parameters=[
+        grid.variant_sweep("pattern"),  # one line
+    ],
+)
+```
+
+The GridSpec approach scales to any number of `template_path` files per axis.
+With 24 monthly climate files across 3 SSP scenarios, `variant_sweep("scenario")`
+generates 24 zipped `FileSweepParameter` objects -- all switching together per
+scenario -- in a single call.
+
+### When to use which
+
+| Approach | Best for |
+|----------|----------|
+| `FileSweepParameter` (manual) | Ad-hoc sweeps, files without a naming convention |
+| `variant_sweep()` (GridSpec) | Structured projects where files follow `{axis}` naming patterns |
+| `variant_sweep(axes=[...])` | Multi-axis cross-products (e.g., scenario x GCM) |
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+import os
+
+manager.cleanup()
+manager.close()
+
+for f in [REGISTRY_PATH, f"{REGISTRY_PATH}.wal"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+## Learn More
+
+- [Sweeping Over External Data](external-data-sweep.qmd) -- `FileSweepParameter` basics
+- [Project Organization](project-organization.qmd) -- GridSpec setup, variant YAML spec, preprocessing with variants
+- [Templating](../templating.qmd) -- How model, config, and data path templates converge
+- [Multi-Session Sweeps](multi-session-sweeps.qmd) -- Tracking variant sweeps across sessions with `ProjectCatalog`

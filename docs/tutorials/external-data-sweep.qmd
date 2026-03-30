@@ -419,8 +419,9 @@ config = JobConfig(
 `CompoundSweepParameter` so all 24 files switch together per scenario. Static
 `path` files pass through unchanged.
 
-See [Project Organization](project-organization.qmd) for setting up GridSpec
-with variants.
+For a full runnable example, see the
+[GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd) tutorial. For the YAML
+specification, see [Project Organization](project-organization.qmd#variant-data-files).
 :::
 
 ## Cleanup

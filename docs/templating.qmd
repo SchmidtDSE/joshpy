@@ -329,6 +329,7 @@ scenario.
 
 ## Learn More
 
+- [GridSpec Variant Sweeps](tutorials/gridspec-variant-sweeps.qmd) -- End-to-end runnable tutorial combining model templates, config sweeps, and GridSpec variant sweeps
 - [Project Organization](tutorials/project-organization.qmd) -- GridSpec setup, variant data files, model and config templating
-- [Sweeping Over External Data](tutorials/external-data-sweep.qmd) -- Full walkthrough of file sweeps with `FileSweepParameter` and `variant_sweep()`
+- [Sweeping Over External Data](tutorials/external-data-sweep.qmd) -- Full walkthrough of file sweeps with `FileSweepParameter`
 - [Architecture](architecture.qmd) -- How all joshpy abstractions fit together
