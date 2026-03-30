@@ -1,4 +1,4 @@
-FROM ghcr.io/prefix-dev/pixi:0.45.0-bullseye-slim
+FROM ghcr.io/prefix-dev/pixi:0.66.0-bullseye-slim
 
 ARG USERNAME=vscode
 ARG USER_UID=1000
