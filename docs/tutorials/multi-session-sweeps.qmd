@@ -183,6 +183,13 @@ registry.close()
 
 ## Key Concepts
 
+::: {.callout-tip title="Sweeping over data files?"}
+If your sweep varies external data (e.g., climate scenarios) rather than
+config parameters, see [Sweeping Over External Data](external-data-sweep.qmd).
+GridSpec's `variant_sweep()` generates the sweep parameters from your YAML
+manifest — no manual `FileSweepParameter` construction needed.
+:::
+
 ### One registry per sweep
 
 Each sweep produces a self-contained registry. Analysis happens within that
