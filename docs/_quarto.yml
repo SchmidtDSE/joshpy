@@ -14,6 +14,7 @@ project:
     - tutorials/analysis.qmd             # Depends on demo_registry.duckdb
     - tutorials/preprocessing.qmd           # Creates .jshd files
     - tutorials/external-data-sweep.qmd     # Depends on preprocessing output
+    - tutorials/gridspec-variant-sweeps.qmd # Depends on preprocessing output
     - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
     - tutorials/debug-inspection.qmd     # Debug output inspection
@@ -52,6 +53,8 @@ website:
             href: tutorials/preprocessing.qmd
           - text: "External Data Sweeps"
             href: tutorials/external-data-sweep.qmd
+          - text: "GridSpec Variant Sweeps"
+            href: tutorials/gridspec-variant-sweeps.qmd
           - text: "Timestep Interventions"
             href: tutorials/timestep-interventions.qmd
           - text: "---"
@@ -110,6 +113,7 @@ website:
           contents:
             - tutorials/preprocessing.qmd
             - tutorials/external-data-sweep.qmd
+            - tutorials/gridspec-variant-sweeps.qmd
             - tutorials/timestep-interventions.qmd
         - section: "Project Structure"
           contents:

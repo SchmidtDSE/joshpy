@@ -1,0 +1,16 @@
+name: tutorial_variant
+grid:
+  size_m: 1000
+  low: [34.0, -116.4]
+  high: [33.7, -115.4]
+  steps: 10
+
+variants:
+  pattern:
+    values: [gradient, triangle, stripes]
+    default: gradient
+
+files:
+  soil_quality:
+    template_path: "soil_quality_{pattern}.jshd"
+    units: percent

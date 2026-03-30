@@ -196,7 +196,9 @@ for scenario in ["ssp245", "ssp370", "ssp585"]:
 grid.save()
 ```
 
-For a full walkthrough of sweeping over variant data files, see
+For a runnable end-to-end example, see
+[GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd). For the manual
+`FileSweepParameter` approach, see
 [Sweeping Over External Data](external-data-sweep.qmd).
 
 ## Model Templating (.josh.j2)

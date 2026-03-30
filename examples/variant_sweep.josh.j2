@@ -1,0 +1,55 @@
+# GridSpec variant sweep simulation - tree growth affected by external data
+# Demonstrates using .josh.j2 model templates with GridSpec variant sweeps
+#
+# Grid geometry is injected via template_vars from GridSpec.
+# The `external soil_quality` expression reads preprocessed .jshd data
+# that varies spatially and by scenario (via GridSpec variants).
+# Growth ceiling is controlled by `config sweep_config.maxGrowth`.
+
+start simulation {{ simulation_name }}
+
+  grid.size = {{ size_m }} m
+  grid.low = {{ low_lat }} degrees latitude, {{ low_lon }} degrees longitude
+  grid.high = {{ high_lat }} degrees latitude, {{ high_lon }} degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 count
+  steps.high = {{ steps }} count
+
+  exportFiles.patch = "file:///tmp/variant_sweep_{run_hash}_{replicate}.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create 10 count of ForeverTree
+
+  soil_quality.step = external soil_quality
+
+  export.average_height.step = mean(ForeverTree.height)
+  export.average_age.step = mean(ForeverTree.age)
+  export.soil_quality.step = soil_quality
+
+end patch
+
+start organism ForeverTree
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 meters
+
+  # Growth rate scales with soil quality from external data, capped by maxGrowth
+  max_growth.step = map here.soil_quality from [0 percent, 100 percent] to [0 meters, config sweep_config.maxGrowth] linear
+
+  height.step = prior.height + sample uniform from 0 meters to max_growth
+
+end organism
+
+start unit year
+
+  alias years
+  alias yr
+  alias yrs
+
+end unit

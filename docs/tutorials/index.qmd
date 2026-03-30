@@ -61,6 +61,17 @@ Run simulations with different input data files:
 
 Best for: Comparing climate scenarios, sensitivity to input data.
 
+### [GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd)
+
+Automate file sweeps using GridSpec variant declarations:
+
+- Declare variant axes in `grid.yaml` with `template_path` placeholders
+- `variant_sweep()` generates `CompoundSweepParameter` automatically
+- Combine with `ConfigSweepParameter` for cartesian parameter x scenario sweeps
+- Full end-to-end example with `.josh.j2`, `.jshc.j2`, and GridSpec
+
+Best for: Structured projects where data files follow a naming convention by scenario.
+
 ### [Timestep Interventions](timestep-interventions.qmd)
 
 Use single-time external data for initialization and discrete events:
