@@ -372,6 +372,57 @@ This tutorial demonstrated the **file sweep workflow**:
 - **Ensemble runs**: Use multiple realizations of stochastic inputs
 - **Data source comparison**: Compare satellite vs ground-truth inputs
 
+::: {.callout-tip title="GridSpec Variant Sweeps"}
+When your grid has data files that vary by scenario (e.g., 24 monthly climate
+files × 3 SSP scenarios), constructing `FileSweepParameter` objects by hand gets
+tedious. **GridSpec variants** automate this.
+
+Declare variant axes in your `grid.yaml`:
+
+```yaml
+variants:
+  scenario:
+    values: [ssp245, ssp370, ssp585]
+    default: ssp245
+
+files:
+  cover:
+    path: cover.jshd                              # static — no templating
+    units: percent
+  futureTempJan:
+    template_path: monthly/tas_{scenario}_jan.jshd # resolved per scenario
+    units: K
+  futurePrecipJan:
+    template_path: monthly/pr_{scenario}_jan.jshd
+    units: mm/year
+  # ... 24 monthly files total
+```
+
+Then generate the entire sweep in one line:
+
+```python
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+config = JobConfig(
+    file_mappings=grid.file_mappings,              # defaults (ssp245)
+    sweep=SweepConfig(
+        compound_parameters=[
+            grid.variant_sweep("scenario"),        # 24 FileSweepParameters, zipped
+        ],
+    ),
+    ...
+)
+```
+
+`variant_sweep("scenario")` finds every `template_path` file referencing
+`{scenario}`, builds one `FileSweepParameter` per file, and wraps them in a
+`CompoundSweepParameter` so all 24 files switch together per scenario. Static
+`path` files pass through unchanged.
+
+See [Project Organization](project-organization.qmd) for setting up GridSpec
+with variants.
+:::
+
 ## Cleanup
 
 ```{python}
