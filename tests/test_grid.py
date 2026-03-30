@@ -363,5 +363,475 @@ class TestGridSpecPreprocess(unittest.TestCase):
             self.assertEqual(grid.files["cover"]["units"], "fraction")
 
 
+class TestGridSpecVariants(unittest.TestCase):
+    """Tests for variant resolution (file_mappings, file_mappings_for)."""
+
+    def _make_variant_grid(self, tmpdir):
+        return GridSpec(
+            name="dev_fine",
+            output_dir=Path(tmpdir),
+            size_m=30,
+            low=(33.9, -116.05),
+            high=(33.95, -116.0),
+            steps=86,
+            files={
+                "cover": {"path": "cover.jshd", "units": "percent"},
+                "fireRbr": {"path": "fireRbr.jshd", "units": "rbr"},
+                "futureTempJan": {
+                    "template_path": "monthly/tas_{scenario}_jan.jshd",
+                    "units": "K",
+                },
+                "futureTempFeb": {
+                    "template_path": "monthly/tas_{scenario}_feb.jshd",
+                    "units": "K",
+                },
+                "futurePrecipJan": {
+                    "template_path": "monthly/pr_{scenario}_jan.jshd",
+                    "units": "mm/year",
+                },
+            },
+            variants={
+                "scenario": {
+                    "values": ["ssp245", "ssp370", "ssp585"],
+                    "default": "ssp245",
+                },
+            },
+        )
+
+    def test_file_mappings_resolves_template_path_with_default(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            mappings = grid.file_mappings
+            expected = (Path(tmpdir) / "monthly/tas_ssp245_jan.jshd").resolve()
+            self.assertEqual(mappings["futureTempJan"], expected)
+
+    def test_file_mappings_static_files_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            mappings = grid.file_mappings
+            self.assertEqual(
+                mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve()
+            )
+
+    def test_file_mappings_for_specific_variant(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            mappings = grid.file_mappings_for(scenario="ssp370")
+            expected = (Path(tmpdir) / "monthly/tas_ssp370_jan.jshd").resolve()
+            self.assertEqual(mappings["futureTempJan"], expected)
+            # Static files unchanged
+            self.assertEqual(
+                mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve()
+            )
+
+    def test_file_mappings_for_invalid_axis(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            with self.assertRaises(ValueError) as ctx:
+                grid.file_mappings_for(gcm="cesm2")
+            self.assertIn("Unknown variant axis", str(ctx.exception))
+
+    def test_file_mappings_for_invalid_value(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            with self.assertRaises(ValueError) as ctx:
+                grid.file_mappings_for(scenario="rcp45")
+            self.assertIn("Invalid value", str(ctx.exception))
+
+    def test_variants_property(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            self.assertIn("scenario", grid.variants)
+            self.assertEqual(
+                grid.variants["scenario"]["values"],
+                ["ssp245", "ssp370", "ssp585"],
+            )
+            self.assertEqual(grid.variants["scenario"]["default"], "ssp245")
+
+
+class TestGridSpecVariantSweep(unittest.TestCase):
+    """Tests for variant_sweep()."""
+
+    def _make_variant_grid(self, tmpdir):
+        return GridSpec(
+            name="dev_fine",
+            output_dir=Path(tmpdir),
+            size_m=30,
+            low=(33.9, -116.05),
+            high=(33.95, -116.0),
+            steps=86,
+            files={
+                "cover": {"path": "cover.jshd", "units": "percent"},
+                "futureTempJan": {
+                    "template_path": "monthly/tas_{scenario}_jan.jshd",
+                    "units": "K",
+                },
+                "futureTempFeb": {
+                    "template_path": "monthly/tas_{scenario}_feb.jshd",
+                    "units": "K",
+                },
+            },
+            variants={
+                "scenario": {
+                    "values": ["ssp245", "ssp370", "ssp585"],
+                    "default": "ssp245",
+                },
+            },
+        )
+
+    def test_variant_sweep_single_axis(self):
+        from joshpy.jobs import CompoundSweepParameter, FileSweepParameter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            param = grid.variant_sweep("scenario")
+
+            self.assertIsInstance(param, CompoundSweepParameter)
+            self.assertEqual(param.name, "scenario")
+            self.assertEqual(param.labels, ["ssp245", "ssp370", "ssp585"])
+            self.assertEqual(len(param.parameters), 2)  # two template_path files
+
+            # Check that each is a FileSweepParameter with 3 paths
+            for fp in param.parameters:
+                self.assertIsInstance(fp, FileSweepParameter)
+                self.assertEqual(len(fp.paths), 3)
+
+            # Verify specific paths
+            jan_param = next(p for p in param.parameters if p.name == "futureTempJan")
+            self.assertEqual(
+                jan_param.paths[1],
+                (Path(tmpdir) / "monthly/tas_ssp370_jan.jshd").resolve(),
+            )
+
+    def test_variant_sweep_subset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            param = grid.variant_sweep("scenario", values=["ssp245", "ssp585"])
+
+            self.assertEqual(param.labels, ["ssp245", "ssp585"])
+            for fp in param.parameters:
+                self.assertEqual(len(fp.paths), 2)
+
+    def test_variant_sweep_skips_static_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            param = grid.variant_sweep("scenario")
+
+            names = [p.name for p in param.parameters]
+            self.assertNotIn("cover", names)
+            self.assertIn("futureTempJan", names)
+            self.assertIn("futureTempFeb", names)
+
+    def test_variant_sweep_unknown_axis(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            with self.assertRaises(ValueError) as ctx:
+                grid.variant_sweep("gcm")
+            self.assertIn("Unknown variant axis", str(ctx.exception))
+
+    def test_variant_sweep_multi_axis(self):
+        from joshpy.jobs import CompoundSweepParameter
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="multi",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=86,
+                files={
+                    "cover": {"path": "cover.jshd", "units": "percent"},
+                    "futureTempJan": {
+                        "template_path": "monthly/tas_{scenario}_{gcm}_jan.jshd",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370"],
+                        "default": "ssp245",
+                    },
+                    "gcm": {
+                        "values": ["cesm2", "miroc6"],
+                        "default": "cesm2",
+                    },
+                },
+            )
+            param = grid.variant_sweep(axes=["scenario", "gcm"])
+
+            self.assertIsInstance(param, CompoundSweepParameter)
+            self.assertEqual(param.name, "scenario_gcm")
+            # 2 scenarios × 2 gcms = 4 combos
+            self.assertEqual(len(param.labels), 4)
+            self.assertIn("ssp245_cesm2", param.labels)
+            self.assertIn("ssp370_miroc6", param.labels)
+
+            # Only 1 template_path file (futureTempJan), cover is static
+            self.assertEqual(len(param.parameters), 1)
+            self.assertEqual(len(param.parameters[0].paths), 4)
+
+    def test_variant_sweep_axis_and_axes_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            with self.assertRaises(ValueError) as ctx:
+                grid.variant_sweep("scenario", axes=["scenario"])
+            self.assertIn("Cannot specify both", str(ctx.exception))
+
+    def test_variant_sweep_neither_axis_nor_axes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_variant_grid(tmpdir)
+            with self.assertRaises(ValueError) as ctx:
+                grid.variant_sweep()
+            self.assertIn("Must specify either", str(ctx.exception))
+
+    def test_variant_sweep_values_with_multi_axis_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="multi",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=86,
+                files={
+                    "temp": {
+                        "template_path": "tas_{scenario}_{gcm}_jan.jshd",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370"],
+                        "default": "ssp245",
+                    },
+                    "gcm": {
+                        "values": ["cesm2", "miroc6"],
+                        "default": "cesm2",
+                    },
+                },
+            )
+            with self.assertRaises(ValueError) as ctx:
+                grid.variant_sweep(axes=["scenario", "gcm"], values=["ssp245"])
+            self.assertIn("only supported for single-axis", str(ctx.exception))
+
+
+@unittest.skipIf(not HAS_YAML, "pyyaml not installed")
+class TestGridSpecVariantYaml(unittest.TestCase):
+    """Tests for variant YAML round-trip."""
+
+    def test_save_load_round_trip_with_variants(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="variant_grid",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=100,
+                files={
+                    "cover": {"path": "cover.jshd", "units": "percent"},
+                    "futureTempJan": {
+                        "template_path": "monthly/tas_{scenario}_jan.jshd",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370", "ssp585"],
+                        "default": "ssp245",
+                    },
+                },
+            )
+            grid.save()
+            loaded = GridSpec.from_yaml(Path(tmpdir) / "grid.yaml")
+
+            # Variants round-trip
+            self.assertIn("scenario", loaded.variants)
+            self.assertEqual(
+                loaded.variants["scenario"]["values"],
+                ["ssp245", "ssp370", "ssp585"],
+            )
+            self.assertEqual(loaded.variants["scenario"]["default"], "ssp245")
+
+            # Files round-trip: static has path, template has template_path
+            self.assertIn("path", loaded.files["cover"])
+            self.assertNotIn("template_path", loaded.files["cover"])
+            self.assertIn("template_path", loaded.files["futureTempJan"])
+            self.assertNotIn("path", loaded.files["futureTempJan"])
+            self.assertEqual(
+                loaded.files["futureTempJan"]["template_path"],
+                "monthly/tas_{scenario}_jan.jshd",
+            )
+
+    def test_no_variants_backward_compat(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="plain",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(0, 0),
+                high=(1, 1),
+                steps=10,
+                files={"cover": {"path": "cover.jshd", "units": "percent"}},
+            )
+            grid.save()
+            loaded = GridSpec.from_yaml(Path(tmpdir) / "grid.yaml")
+            self.assertEqual(loaded.variants, {})
+            self.assertEqual(loaded.files["cover"]["path"], "cover.jshd")
+
+    def test_yaml_structure_with_variants(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="test",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(0, 0),
+                high=(1, 1),
+                steps=10,
+                files={
+                    "cover": {"path": "cover.jshd", "units": "percent"},
+                    "temp": {
+                        "template_path": "tas_{scenario}.jshd",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370"],
+                        "default": "ssp245",
+                    },
+                },
+            )
+            saved = grid.save()
+            data = yaml.safe_load(saved.read_text())
+
+            # variants section exists
+            self.assertIn("variants", data)
+            self.assertIn("scenario", data["variants"])
+            self.assertEqual(
+                data["variants"]["scenario"]["values"], ["ssp245", "ssp370"]
+            )
+
+            # files: cover has path, temp has template_path
+            self.assertIn("path", data["files"]["cover"])
+            self.assertNotIn("template_path", data["files"]["cover"])
+            self.assertIn("template_path", data["files"]["temp"])
+            self.assertNotIn("path", data["files"]["temp"])
+
+
+class TestGridSpecPreprocessVariant(unittest.TestCase):
+    """Tests for preprocessing with variant kwarg."""
+
+    def _mock_cli(self, success=True):
+        cli = MagicMock()
+        mock_result = MagicMock()
+        mock_result.success = success
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        cli.preprocess.return_value = mock_result
+        return cli, mock_result
+
+    def test_preprocess_with_variant_resolves_template_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="test",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=10,
+                files={
+                    "futureTempJan": {
+                        "template_path": "monthly/tas_{scenario}_jan.jshd",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370"],
+                        "default": "ssp245",
+                    },
+                },
+            )
+            cli, _ = self._mock_cli(success=True)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="futureTempJan",
+                data_file=Path(tmpdir) / "tas.nc",
+                variable="tas",
+                units="K",
+                variant={"scenario": "ssp370"},
+            )
+
+            # Check the output path passed to CLI
+            config_arg = cli.preprocess.call_args[0][0]
+            expected = Path(tmpdir) / "monthly" / "tas_ssp370_jan.jshd"
+            self.assertEqual(config_arg.output, expected)
+
+    def test_preprocess_with_variant_skips_registration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="test",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=10,
+                files={
+                    "futureTempJan": {
+                        "template_path": "monthly/tas_{scenario}_jan.jshd",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370"],
+                        "default": "ssp245",
+                    },
+                },
+            )
+            cli, _ = self._mock_cli(success=True)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="futureTempJan",
+                data_file=Path(tmpdir) / "tas.nc",
+                variable="tas",
+                units="K",
+                variant={"scenario": "ssp370"},
+            )
+
+            # File entry should still have template_path, not be overwritten
+            self.assertIn("template_path", grid.files["futureTempJan"])
+            self.assertNotIn("path", grid.files["futureTempJan"])
+
+    def test_preprocess_without_variant_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="test",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=10,
+            )
+            cli, _ = self._mock_cli(success=True)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="cover",
+                data_file=Path(tmpdir) / "cover.nc",
+                variable="cover",
+                units="percent",
+            )
+
+            # Should register as a concrete path entry
+            self.assertIn("cover", grid.files)
+            self.assertIn("path", grid.files["cover"])
+            self.assertEqual(grid.files["cover"]["path"], "cover.jshd")
+
+
 if __name__ == "__main__":
     unittest.main()

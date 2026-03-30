@@ -311,8 +311,13 @@ All runs that share a registry are queryable together. Keep pointing at the same
 
 ### GridSpec (for projects with external data)
 
-If your model uses external data files (`.jshd`), a `GridSpec` YAML file
-defines grid geometry and inventories the data files:
+GridSpec is not required for basic iteration -- you can pass `file_mappings` as
+a plain dict or omit it entirely if your model has no external data. But when
+your project has preprocessed `.jshd` files across multiple scenarios, GridSpec
+keeps the inventory organized and scales to sweeps later.
+
+If your model uses external data files, a `GridSpec` YAML file defines grid
+geometry and inventories the data files:
 
 ```yaml
 # data/grids/dev_fine/grid.yaml
@@ -323,24 +328,35 @@ grid:
   high: [33.908, -116.0395]
   steps: 86
 
+variants:
+  scenario:
+    values: [ssp245, ssp370, ssp585]
+    default: ssp245
+
 files:
   cover:
     path: cover.jshd
     units: percent
+  futureTempJan:
+    template_path: monthly/tas_{scenario}_jan.jshd
+    units: K
 ```
 
 ```python
 from joshpy.grid import GridSpec
 
 grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+# Single run with a specific scenario
 config = JobConfig(
     source_path=Path("model.josh"),
     config_path=Path("config.jshc"),
-    file_mappings=grid.file_mappings,
+    file_mappings=grid.file_mappings_for(scenario="ssp370"),
 )
 ```
 
-See [Project Organization](project-organization.qmd) for the full GridSpec guide.
+See [Project Organization](project-organization.qmd) for the full GridSpec guide
+including variant data files and sweep generation.
 
 ## Next Steps
 

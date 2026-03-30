@@ -1,0 +1,334 @@
+---
+title: "Templating"
+description: "How joshpy uses templates to eliminate file duplication"
+---
+
+## Why Templates?
+
+A Josh simulation needs three inputs:
+
+1. A **model** (`.josh`) -- simulation logic, grid geometry, export paths
+2. A **config** (`.jshc`) -- parameter values
+3. **Data files** (`.jshd`) -- external raster data
+
+Without joshpy, you'd write these files by hand for every run. Change the grid?
+Copy the `.josh` file and edit the bounds. Sweep a parameter? Create 10 `.jshc`
+files that differ by one number. Run three climate scenarios? Triple the data
+file references.
+
+joshpy eliminates this duplication through **templating** at every layer:
+
+| Input | Template | Resolved at | What varies |
+|-------|----------|-------------|-------------|
+| Model | `.josh.j2` | `expand()` time | Grid geometry, export paths, debug flags |
+| Config | `.jshc.j2` | `expand()` time | Parameter values (sweep or ad-hoc) |
+| Data paths | `template_path` in GridSpec | `file_mappings` / `variant_sweep()` | Scenario (e.g., SSP245 vs SSP585) |
+
+Each template type targets a different concern, but they all converge into the
+same thing: a concrete `josh run` command.
+
+---
+
+## Model Templates (.josh.j2)
+
+A `.josh.j2` file is a [Jinja2](https://jinja.palletsprojects.com/) template
+for your simulation definition. Grid geometry and model-level settings become
+template variables:
+
+```jinja
+{# models/canonical.josh.j2 #}
+start simulation {{ simulation_name }}
+  grid.size = {{ size_m }} m
+  grid.low = {{ low_lat }} degrees latitude, {{ low_lon }} degrees longitude
+  grid.high = {{ high_lat }} degrees latitude, {{ high_lon }} degrees longitude
+  steps.low = 0 count
+  steps.high = {{ steps }} count
+end simulation
+
+start patch Default
+  Tree.init = create 10 count of Tree
+  export.treeCount.step = count(Tree)
+end patch
+
+start organism Tree
+  height.step = prior.height + sample uniform from 0 m to config sweep_config.maxGrowth
+end organism
+```
+
+**What varies:** Grid bounds, resolution, simulation name, export paths, debug
+flags. These come from `template_vars` on `JobConfig`.
+
+**What stays fixed:** The model logic (patches, organisms, equations). Written
+once, shared across every grid permutation.
+
+```{mermaid}
+flowchart LR
+    T[".josh.j2 template"]
+    V["template_vars<br/>(from GridSpec)"]
+    J[".josh file"]
+    T --> R["Jinja2 rendering"]
+    V --> R
+    R --> J
+
+    style T fill:#fff3e0,color:#333
+    style V fill:#e8f5e9,color:#333
+    style R fill:#e3f2fd,color:#333
+    style J fill:#f3e5f5,color:#333
+```
+
+GridSpec provides the `template_vars` dict automatically:
+
+```python
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+config = JobConfig(
+    source_template_path=Path("models/canonical.josh.j2"),
+    template_vars={
+        **grid.template_vars,                  # size_m, low_lat, low_lon, ...
+        "simulation_name": "CanonicalDevFine",
+    },
+    ...
+)
+```
+
+Switching grids means swapping `grid.template_vars` -- no file copying, no
+editing bounds in multiple places.
+
+---
+
+## Config Templates (.jshc.j2)
+
+A `.jshc.j2` file templates parameter values for sweeps:
+
+```jinja
+{# configs/sweep_config.jshc.j2 #}
+maxGrowth = {{ maxGrowth }} meters
+fireYear = {{ fireYear }} count
+seedSurvival = {{ seedSurvival }} %
+```
+
+**What varies:** One or more parameter values, injected by `ConfigSweepParameter`.
+
+**What stays fixed:** The parameter names and units.
+
+```{mermaid}
+flowchart LR
+    T[".jshc.j2 template"]
+    P["sweep values<br/>(maxGrowth: 25,50,75)"]
+    C1[".jshc (maxGrowth=25)"]
+    C2[".jshc (maxGrowth=50)"]
+    C3[".jshc (maxGrowth=75)"]
+    T --> R["Jinja2 rendering<br/>(per job)"]
+    P --> R
+    R --> C1
+    R --> C2
+    R --> C3
+
+    style T fill:#fff3e0,color:#333
+    style P fill:#e8f5e9,color:#333
+    style R fill:#e3f2fd,color:#333
+    style C1 fill:#f3e5f5,color:#333
+    style C2 fill:#f3e5f5,color:#333
+    style C3 fill:#f3e5f5,color:#333
+```
+
+```python
+config = JobConfig(
+    template_path=Path("configs/sweep_config.jshc.j2"),
+    source_path=Path("model.josh"),
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[25, 50, 75]),
+        ],
+    ),
+)
+```
+
+For ad-hoc iteration (no sweep), use a raw `.jshc` file with `config_path`
+instead. joshpy auto-parses the parameters for registry tracking.
+
+---
+
+## Data Path Templates (GridSpec Variants)
+
+GridSpec's `template_path` resolves data file paths per scenario:
+
+```yaml
+# data/grids/dev_fine/grid.yaml
+variants:
+  scenario:
+    values: [ssp245, ssp370, ssp585]
+    default: ssp245
+
+files:
+  cover:
+    path: cover.jshd                              # static
+    units: percent
+  futureTempJan:
+    template_path: monthly/tas_{scenario}_jan.jshd # varies by scenario
+    units: K
+```
+
+**What varies:** The `{scenario}` placeholder in file paths.
+
+**What stays fixed:** The josh external names, the grid geometry, the file
+units, and all static files.
+
+```{mermaid}
+flowchart LR
+    G["grid.yaml<br/>(template_path)"]
+    S["variant values<br/>(ssp245, ssp370, ssp585)"]
+    F1["file_mappings<br/>(ssp245 paths)"]
+    F2["file_mappings<br/>(ssp370 paths)"]
+    F3["file_mappings<br/>(ssp585 paths)"]
+
+    G --> R["variant_sweep()"]
+    S --> R
+    R --> F1
+    R --> F2
+    R --> F3
+
+    style G fill:#fff3e0,color:#333
+    style S fill:#e8f5e9,color:#333
+    style R fill:#e3f2fd,color:#333
+    style F1 fill:#f3e5f5,color:#333
+    style F2 fill:#f3e5f5,color:#333
+    style F3 fill:#f3e5f5,color:#333
+```
+
+```python
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+# Single scenario
+grid.file_mappings_for(scenario="ssp370")
+
+# Sweep all scenarios
+grid.variant_sweep("scenario")  # → CompoundSweepParameter
+```
+
+---
+
+## How They Converge
+
+At `expand()` time, all three template types resolve into concrete files.
+Consider a sweep with 3 `fireYear` values × 3 climate scenarios. `expand()`
+produces 9 jobs, each a fully resolved `josh run` invocation:
+
+```{mermaid}
+flowchart LR
+    subgraph templates ["Templates (written once)"]
+        direction TB
+        JT[".josh.j2"]
+        CT[".jshc.j2"]
+        GS["grid.yaml"]
+    end
+
+    EX["expand()"]
+
+    subgraph jobs ["9 expanded jobs (fireYear × scenario)"]
+        direction TB
+        J1["fireYear=50, ssp245"]
+        J2["fireYear=50, ssp370"]
+        J3["fireYear=50, ssp585"]
+        J4["fireYear=75, ssp245"]
+        J5["fireYear=75, ssp370"]
+        J6["fireYear=75, ssp585"]
+        J7["fireYear=100, ssp245"]
+        J8["fireYear=100, ssp370"]
+        J9["fireYear=100, ssp585"]
+    end
+
+    JT --> EX
+    CT --> EX
+    GS --> EX
+    EX --> J1
+    EX --> J2
+    EX --> J3
+    EX --> J4
+    EX --> J5
+    EX --> J6
+    EX --> J7
+    EX --> J8
+    EX --> J9
+
+    style templates fill:#fff3e0,color:#333
+    style JT fill:#fff,color:#333
+    style CT fill:#fff,color:#333
+    style GS fill:#fff,color:#333
+    style EX fill:#e3f2fd,color:#333
+    style jobs fill:#e8f5e9,color:#333
+    style J1 fill:#fff,color:#333
+    style J2 fill:#fff,color:#333
+    style J3 fill:#fff,color:#333
+    style J4 fill:#fff,color:#333
+    style J5 fill:#fff,color:#333
+    style J6 fill:#fff,color:#333
+    style J7 fill:#fff,color:#333
+    style J8 fill:#fff,color:#333
+    style J9 fill:#fff,color:#333
+```
+
+Each of those 9 boxes is a complete `josh run` command with its own rendered
+`.josh`, rendered `.jshc`, and resolved `.jshd` paths. joshpy writes no
+intermediate files to disk except the rendered `.josh` and `.jshc` for each job.
+
+### Putting it all together
+
+```python
+from pathlib import Path
+from joshpy.grid import GridSpec
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+config = JobConfig(
+    # Model template — grid geometry injected via template_vars
+    source_template_path=Path("models/canonical.josh.j2"),
+    template_vars={
+        **grid.template_vars,
+        "simulation_name": "CanonicalDevFine",
+    },
+
+    # Config template — parameter values injected per sweep job
+    template_path=Path("configs/sweep_config.jshc.j2"),
+
+    # Data files — defaults from GridSpec, overridden per scenario by sweep
+    file_mappings=grid.file_mappings,
+
+    # Sweep: 3 fire years × 3 climate scenarios = 9 jobs
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="fireYear", values=[50, 75, 100]),
+        ],
+        compound_parameters=[
+            grid.variant_sweep("scenario"),
+        ],
+    ),
+    replicates=5,
+)
+
+# 9 jobs × 5 replicates = 45 simulation runs
+manager = (
+    SweepManager.builder(config)
+    .with_defaults(registry="experiment.duckdb")
+    .build()
+)
+```
+
+Each of the 9 expanded jobs has:
+
+- A rendered `.josh` file with the dev_fine grid geometry
+- A rendered `.jshc` file with one specific `fireYear` value
+- A `file_mappings` dict with one specific scenario's `.jshd` paths
+
+The templates eliminate the alternative: 9 hand-written `.josh` files, 9
+`.jshc` files, and manual bookkeeping of which `.jshd` files go with which
+scenario.
+
+## Learn More
+
+- [Project Organization](tutorials/project-organization.qmd) -- GridSpec setup, variant data files, model and config templating
+- [Sweeping Over External Data](tutorials/external-data-sweep.qmd) -- Full walkthrough of file sweeps with `FileSweepParameter` and `variant_sweep()`
+- [Architecture](architecture.qmd) -- How all joshpy abstractions fit together

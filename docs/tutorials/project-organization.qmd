@@ -111,6 +111,94 @@ tutorial for details.
 For the ad-hoc iteration workflow (run, tweak, compare with labels), see the
 [Single Run & Iteration](manual-workflow.qmd) tutorial.
 
+### Variant Data Files
+
+Grids often have data files that vary by scenario (e.g., SSP245 vs SSP370 climate
+projections) while sharing the same spatial geometry. GridSpec **variants** let you
+declare these axes in YAML:
+
+```yaml
+# data/grids/dev_fine/grid.yaml
+name: dev_fine
+grid:
+  size_m: 30
+  low: [33.902, -116.0465]
+  high: [33.908, -116.0395]
+  steps: 86
+
+variants:
+  scenario:
+    values: [ssp245, ssp370, ssp585]
+    default: ssp245
+
+files:
+  # Static files use `path` — no templating
+  cover:
+    path: cover.jshd
+    units: percent
+  fireRbr:
+    path: fireRbr.jshd
+    units: rbr
+
+  # Variant files use `template_path` — {scenario} resolved at runtime
+  futureTempJan:
+    template_path: monthly/tas_{scenario}_jan.jshd
+    units: K
+  futurePrecipJan:
+    template_path: monthly/pr_{scenario}_jan.jshd
+    units: mm/year
+  # ... etc for all monthly files
+```
+
+Key rules:
+
+- **`path`** — literal file path, no templating. For static/scenario-independent files.
+- **`template_path`** — contains `{variant_name}` placeholders. Mutually exclusive
+  with `path`.
+- **`variants`** — declared once at the top level. Each axis has `values` and `default`.
+
+Use the variant API to work with scenario-varying data:
+
+```python
+grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
+
+# Inspect available axes
+grid.variants
+# {"scenario": {"values": ["ssp245", "ssp370", "ssp585"], "default": "ssp245"}}
+
+# Default file_mappings — template_path resolved with defaults
+grid.file_mappings
+# {"cover": Path(".../cover.jshd"),
+#  "futureTempJan": Path(".../monthly/tas_ssp245_jan.jshd"), ...}
+
+# Specific scenario
+grid.file_mappings_for(scenario="ssp370")
+# {"cover": Path(".../cover.jshd"),                          ← unchanged
+#  "futureTempJan": Path(".../monthly/tas_ssp370_jan.jshd"), ← resolved}
+
+# Generate a sweep over all scenarios (one line!)
+param = grid.variant_sweep("scenario")
+# → CompoundSweepParameter with one FileSweepParameter per template_path file
+```
+
+For preprocessing variant files, pass the `variant` kwarg so the output path
+is resolved from the template:
+
+```python
+for scenario in ["ssp245", "ssp370", "ssp585"]:
+    grid.preprocess_netcdf(cli,
+        josh_name="futureTempJan",
+        variant={"scenario": scenario},
+        data_file=Path(f"raw/tas_{scenario}_jan.nc"),
+        variable="tas",
+        units="K",
+    )
+grid.save()
+```
+
+For a full walkthrough of sweeping over variant data files, see
+[Sweeping Over External Data](external-data-sweep.qmd).
+
 ## Model Templating (.josh.j2)
 
 When the same model logic runs across multiple grid configurations, use

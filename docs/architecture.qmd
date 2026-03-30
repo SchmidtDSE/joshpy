@@ -61,12 +61,17 @@ grid:
   high: [33.908, -116.0395]
   steps: 86
 
+variants:
+  scenario:
+    values: [ssp245, ssp370, ssp585]
+    default: ssp245
+
 files:
   cover:
-    path: cover.jshd
+    path: cover.jshd                              # static
     units: percent
   futureTempJan:
-    path: monthly/futureTempJan.jshd
+    template_path: monthly/tas_{scenario}_jan.jshd # varies by scenario
     units: K
 ```
 
@@ -74,8 +79,10 @@ files:
 from joshpy.grid import GridSpec
 
 grid = GridSpec.from_yaml("data/grids/dev_fine/grid.yaml")
-grid.file_mappings   # {"cover": Path("/abs/.../cover.jshd"), ...}
-grid.template_vars   # {"size_m": 30, "low_lat": 33.902, ...}
+grid.file_mappings                        # defaults → tas_ssp245_jan.jshd
+grid.file_mappings_for(scenario="ssp370") # specific scenario
+grid.variant_sweep("scenario")            # → CompoundSweepParameter for sweeps
+grid.template_vars                        # {"size_m": 30, "low_lat": 33.902, ...}
 ```
 
 GridSpec also handles preprocessing: `grid.preprocess_geotiff(cli, ...)` renders

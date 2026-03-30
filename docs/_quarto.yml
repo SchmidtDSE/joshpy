@@ -23,6 +23,7 @@ project:
     - tutorials/multi-session-sweeps.qmd    # ProjectCatalog for sweeps
     - tutorials/remote-execution.qmd     # Josh Cloud execution
     - tutorials/low-level-components.qmd # Advanced: manual component usage
+    - templating.qmd
     - architecture.qmd
     - best-practices.qmd
     - reference/
@@ -75,6 +76,8 @@ website:
             href: tutorials/switching-versions.qmd
           - text: "Remote Execution"
             href: tutorials/remote-execution.qmd
+      - text: "Templating"
+        href: templating.qmd
       - text: "Architecture"
         href: architecture.qmd
       - text: "Best Practices"
@@ -124,6 +127,10 @@ website:
             - tutorials/switching-versions.qmd
             - tutorials/remote-execution.qmd
     
+    - title: "Templating"
+      contents:
+        - templating.qmd
+
     - title: "Architecture"
       contents:
         - architecture.qmd

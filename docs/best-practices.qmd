@@ -376,55 +376,67 @@ If the underlying GeoTIFF/NetCDF source file changes, the JSHD becomes stale wit
 stored in the JSHD header.
 :::
 
-**User responsibility:** Track which source files produced which JSHD files. Consider:
-
-- A preprocessing log file (YAML or JSON)
-- Directory naming that encodes grid parameters
-- Re-preprocessing when in doubt
+**User responsibility:** Track which source files produced which JSHD files.
+Use [GridSpec](tutorials/project-organization.qmd) to co-locate grid geometry
+and the data file inventory in a single `grid.yaml` manifest, rather than
+maintaining a separate preprocessing log.
 
 ### Directory Organization
 
-Organize preprocessed data by grid definition:
+Organize preprocessed data by grid, with a `grid.yaml` manifest per grid:
 
 ```
 data/
 ├── raw/                          # Original GeoTIFF/NetCDF files
-│   ├── climate_rcp45.nc
-│   ├── climate_rcp85.nc
+│   ├── climate_ssp245.nc
+│   ├── climate_ssp585.nc
 │   └── soil_quality.tif
 │
-├── preprocessed/
-│   ├── grid_1km_socal/           # Named for grid definition
-│   │   ├── climate_rcp45.jshd
-│   │   ├── climate_rcp85.jshd
-│   │   └── soil_quality.jshd
-│   │
-│   └── grid_500m_jotr/           # Different grid = separate directory
-│       ├── climate_rcp45.jshd
-│       └── climate_rcp85.jshd
-│
-└── preprocessing_log.yaml        # Track what was preprocessed how
+└── grids/
+    ├── grid_1km_socal/           # Named for grid definition
+    │   ├── grid.yaml             # GridSpec manifest
+    │   ├── soil_quality.jshd
+    │   └── monthly/
+    │       ├── tas_ssp245_jan.jshd
+    │       └── tas_ssp585_jan.jshd
+    │
+    └── grid_500m_jotr/           # Different grid = separate directory
+        ├── grid.yaml
+        ├── soil_quality.jshd
+        └── monthly/
+            ├── tas_ssp245_jan.jshd
+            └── tas_ssp585_jan.jshd
 ```
 
-Example `preprocessing_log.yaml`:
+The `grid.yaml` tracks grid geometry, data units, and scenario variants in one
+place:
 
 ```yaml
-grid_1km_socal:
-  grid_size: 1000m
-  bounds: "33.7-34.0 lat, -116.4 to -115.4 lon"
-  crs: EPSG:4326
-  files:
-    climate_rcp45.jshd:
-      source: raw/climate_rcp45.nc
-      variable: temperature
-      units: K
-      preprocessed: 2024-01-15
-    climate_rcp85.jshd:
-      source: raw/climate_rcp85.nc
-      variable: temperature
-      units: K
-      preprocessed: 2024-01-15
+# data/grids/grid_1km_socal/grid.yaml
+name: grid_1km_socal
+grid:
+  size_m: 1000
+  low: [33.7, -116.4]
+  high: [34.0, -115.4]
+  steps: 86
+
+variants:
+  scenario:
+    values: [ssp245, ssp585]
+    default: ssp245
+
+files:
+  soil_quality:
+    path: soil_quality.jshd
+    units: percent
+  futureTempJan:
+    template_path: monthly/tas_{scenario}_jan.jshd
+    units: K
 ```
+
+This eliminates the need for a separate `preprocessing_log.yaml`. See
+[Project Organization](tutorials/project-organization.qmd) for the full
+GridSpec guide including variant data files.
 
 ### Verification
 

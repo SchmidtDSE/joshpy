@@ -41,6 +41,7 @@ Example::
 
 from __future__ import annotations
 
+import itertools
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -87,17 +88,26 @@ class GridSpec:
     high: tuple[float, float]  # (lat, lon)
     steps: int
     files: dict[str, dict[str, str]] = field(default_factory=dict)
+    variants: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def file_mappings(self) -> dict[str, Path]:
         """Build a file_mappings dict with absolute paths.
 
+        For files with ``template_path``, placeholders are resolved using
+        each variant axis's default value.
+
         Returns:
             Dict mapping josh external names to absolute file Paths.
         """
+        defaults = {k: v["default"] for k, v in self.variants.items()}
         result: dict[str, Path] = {}
         for josh_name, info in self.files.items():
-            result[josh_name] = (self.output_dir / info["path"]).resolve()
+            if "template_path" in info:
+                resolved = info["template_path"].format(**defaults)
+                result[josh_name] = (self.output_dir / resolved).resolve()
+            else:
+                result[josh_name] = (self.output_dir / info["path"]).resolve()
         return result
 
     @property
@@ -115,6 +125,171 @@ class GridSpec:
             "high_lon": self.high[1],
             "steps": self.steps,
         }
+
+    def file_mappings_for(self, **variant_values: str) -> dict[str, Path]:
+        """Resolve file mappings with specific variant values.
+
+        Static ``path`` files pass through unchanged. ``template_path`` files
+        are resolved using the provided values (falling back to defaults for
+        unspecified axes).
+
+        Args:
+            **variant_values: Axis name → value overrides
+                (e.g., ``scenario="ssp370"``).
+
+        Returns:
+            Dict mapping josh external names to absolute file Paths.
+
+        Raises:
+            ValueError: If an axis name or value is invalid.
+        """
+        for axis, value in variant_values.items():
+            if axis not in self.variants:
+                raise ValueError(
+                    f"Unknown variant axis '{axis}'. "
+                    f"Available: {list(self.variants.keys())}"
+                )
+            allowed = self.variants[axis]["values"]
+            if value not in allowed:
+                raise ValueError(
+                    f"Invalid value '{value}' for axis '{axis}'. "
+                    f"Allowed: {allowed}"
+                )
+
+        merged = {k: v["default"] for k, v in self.variants.items()}
+        merged.update(variant_values)
+
+        result: dict[str, Path] = {}
+        for josh_name, info in self.files.items():
+            if "template_path" in info:
+                resolved = info["template_path"].format(**merged)
+                result[josh_name] = (self.output_dir / resolved).resolve()
+            else:
+                result[josh_name] = (self.output_dir / info["path"]).resolve()
+        return result
+
+    def variant_sweep(
+        self,
+        axis: str | None = None,
+        *,
+        axes: list[str] | None = None,
+        values: list[str] | None = None,
+    ) -> CompoundSweepParameter:
+        """Generate a CompoundSweepParameter from variant axes.
+
+        Finds all ``template_path`` files referencing the given axis/axes,
+        builds one ``FileSweepParameter`` per file, and wraps them in a
+        ``CompoundSweepParameter`` so all files switch together.
+
+        Args:
+            axis: Single axis name (common case).
+            axes: List of axis names for multi-axis cross-product.
+            values: Subset of values to sweep (single-axis only).
+
+        Returns:
+            A ``CompoundSweepParameter`` ready for
+            ``SweepConfig.compound_parameters``.
+
+        Raises:
+            ValueError: If axis/axes are invalid, both provided, or values
+                used with multi-axis.
+        """
+        from joshpy.jobs import CompoundSweepParameter, FileSweepParameter
+
+        if axis is not None and axes is not None:
+            raise ValueError(
+                "Cannot specify both 'axis' and 'axes'. "
+                "Use 'axis' for single-axis or 'axes' for multi-axis."
+            )
+        if axis is None and axes is None:
+            raise ValueError("Must specify either 'axis' or 'axes'.")
+
+        if axis is not None:
+            # Single-axis mode
+            if axis not in self.variants:
+                raise ValueError(
+                    f"Unknown variant axis '{axis}'. "
+                    f"Available: {list(self.variants.keys())}"
+                )
+            sweep_values = values if values is not None else self.variants[axis]["values"]
+            if values is not None:
+                allowed = self.variants[axis]["values"]
+                for v in values:
+                    if v not in allowed:
+                        raise ValueError(
+                            f"Invalid value '{v}' for axis '{axis}'. "
+                            f"Allowed: {allowed}"
+                        )
+
+            # Find template_path files referencing this axis
+            placeholder = "{" + axis + "}"
+            defaults = {k: v["default"] for k, v in self.variants.items()}
+
+            parameters: list[FileSweepParameter] = []
+            for josh_name, info in sorted(self.files.items()):
+                if "template_path" not in info:
+                    continue
+                if placeholder not in info["template_path"]:
+                    continue
+                paths = []
+                for val in sweep_values:
+                    resolved_vars = {**defaults, axis: val}
+                    resolved = info["template_path"].format(**resolved_vars)
+                    paths.append((self.output_dir / resolved).resolve())
+                parameters.append(
+                    FileSweepParameter(name=josh_name, paths=paths)
+                )
+
+            return CompoundSweepParameter(
+                name=axis,
+                parameters=parameters,
+                labels=list(sweep_values),
+            )
+        else:
+            # Multi-axis mode
+            assert axes is not None
+            if values is not None:
+                raise ValueError(
+                    "'values' parameter is only supported for single-axis sweeps."
+                )
+            for ax in axes:
+                if ax not in self.variants:
+                    raise ValueError(
+                        f"Unknown variant axis '{ax}'. "
+                        f"Available: {list(self.variants.keys())}"
+                    )
+
+            # Build cross-product of axis values
+            axis_values = [self.variants[ax]["values"] for ax in axes]
+            combos = list(itertools.product(*axis_values))
+
+            defaults = {k: v["default"] for k, v in self.variants.items()}
+
+            # Find template_path files referencing ANY of the axes
+            placeholders = ["{" + ax + "}" for ax in axes]
+            parameters = []
+            for josh_name, info in sorted(self.files.items()):
+                if "template_path" not in info:
+                    continue
+                if not any(ph in info["template_path"] for ph in placeholders):
+                    continue
+                paths = []
+                for combo in combos:
+                    resolved_vars = {**defaults}
+                    for ax, val in zip(axes, combo):
+                        resolved_vars[ax] = val
+                    resolved = info["template_path"].format(**resolved_vars)
+                    paths.append((self.output_dir / resolved).resolve())
+                parameters.append(
+                    FileSweepParameter(name=josh_name, paths=paths)
+                )
+
+            labels = ["_".join(combo) for combo in combos]
+            return CompoundSweepParameter(
+                name="_".join(axes),
+                parameters=parameters,
+                labels=labels,
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> GridSpec:
@@ -137,13 +312,22 @@ class GridSpec:
         files = {}
         for josh_name, info in data.get("files", {}).items():
             if isinstance(info, dict):
-                files[josh_name] = {
-                    "path": info.get("path", ""),
-                    "units": info.get("units", ""),
-                }
+                entry: dict[str, str] = {"units": info.get("units", "")}
+                if "template_path" in info:
+                    entry["template_path"] = info["template_path"]
+                else:
+                    entry["path"] = info.get("path", "")
+                files[josh_name] = entry
             else:
                 # Simple form: just a path string
                 files[josh_name] = {"path": str(info), "units": ""}
+
+        variants = {}
+        for axis_name, axis_info in data.get("variants", {}).items():
+            variants[axis_name] = {
+                "values": axis_info.get("values", []),
+                "default": axis_info.get("default", ""),
+            }
 
         return cls(
             name=data.get("name", path.stem),
@@ -153,6 +337,7 @@ class GridSpec:
             high=high,
             steps=grid.get("steps", 0),
             files=files,
+            variants=variants,
         )
 
     def save(self, path: str | Path | None = None) -> Path:
@@ -181,13 +366,24 @@ class GridSpec:
             },
         }
 
+        if self.variants:
+            data["variants"] = {}
+            for axis_name, axis_info in sorted(self.variants.items()):
+                data["variants"][axis_name] = {
+                    "values": axis_info["values"],
+                    "default": axis_info["default"],
+                }
+
         if self.files:
             data["files"] = {}
             for josh_name, info in sorted(self.files.items()):
-                data["files"][josh_name] = {
-                    "path": info["path"],
-                    "units": info["units"],
-                }
+                entry: dict[str, str] = {}
+                if "template_path" in info:
+                    entry["template_path"] = info["template_path"]
+                else:
+                    entry["path"] = info["path"]
+                entry["units"] = info["units"]
+                data["files"][josh_name] = entry
 
         path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
         return path
@@ -220,9 +416,27 @@ class GridSpec:
         return Path(fd.name)
 
     def _compute_output_path(
-        self, josh_name: str, subdirectory: str | None = None
+        self,
+        josh_name: str,
+        subdirectory: str | None = None,
+        variant: dict[str, str] | None = None,
     ) -> Path:
-        """Compute the output .jshd path for a preprocessed file."""
+        """Compute the output .jshd path for a preprocessed file.
+
+        When *variant* is provided and the file has a ``template_path``,
+        the template is resolved with the variant values (plus defaults
+        for unspecified axes) and used as the output path.
+        """
+        if variant is not None and josh_name in self.files:
+            info = self.files[josh_name]
+            if "template_path" in info:
+                merged = {k: v["default"] for k, v in self.variants.items()}
+                merged.update(variant)
+                resolved = info["template_path"].format(**merged)
+                out_path = self.output_dir / resolved
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                return out_path
+
         if subdirectory:
             out_dir = self.output_dir / subdirectory
         else:
@@ -259,6 +473,7 @@ class GridSpec:
         parallel: bool = False,
         amend: bool = False,
         subdirectory: str | None = None,
+        variant: dict[str, str] | None = None,
     ) -> CLIResult:
         """Preprocess a GeoTIFF file using this grid's geometry.
 
@@ -273,13 +488,17 @@ class GridSpec:
             parallel: Enable parallel processing.
             amend: Append to existing .jshd file.
             subdirectory: Optional subdirectory within output_dir.
+            variant: Variant values to resolve ``template_path``
+                (e.g., ``{"scenario": "ssp370"}``). When provided, the
+                output path is resolved from the file's template_path
+                and ``_register_file()`` is skipped.
 
         Returns:
             CLIResult from the preprocessing command.
         """
         from joshpy.cli import GeotiffPreprocessConfig
 
-        output_path = self._compute_output_path(josh_name, subdirectory)
+        output_path = self._compute_output_path(josh_name, subdirectory, variant)
         script_path = self._render_preprocess_script()
         try:
             config = GeotiffPreprocessConfig(
@@ -298,7 +517,7 @@ class GridSpec:
         finally:
             script_path.unlink(missing_ok=True)
 
-        if result.success:
+        if result.success and variant is None:
             self._register_file(josh_name, output_path, units)
 
         return result
@@ -319,6 +538,7 @@ class GridSpec:
         parallel: bool = False,
         amend: bool = False,
         subdirectory: str | None = None,
+        variant: dict[str, str] | None = None,
     ) -> CLIResult:
         """Preprocess a NetCDF file using this grid's geometry.
 
@@ -336,13 +556,17 @@ class GridSpec:
             parallel: Enable parallel processing.
             amend: Append to existing .jshd file.
             subdirectory: Optional subdirectory within output_dir.
+            variant: Variant values to resolve ``template_path``
+                (e.g., ``{"scenario": "ssp370"}``). When provided, the
+                output path is resolved from the file's template_path
+                and ``_register_file()`` is skipped.
 
         Returns:
             CLIResult from the preprocessing command.
         """
         from joshpy.cli import NetcdfPreprocessConfig
 
-        output_path = self._compute_output_path(josh_name, subdirectory)
+        output_path = self._compute_output_path(josh_name, subdirectory, variant)
         script_path = self._render_preprocess_script()
         try:
             config = NetcdfPreprocessConfig(
@@ -364,7 +588,7 @@ class GridSpec:
         finally:
             script_path.unlink(missing_ok=True)
 
-        if result.success:
+        if result.success and variant is None:
             self._register_file(josh_name, output_path, units)
 
         return result
@@ -382,6 +606,7 @@ class GridSpec:
         parallel: bool = False,
         amend: bool = False,
         subdirectory: str | None = None,
+        variant: dict[str, str] | None = None,
     ) -> CLIResult:
         """Preprocess a CSV point data file using this grid's geometry.
 
@@ -396,13 +621,17 @@ class GridSpec:
             parallel: Enable parallel processing.
             amend: Append to existing .jshd file.
             subdirectory: Optional subdirectory within output_dir.
+            variant: Variant values to resolve ``template_path``
+                (e.g., ``{"scenario": "ssp370"}``). When provided, the
+                output path is resolved from the file's template_path
+                and ``_register_file()`` is skipped.
 
         Returns:
             CLIResult from the preprocessing command.
         """
         from joshpy.cli import CsvPreprocessConfig
 
-        output_path = self._compute_output_path(josh_name, subdirectory)
+        output_path = self._compute_output_path(josh_name, subdirectory, variant)
         script_path = self._render_preprocess_script()
         try:
             config = CsvPreprocessConfig(
@@ -421,7 +650,7 @@ class GridSpec:
         finally:
             script_path.unlink(missing_ok=True)
 
-        if result.success:
+        if result.success and variant is None:
             self._register_file(josh_name, output_path, units)
 
         return result
