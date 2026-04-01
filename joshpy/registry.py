@@ -245,6 +245,23 @@ class ConfigInfo:
 
 
 @dataclass
+class ConfigSourceInfo:
+    """Result of resolving a config's original source file on disk.
+
+    Attributes:
+        path: Original file path, or None if not recoverable
+            (e.g., templated configs where no config_path was set).
+        exists: Whether the file currently exists on disk.
+        content_matches: Whether the file's current content matches
+            the config_content stored in the registry.
+    """
+
+    path: Path | None
+    exists: bool
+    content_matches: bool
+
+
+@dataclass
 class RunInfo:
     """Information about a job run.
 
@@ -1174,8 +1191,85 @@ class RunRegistry:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / filename
-        output_path.write_text(config.config_content)
+
+        header = (
+            f"# READ-ONLY snapshot exported from registry\n"
+            f"# Run: {run_hash}\n"
+            f"# Editing this file has no effect. To change parameters,\n"
+            f"# edit your source .jshc file and re-run.\n\n"
+        )
+        output_path.write_text(header + config.config_content)
         return output_path
+
+    def resolve_config_source(self, run_hash: str) -> ConfigSourceInfo:
+        """Locate the original .jshc file on disk and check if it still matches.
+
+        Looks up the session metadata to find the original ``config_path``,
+        then checks whether the file exists and whether its content has
+        changed since it was registered.
+
+        Args:
+            run_hash: The run hash to look up.
+
+        Returns:
+            A :class:`ConfigSourceInfo` describing the file's status.
+        """
+        config_info = self.get_config_by_hash(run_hash)
+        if config_info is None:
+            return ConfigSourceInfo(path=None, exists=False, content_matches=False)
+
+        session = self.get_session(config_info.session_id)
+        if session is None:
+            return ConfigSourceInfo(path=None, exists=False, content_matches=False)
+
+        job_config = session.job_config
+        if job_config is None or getattr(job_config, "config_path", None) is None:
+            return ConfigSourceInfo(path=None, exists=False, content_matches=False)
+
+        original_path = Path(job_config.config_path)
+        if not original_path.exists():
+            return ConfigSourceInfo(
+                path=original_path, exists=False, content_matches=False
+            )
+
+        try:
+            current_content = original_path.read_text()
+        except OSError:
+            return ConfigSourceInfo(
+                path=original_path, exists=False, content_matches=False
+            )
+
+        matches = current_content == config_info.config_content
+        return ConfigSourceInfo(
+            path=original_path, exists=True, content_matches=matches
+        )
+
+    def compare_configs(
+        self,
+        label_or_hash_1: str,
+        label_or_hash_2: str,
+        ide: str = "vscode",
+    ) -> tuple[Path, Path]:
+        """Export two run configs and open a side-by-side diff in an IDE.
+
+        Convenience wrapper around :func:`joshpy.diff.open_diff`.
+
+        Args:
+            label_or_hash_1: Label or run_hash of the first run.
+            label_or_hash_2: Label or run_hash of the second run.
+            ide: IDE to open diff in (default: ``"vscode"``).
+                Supported: ``"vscode"``, ``"cursor"``.
+
+        Returns:
+            Tuple of Paths to the exported config files.
+
+        Raises:
+            KeyError: If a label or hash is not found.
+            RuntimeError: If the IDE CLI is not found in PATH.
+        """
+        from joshpy.config import open_diff
+
+        return open_diff(self, label_or_hash_1, label_or_hash_2, ide=ide)
 
     # ========== Run Tracking ==========
 
