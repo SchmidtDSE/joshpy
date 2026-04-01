@@ -170,6 +170,14 @@ finally:
 Both runs now live in the same DuckDB file. Each has a unique label and a
 content-based hash.
 
+::: {.callout-tip title="Single-File Workflow"}
+You don't need separate `.jshc` files for each run. You can edit
+`baseline.jshc` directly -- change `maxGrowth` from 50 to 100 -- and re-run
+with `.with_label("high_growth")`. The registry stores the full config content
+at registration time, so both versions are preserved even though only one file
+exists on disk. The run hash changes automatically because the content changed.
+:::
+
 ## Step 3: Compare
 
 ### See What's There
@@ -185,6 +193,13 @@ registry.list_labels()
 # What parameters were auto-parsed from the .jshc files?
 registry.list_config_parameters()
 ```
+
+::: {.callout-note title="Labels vs Parameters"}
+`group_by="label"` groups by user-assigned names -- organizational metadata you
+control. `group_by="maxGrowth"` groups by the actual parameter value extracted
+from the stored config content. Labels carry whatever meaning you give them;
+parameter grouping uses the run's own data.
+:::
 
 ### Compare by Label
 
@@ -245,6 +260,17 @@ code --diff tmp/baseline.jshc tmp/high_growth.jshc
 
 The configs are stored in the registry at registration time, so this works even
 if you later modify or delete the original `.jshc` files.
+
+::: {.callout-tip title="Command-Line Diffing"}
+You can also diff configs directly from the terminal:
+
+```bash
+python -m joshpy.diff iteration_demo.duckdb baseline high_growth
+```
+
+This exports both configs and opens them in VS Code's diff viewer. See
+`python -m joshpy.diff --help` for options.
+:::
 
 ## Analysis in R
 
