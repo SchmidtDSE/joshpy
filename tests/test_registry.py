@@ -1466,7 +1466,9 @@ class TestLabelSystem(unittest.TestCase):
             path = self.registry.export_config("baseline", tmpdir)
             self.assertTrue(path.exists())
             self.assertEqual(path.name, "baseline.jshc")
-            self.assertEqual(path.read_text(), "param = 10 count")
+            content = path.read_text()
+            self.assertIn("READ-ONLY", content)
+            self.assertIn("param = 10 count", content)
 
     def test_export_config_by_hash(self):
         import tempfile
