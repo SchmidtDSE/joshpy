@@ -261,15 +261,18 @@ code --diff tmp/baseline.jshc tmp/high_growth.jshc
 The configs are stored in the registry at registration time, so this works even
 if you later modify or delete the original `.jshc` files.
 
-::: {.callout-tip title="Command-Line Diffing"}
-You can also diff configs directly from the terminal:
+::: {.callout-tip title="Command-Line Config Tools"}
+You can view or diff configs directly from the terminal:
 
 ```bash
-python -m joshpy.diff iteration_demo.duckdb baseline high_growth
+# View a single config
+python -m joshpy.config iteration_demo.duckdb --view baseline
+
+# Diff two configs in VS Code
+python -m joshpy.config iteration_demo.duckdb --diff baseline high_growth
 ```
 
-This exports both configs and opens them in VS Code's diff viewer. See
-`python -m joshpy.diff --help` for options.
+See `python -m joshpy.config --help` for options (IDE selection, export-only mode).
 :::
 
 ## Analysis in R
