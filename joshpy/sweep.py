@@ -795,6 +795,8 @@ class SweepManagerBuilder:
         self._catalog: Any | None = None  # ProjectCatalog
         self._catalog_experiment_name: str | None = None
         self._label: str | None = None
+        self._label_force: bool = False
+        self._label_on_collision: str | None = None
 
     def with_registry(
         self,
@@ -925,7 +927,12 @@ class SweepManagerBuilder:
         self._catalog_experiment_name = experiment_name
         return self
 
-    def with_label(self, label: str) -> SweepManagerBuilder:
+    def with_label(
+        self,
+        label: str,
+        force: bool = False,
+        on_collision: str | None = None,
+    ) -> SweepManagerBuilder:
         """Set a label for this run (single-job configs only).
 
         The label is applied at build() time when the job is registered.
@@ -933,6 +940,11 @@ class SweepManagerBuilder:
 
         Args:
             label: Human-readable label for this run.
+            force: If True, reassign the label even if already taken
+                (drops the old label).
+            on_collision: Collision strategy. ``"timestamp"`` archives the
+                old label with a timestamp suffix so the bare label always
+                points to the latest run. Mutually exclusive with ``force``.
 
         Returns:
             Self for chaining.
@@ -944,8 +956,18 @@ class SweepManagerBuilder:
             ...     .with_label("baseline")
             ...     .build()
             ... )
+
+            >>> # Re-run with same label, archive the old one
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_registry("experiment.duckdb")
+            ...     .with_label("baseline", on_collision="timestamp")
+            ...     .build()
+            ... )
         """
         self._label = label
+        self._label_force = force
+        self._label_on_collision = on_collision
         return self
 
     def build(self) -> SweepManager:
@@ -1031,7 +1053,10 @@ class SweepManagerBuilder:
                             f"individual runs via registry.label_run()."
                         )
                     self._registry.label_run(
-                        job_set.jobs[0].run_hash, self._label
+                        job_set.jobs[0].run_hash,
+                        self._label,
+                        force=self._label_force,
+                        on_collision=self._label_on_collision,
                     )
 
         # Register with catalog if configured

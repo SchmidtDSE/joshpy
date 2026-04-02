@@ -912,6 +912,84 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
             SweepManagerBuilder(config).with_registry(":memory:").with_label("test").build()
         self.assertIn("single-job", str(ctx.exception))
 
+    def test_with_label_force(self):
+        """with_label(force=True) should reassign an existing label."""
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+
+        config1 = JobConfig(
+            template_string="maxGrowth = 50 meters",
+            simulation="Main",
+        )
+        m1 = (
+            SweepManagerBuilder(config1)
+            .with_registry(registry, experiment_name="test1")
+            .with_label("baseline")
+            .build()
+        )
+        hash1 = m1.job_set.jobs[0].run_hash
+        m1.cleanup()
+
+        config2 = JobConfig(
+            template_string="maxGrowth = 100 meters",
+            simulation="Main",
+        )
+        m2 = (
+            SweepManagerBuilder(config2)
+            .with_registry(registry, experiment_name="test2")
+            .with_label("baseline", force=True)
+            .build()
+        )
+        hash2 = m2.job_set.jobs[0].run_hash
+        m2.cleanup()
+
+        self.assertEqual(registry.resolve_label("baseline"), hash2)
+        # Old run has no label
+        config_info = registry.get_config_by_hash(hash1)
+        self.assertIsNone(config_info.label)
+        registry.close()
+
+    def test_with_label_on_collision_timestamp(self):
+        """with_label(on_collision='timestamp') should archive old label."""
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+
+        config1 = JobConfig(
+            template_string="maxGrowth = 50 meters",
+            simulation="Main",
+        )
+        m1 = (
+            SweepManagerBuilder(config1)
+            .with_registry(registry, experiment_name="test1")
+            .with_label("baseline")
+            .build()
+        )
+        hash1 = m1.job_set.jobs[0].run_hash
+        m1.cleanup()
+
+        config2 = JobConfig(
+            template_string="maxGrowth = 100 meters",
+            simulation="Main",
+        )
+        m2 = (
+            SweepManagerBuilder(config2)
+            .with_registry(registry, experiment_name="test2")
+            .with_label("baseline", on_collision="timestamp")
+            .build()
+        )
+        hash2 = m2.job_set.jobs[0].run_hash
+        m2.cleanup()
+
+        # Bare label points to new run
+        self.assertEqual(registry.resolve_label("baseline"), hash2)
+        # Old run has a timestamped label
+        old_config = registry.get_config_by_hash(hash1)
+        self.assertIsNotNone(old_config.label)
+        self.assertRegex(old_config.label, r"^baseline_\d{8}_\d{6}")
+        registry.close()
+
 
 if __name__ == "__main__":
     unittest.main()

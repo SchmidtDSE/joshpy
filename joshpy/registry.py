@@ -1124,22 +1124,50 @@ class RunRegistry:
 
     # ========== Labels ==========
 
-    def label_run(self, run_hash: str, label: str, force: bool = False) -> None:
+    def label_run(
+        self,
+        run_hash: str,
+        label: str,
+        force: bool = False,
+        on_collision: str | None = None,
+    ) -> None:
         """Assign a human-readable label to a run configuration.
 
-        Labels are unique within a registry. Use ``force=True`` to reassign
-        a label that is already in use.
+        Labels are unique within a registry. When a collision occurs, the
+        behavior depends on ``force`` and ``on_collision``:
+
+        - Default: raise ``ValueError``
+        - ``force=True``: silently drop the old label and reassign
+        - ``on_collision="timestamp"``: rename the old label with a timestamp
+          suffix (e.g., ``baseline`` → ``baseline_20260402_153000``) and assign
+          the bare label to the new run
 
         Args:
             run_hash: The run hash to label.
             label: Human-readable label (e.g., "baseline", "high_mortality").
             force: If True, reassign the label even if already taken.
+            on_collision: Collision strategy. ``"timestamp"`` archives the old
+                label with a timestamp suffix. Mutually exclusive with ``force``.
 
         Raises:
             KeyError: If run_hash does not exist.
             ValueError: If label is already assigned to a different run
-                and force is False.
+                and neither force nor on_collision is set, or if both
+                force and on_collision are set, or if on_collision has
+                an invalid value.
         """
+        if force and on_collision is not None:
+            raise ValueError(
+                "force and on_collision are mutually exclusive. "
+                "Use force=True to drop the old label, or "
+                "on_collision='timestamp' to archive it."
+            )
+        if on_collision is not None and on_collision != "timestamp":
+            raise ValueError(
+                f"Invalid on_collision value: {on_collision!r}. "
+                "Must be 'timestamp' or None."
+            )
+
         # Verify run_hash exists
         existing = self.conn.execute(
             "SELECT run_hash FROM job_configs WHERE run_hash = ?", [run_hash]
@@ -1152,15 +1180,40 @@ class RunRegistry:
             "SELECT run_hash FROM job_configs WHERE label = ?", [label]
         ).fetchone()
         if taken is not None and taken[0] != run_hash:
-            if not force:
+            if on_collision == "timestamp":
+                # Archive old label with timestamp suffix
+                old_created_at = self.conn.execute(
+                    "SELECT created_at FROM job_configs WHERE run_hash = ?",
+                    [taken[0]],
+                ).fetchone()[0]
+                ts = (
+                    old_created_at.strftime("%Y%m%d_%H%M%S")
+                    if old_created_at
+                    else datetime.now().strftime("%Y%m%d_%H%M%S")
+                )
+                new_old_label = f"{label}_{ts}"
+                counter = 2
+                while self.conn.execute(
+                    "SELECT 1 FROM job_configs WHERE label = ?", [new_old_label]
+                ).fetchone() is not None:
+                    new_old_label = f"{label}_{ts}_{counter}"
+                    counter += 1
+                self.conn.execute(
+                    "UPDATE job_configs SET label = ? WHERE run_hash = ?",
+                    [new_old_label, taken[0]],
+                )
+            elif force:
+                # Clear old assignment
+                self.conn.execute(
+                    "UPDATE job_configs SET label = NULL WHERE label = ?",
+                    [label],
+                )
+            else:
                 raise ValueError(
                     f"Label '{label}' already assigned to run {taken[0]}. "
-                    f"Use force=True to reassign, or choose a different label."
+                    f"Use force=True to reassign, or "
+                    f"on_collision='timestamp' to archive the old label."
                 )
-            # Clear old assignment
-            self.conn.execute(
-                "UPDATE job_configs SET label = NULL WHERE label = ?", [label]
-            )
 
         self.conn.execute(
             "UPDATE job_configs SET label = ? WHERE run_hash = ?", [label, run_hash]
@@ -1195,6 +1248,31 @@ class RunRegistry:
         ).fetchone()
         if result is None:
             raise KeyError(f"No run found with label '{label}'")
+        return result[0]
+
+    def resolve_latest(self, prefix: str) -> str:
+        """Get the run_hash of the most recently created run whose label starts with prefix.
+
+        Useful after ``on_collision="timestamp"`` to find the latest run among
+        ``"baseline"``, ``"baseline_20260402_153000"``, etc.
+
+        Args:
+            prefix: Label prefix to match (e.g., "baseline").
+
+        Returns:
+            The run_hash of the most recently created matching run.
+
+        Raises:
+            KeyError: If no runs have labels starting with prefix.
+        """
+        result = self.conn.execute(
+            "SELECT run_hash FROM job_configs "
+            "WHERE label IS NOT NULL AND starts_with(label, ?) "
+            "ORDER BY created_at DESC LIMIT 1",
+            [prefix],
+        ).fetchone()
+        if result is None:
+            raise KeyError(f"No runs found with label prefix '{prefix}'")
         return result[0]
 
     def export_config(self, label_or_hash: str, output_dir: str | Path) -> Path:

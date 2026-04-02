@@ -1496,6 +1496,69 @@ class TestLabelSystem(unittest.TestCase):
         config = self.registry.get_config_by_hash("hash_aaa111")
         self.assertIsNone(config.label)
 
+    def test_label_on_collision_timestamp(self):
+        """on_collision='timestamp' archives the old label with a timestamp suffix."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run("hash_bbb222", "baseline", on_collision="timestamp")
+        # Bare label now points to the new run
+        self.assertEqual(self.registry.resolve_label("baseline"), "hash_bbb222")
+        # Old run has a timestamped label
+        labels = self.registry.list_labels()
+        old_labels = [l for l, h in labels if h == "hash_aaa111"]
+        self.assertEqual(len(old_labels), 1)
+        self.assertRegex(old_labels[0], r"^baseline_\d{8}_\d{6}$")
+
+    def test_label_on_collision_timestamp_disambiguation(self):
+        """Same-second collisions get _2, _3 suffixes."""
+        # Register a third run
+        self.registry.register_run(
+            self.session_id, "hash_ccc333", "/sim.josh",
+            "param = 30 count", None, {"param": 30},
+        )
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run("hash_bbb222", "baseline", on_collision="timestamp")
+        self.registry.label_run("hash_ccc333", "baseline", on_collision="timestamp")
+        # Bare label -> hash_ccc333
+        self.assertEqual(self.registry.resolve_label("baseline"), "hash_ccc333")
+        # Two archived labels, one with _2 suffix if same second
+        labels = {l: h for l, h in self.registry.list_labels()}
+        archived = [l for l in labels if l.startswith("baseline_")]
+        self.assertEqual(len(archived), 2)
+        # All three hashes should be labeled
+        self.assertEqual(len(labels), 3)
+
+    def test_label_force_and_on_collision_mutually_exclusive(self):
+        """force=True and on_collision cannot be used together."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        with self.assertRaises(ValueError) as ctx:
+            self.registry.label_run(
+                "hash_bbb222", "baseline", force=True, on_collision="timestamp"
+            )
+        self.assertIn("mutually exclusive", str(ctx.exception))
+
+    def test_label_on_collision_invalid_value(self):
+        """Invalid on_collision value raises ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            self.registry.label_run("hash_aaa111", "test", on_collision="invalid")
+        self.assertIn("Invalid on_collision", str(ctx.exception))
+
+    def test_resolve_latest_single_match(self):
+        """resolve_latest returns the only matching run."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.assertEqual(self.registry.resolve_latest("baseline"), "hash_aaa111")
+
+    def test_resolve_latest_multiple_matches(self):
+        """resolve_latest returns the most recently created run."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run("hash_bbb222", "baseline", on_collision="timestamp")
+        # hash_bbb222 was registered after hash_aaa111 so it has a later created_at
+        self.assertEqual(self.registry.resolve_latest("baseline"), "hash_bbb222")
+
+    def test_resolve_latest_no_match(self):
+        """resolve_latest raises KeyError when no labels match."""
+        with self.assertRaises(KeyError):
+            self.registry.resolve_latest("nonexistent")
+
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
 class TestGitHash(unittest.TestCase):
