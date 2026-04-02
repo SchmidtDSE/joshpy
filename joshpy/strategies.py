@@ -951,6 +951,10 @@ def run_adaptive_sweep(
             job = _create_single_job(config, params, trial_num)
 
             # 4. Register job in registry
+            josh_content = None
+            if job.source_path and job.source_path.exists():
+                josh_content = job.source_path.read_text()
+
             registry.register_run(
                 session_id=session_id,
                 run_hash=job.run_hash,
@@ -958,6 +962,7 @@ def run_adaptive_sweep(
                 config_content=job.config_content,
                 file_mappings=_convert_file_mappings(job.file_mappings),
                 parameters=job.parameters,
+                josh_content=josh_content,
             )
 
             # 5. Execute CLI

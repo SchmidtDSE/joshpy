@@ -761,6 +761,7 @@ class TestDataClasses(unittest.TestCase):
             run_hash="abc123",
             session_id="session1",
             josh_path="/path/to/sim.josh",
+            josh_content="start simulation Main\nend simulation\n",
             config_content="content",
             file_mappings={"data": {"path": "/path/to/data.jshd", "hash": "abc"}},
             parameters={"x": 1},
@@ -769,6 +770,7 @@ class TestDataClasses(unittest.TestCase):
         )
         self.assertEqual(config.run_hash, "abc123")
         self.assertEqual(config.parameters, {"x": 1})
+        self.assertIn("start simulation", config.josh_content)
 
     def test_run_info_attributes(self):
         """RunInfo should have all expected attributes."""

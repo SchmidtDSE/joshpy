@@ -114,6 +114,17 @@ Track parameter sweeps across sessions with `ProjectCatalog`:
 
 Best for: Projects with multiple systematic sweeps to keep organized.
 
+### [Inspecting Runs from the Registry](inspecting-runs.qmd)
+
+View, export, and diff stored configs and josh sources:
+
+- `registry.export_config()` and `registry.export_josh()` for file export
+- `registry.compare_configs()` and `registry.compare_josh()` for IDE diffing
+- `python -m joshpy.inspect` CLI for terminal use
+- Smart file resolution (real file when unchanged, snapshot when drifted)
+
+Best for: Understanding what changed between runs, debugging failures.
+
 ## Debugging & Profiling
 
 ### [Debug Output Inspection](debug-inspection.qmd)

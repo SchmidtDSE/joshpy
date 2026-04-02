@@ -226,23 +226,11 @@ diag.plot_comparison(
 )
 ```
 
-To see exactly what changed between the two configs:
+The registry stores the full config content and josh source for every run. You
+can view or diff them with the inspect module -- see
+[Inspecting Runs from the Registry](inspecting-runs.qmd) for the full workflow.
 
-```{python}
-import tempfile
-
-tmpdir = tempfile.mkdtemp()
-p1 = registry.export_config("gradient_low", tmpdir)
-p2 = registry.export_config("stripes_high", tmpdir)
-
-print(f"--- {p1.name} ---")
-print(p1.read_text())
-print(f"--- {p2.name} ---")
-print(p2.read_text())
-```
-
-The config diff shows parameter changes, but what about external data files?
-`get_file_mappings()` returns the `.jshd` paths that were used for each run:
+The `get_file_mappings()` method recalls which `.jshd` data files were used:
 
 ```{python}
 registry.get_file_mappings("gradient_low")
@@ -251,14 +239,6 @@ registry.get_file_mappings("gradient_low")
 ```{python}
 registry.get_file_mappings("stripes_high")
 ```
-
-::: {.callout-tip title="Command-Line Config Tools"}
-```bash
-python -m joshpy.config complete_demo.duckdb --diff gradient_low stripes_high
-```
-
-See `python -m joshpy.config --help` for IDE selection and export-only mode.
-:::
 
 ```{python}
 registry.close()

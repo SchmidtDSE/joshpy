@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS job_configs (
     run_hash        VARCHAR(12) PRIMARY KEY,
     session_id      VARCHAR REFERENCES sweep_sessions(session_id),
     josh_path       TEXT,
+    josh_content    TEXT,
     config_content  TEXT,
     file_mappings   JSON,
     label           VARCHAR,

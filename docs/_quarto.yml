@@ -12,6 +12,7 @@ project:
     - tutorials/sweep-manager.qmd        # Also creates demo_registry.duckdb
     - tutorials/project-organization.qmd # Non-executable guide
     - tutorials/analysis.qmd             # Depends on demo_registry.duckdb
+    - tutorials/inspecting-runs.qmd      # View/diff stored configs and josh sources
     - tutorials/preprocessing.qmd           # Creates .jshd files
     - tutorials/external-data-sweep.qmd     # Depends on preprocessing output
     - tutorials/gridspec-variant-sweeps.qmd # Depends on preprocessing output
@@ -47,6 +48,8 @@ website:
             href: tutorials/sweep-manager.qmd
           - text: "Analysis & Visualization"
             href: tutorials/analysis.qmd
+          - text: "Inspecting Runs"
+            href: tutorials/inspecting-runs.qmd
           - text: "---"
           - text: "External Data"
           - text: "Preprocessing"
@@ -109,6 +112,7 @@ website:
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
             - tutorials/analysis.qmd
+            - tutorials/inspecting-runs.qmd
         - section: "External Data"
           contents:
             - tutorials/preprocessing.qmd

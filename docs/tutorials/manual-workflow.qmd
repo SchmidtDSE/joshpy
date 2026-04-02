@@ -238,46 +238,12 @@ diag.plot_comparison(
 )
 ```
 
-### Export Configs for IDE Diffing
+### Inspect Stored Configs
 
-To see exactly what changed between two runs, export the stored configs:
-
-```{python}
-import tempfile
-tmpdir = tempfile.mkdtemp()
-
-path1 = registry.export_config("baseline", tmpdir)
-path2 = registry.export_config("high_growth", tmpdir)
-
-print(f"Exported: {path1.name}, {path2.name}")
-print(f"\n--- {path1.name} ---")
-print(path1.read_text())
-print(f"--- {path2.name} ---")
-print(path2.read_text())
-```
-
-In practice you'd diff these in your IDE:
-
-```bash
-code --diff tmp/baseline.jshc tmp/high_growth.jshc
-```
-
-The configs are stored in the registry at registration time, so this works even
-if you later modify or delete the original `.jshc` files.
-
-::: {.callout-tip title="Command-Line Config Tools"}
-You can view or diff configs directly from the terminal:
-
-```bash
-# View a single config
-python -m joshpy.config iteration_demo.duckdb --view baseline
-
-# Diff two configs in VS Code
-python -m joshpy.config iteration_demo.duckdb --diff baseline high_growth
-```
-
-See `python -m joshpy.config --help` for options (IDE selection, export-only mode).
-:::
+The registry stores the full config content for every run, so you can always
+review or diff what was run -- even if the original files have changed. See
+[Inspecting Runs from the Registry](inspecting-runs.qmd) for the full
+view/diff workflow, including the `python -m joshpy.inspect` CLI.
 
 ## Analysis in R
 
