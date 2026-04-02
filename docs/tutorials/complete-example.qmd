@@ -241,6 +241,17 @@ print(f"--- {p2.name} ---")
 print(p2.read_text())
 ```
 
+The config diff shows parameter changes, but what about external data files?
+`get_file_mappings()` returns the `.jshd` paths that were used for each run:
+
+```{python}
+registry.get_file_mappings("gradient_low")
+```
+
+```{python}
+registry.get_file_mappings("stripes_high")
+```
+
 ::: {.callout-tip title="Command-Line Config Tools"}
 ```bash
 python -m joshpy.config complete_demo.duckdb --diff gradient_low stripes_high
