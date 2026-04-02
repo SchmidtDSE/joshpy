@@ -1,0 +1,419 @@
+---
+title: "Complete Example"
+description: "From first run to full sweep: GridSpec, templates, and catalog in one workflow"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Overview
+
+This tutorial walks through the complete lifecycle of a joshpy project:
+
+1. **Set up** a GridSpec grid manifest, model template, and config template
+2. **Run a single scenario** to check the model works (ad-hoc)
+3. **Try a different variant** and compare the two runs
+4. **Sweep** the full parameter x variant space systematically
+5. **Track** everything with ProjectCatalog
+
+It uses all three template types together: `.josh.j2` (model), `.jshc.j2`
+(config), and GridSpec variant declarations (data paths).
+
+**Prerequisites**: Complete [Preprocessing External Data](preprocessing.qmd)
+first to create the `.jshd` data files used here.
+
+## The Three Templates
+
+A joshpy project with external data has three kinds of templates that converge
+at run time:
+
+| Template type | File | What varies |
+|---------------|------|-------------|
+| Model (`.josh.j2`) | Grid geometry, export paths | Grid bounds, resolution |
+| Config (`.jshc.j2`) | Parameter values | `maxGrowth`, etc. |
+| Data paths (GridSpec) | File paths via `{variant}` placeholders | Soil pattern, climate scenario |
+
+Let's look at each one.
+
+### Grid manifest (`grid.yaml`)
+
+```{python}
+from pathlib import Path
+
+GRID_YAML = Path("../../examples/external_data/variant_sweep_grid.yaml")
+print(GRID_YAML.read_text())
+```
+
+The `template_path` uses a `{pattern}` placeholder. GridSpec resolves it to
+concrete `.jshd` file paths per variant value.
+
+### Model template (`.josh.j2`)
+
+```{python}
+SOURCE_TEMPLATE = Path("../../examples/variant_sweep.josh.j2")
+print(SOURCE_TEMPLATE.read_text())
+```
+
+Grid geometry (`size_m`, `low_lat`, etc.) comes from `GridSpec.template_vars` at
+render time. The model reads external soil quality data and caps tree growth at
+`config sweep_config.maxGrowth`.
+
+### Config template (`.jshc.j2`)
+
+```{python}
+CONFIG_TEMPLATE = Path("../../examples/templates/sweep_config.jshc.j2")
+print(CONFIG_TEMPLATE.read_text())
+```
+
+`{{ maxGrowth }}` is filled in per job -- either from `template_vars` (ad-hoc)
+or from `ConfigSweepParameter` (sweep).
+
+## Setup
+
+```{python}
+#| echo: false
+import os
+for f in ["complete_demo.duckdb", "complete_demo.duckdb.wal",
+          "complete_sweep.duckdb", "complete_sweep.duckdb.wal",
+          "complete_catalog.duckdb"]:
+    if os.path.exists(f):
+        os.remove(f)
+```
+
+```{python}
+from joshpy.grid import GridSpec
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.catalog import ProjectCatalog
+
+grid = GridSpec.from_yaml(GRID_YAML)
+cli = JoshCLI(josh_jar=JarMode.DEV)
+catalog = ProjectCatalog("complete_catalog.duckdb")
+
+ADHOC_REGISTRY = "complete_demo.duckdb"
+SWEEP_REGISTRY = "complete_sweep.duckdb"
+```
+
+A quick look at what GridSpec provides:
+
+```{python}
+print(f"Grid: {grid.name}")
+print(f"Variant axes: {list(grid.variants.keys())}")
+print(f"Pattern values: {grid.variants['pattern']['values']}")
+print(f"\nTemplate vars for .josh.j2:")
+for key, value in grid.template_vars.items():
+    print(f"  {key}: {value}")
+```
+
+## Part 1: Ad-Hoc Iteration
+
+Before committing to a full sweep, try a single configuration to make sure the
+model runs and produces reasonable output.
+
+### Run 1: Gradient pattern, low growth
+
+For a single run with templates, set parameter values in `template_vars` and
+pick a specific variant with `file_mappings_for()`:
+
+```{python}
+config_gradient = JobConfig(
+    source_template_path=SOURCE_TEMPLATE,
+    template_vars={**grid.template_vars, "simulation_name": "Main", "maxGrowth": 5},
+    template_path=CONFIG_TEMPLATE,
+    file_mappings=grid.file_mappings_for(pattern="gradient"),
+    simulation="Main",
+    replicates=2,
+)
+
+manager = (
+    SweepManager.builder(config_gradient)
+    .with_registry(ADHOC_REGISTRY, experiment_name="gradient_low")
+    .with_cli(cli)
+    .with_label("gradient_low")
+    .with_catalog(catalog, experiment_name="adhoc_iteration")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        for job, result in results:
+            if not result.success:
+                print(f"Error: {result.stderr[:300]}")
+        raise RuntimeError("Run failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+### Quick look
+
+```{python}
+from joshpy.registry import RunRegistry
+from joshpy.diagnostics import SimulationDiagnostics
+
+registry = RunRegistry(ADHOC_REGISTRY)
+diag = SimulationDiagnostics(registry)
+diag.plot_timeseries("average_height", title="Gradient Pattern, maxGrowth=5")
+```
+
+```{python}
+registry.close()
+```
+
+### Run 2: Stripes pattern, high growth
+
+What happens with a different soil pattern and higher growth cap? Change
+`template_vars` and `file_mappings_for()`:
+
+```{python}
+config_stripes = JobConfig(
+    source_template_path=SOURCE_TEMPLATE,
+    template_vars={**grid.template_vars, "simulation_name": "Main", "maxGrowth": 15},
+    template_path=CONFIG_TEMPLATE,
+    file_mappings=grid.file_mappings_for(pattern="stripes"),
+    simulation="Main",
+    replicates=2,
+)
+
+manager = (
+    SweepManager.builder(config_stripes)
+    .with_registry(ADHOC_REGISTRY, experiment_name="stripes_high")
+    .with_cli(cli)
+    .with_label("stripes_high")
+    .with_catalog(catalog, experiment_name="adhoc_iteration")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        for job, result in results:
+            if not result.success:
+                print(f"Error: {result.stderr[:300]}")
+        raise RuntimeError("Run failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+### Compare
+
+Both runs share the same registry, so comparison is one line:
+
+```{python}
+#| label: fig-adhoc-comparison
+#| fig-cap: "Ad-hoc comparison: gradient (low growth) vs stripes (high growth)."
+
+registry = RunRegistry(ADHOC_REGISTRY)
+diag = SimulationDiagnostics(registry)
+
+diag.plot_comparison(
+    "average_height",
+    group_by="label",
+    title="Ad-Hoc: Gradient Low vs Stripes High",
+)
+```
+
+To see exactly what changed between the two configs:
+
+```{python}
+import tempfile
+
+tmpdir = tempfile.mkdtemp()
+p1 = registry.export_config("gradient_low", tmpdir)
+p2 = registry.export_config("stripes_high", tmpdir)
+
+print(f"--- {p1.name} ---")
+print(p1.read_text())
+print(f"--- {p2.name} ---")
+print(p2.read_text())
+```
+
+The config diff shows parameter changes, but what about external data files?
+`get_file_mappings()` returns the `.jshd` paths that were used for each run:
+
+```{python}
+registry.get_file_mappings("gradient_low")
+```
+
+```{python}
+registry.get_file_mappings("stripes_high")
+```
+
+::: {.callout-tip title="Command-Line Config Tools"}
+```bash
+python -m joshpy.config complete_demo.duckdb --diff gradient_low stripes_high
+```
+
+See `python -m joshpy.config --help` for IDE selection and export-only mode.
+:::
+
+```{python}
+registry.close()
+```
+
+## Part 2: Promote to Sweep
+
+The model works. Now sweep the full parameter x variant space.
+
+The same templates and GridSpec are reused -- the only change is adding a
+`SweepConfig`. Parameter values move from `template_vars` to
+`ConfigSweepParameter`, and `file_mappings_for()` becomes `variant_sweep()`:
+
+```{python}
+config_sweep = JobConfig(
+    source_template_path=SOURCE_TEMPLATE,
+    template_vars={**grid.template_vars, "simulation_name": "Main"},
+    template_path=CONFIG_TEMPLATE,
+    file_mappings=grid.file_mappings,
+    simulation="Main",
+    replicates=2,
+    sweep=SweepConfig(
+        config_parameters=[
+            ConfigSweepParameter(name="maxGrowth", values=[5, 10, 15]),
+        ],
+        compound_parameters=[
+            grid.variant_sweep("pattern"),
+        ],
+    ),
+)
+
+n_jobs = len(config_sweep.sweep.config_parameters[0].values) * len(grid.variants["pattern"]["values"])
+print(f"Cartesian product: {n_jobs} jobs x {config_sweep.replicates} replicates = {n_jobs * config_sweep.replicates} runs")
+```
+
+::: {.callout-note title="Ad-hoc vs Sweep: What Changed"}
+| | Ad-hoc (Part 1) | Sweep (Part 2) |
+|---|---|---|
+| **Config values** | `template_vars={"maxGrowth": 5}` | `ConfigSweepParameter(values=[5, 10, 15])` |
+| **Variant selection** | `file_mappings_for(pattern="gradient")` | `variant_sweep("pattern")` |
+| **Jobs** | 1 per run | 3 x 3 = 9 (cartesian product) |
+| **Templates** | Same `.josh.j2` and `.jshc.j2` | Same `.josh.j2` and `.jshc.j2` |
+:::
+
+```{python}
+manager = (
+    SweepManager.builder(config_sweep)
+    .with_registry(SWEEP_REGISTRY, experiment_name="full_sweep")
+    .with_cli(cli)
+    .with_catalog(catalog, experiment_name="full_variant_sweep")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"Sweep complete: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        for job, result in results:
+            if not result.success:
+                print(f"Error: {result.stderr[:300]}")
+        raise RuntimeError("Sweep failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+### Results
+
+```{python}
+#| label: fig-sweep-by-pattern
+#| fig-cap: "Tree height across all three soil quality patterns."
+
+sweep_registry = RunRegistry(SWEEP_REGISTRY)
+diag = SimulationDiagnostics(sweep_registry)
+
+diag.plot_comparison(
+    "average_height",
+    group_by="pattern",
+    title="Tree Height by Soil Quality Pattern",
+)
+```
+
+```{python}
+#| label: fig-sweep-by-growth
+#| fig-cap: "Tree height across growth rate values."
+
+diag.plot_comparison(
+    "average_height",
+    group_by="maxGrowth",
+    title="Tree Height by Max Growth Rate",
+)
+```
+
+### Cross-tabulation
+
+Both the variant label (`pattern`) and config parameter (`maxGrowth`) are stored
+in `config_parameters`, so you can query the full cartesian product:
+
+```{python}
+result = sweep_registry.query("""
+    SELECT
+        cp.pattern,
+        cp.maxGrowth,
+        AVG(cd.average_height) AS mean_final_height
+    FROM cell_data cd
+    JOIN config_parameters cp ON cd.run_hash = cp.run_hash
+    WHERE cd.step = (SELECT MAX(step) FROM cell_data)
+    GROUP BY cp.pattern, cp.maxGrowth
+    ORDER BY cp.pattern, cp.maxGrowth
+""")
+result.df()
+```
+
+```{python}
+sweep_registry.close()
+```
+
+For a deeper dive into the variant API (`variant_sweep()`, `file_mappings_for()`,
+multi-axis cross-products), see [GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd).
+
+## Part 3: Recall with Catalog
+
+The catalog tracked both the ad-hoc iteration and the full sweep:
+
+```{python}
+experiments = catalog.list_experiments()
+print(f"Total experiments: {len(experiments)}\n")
+for exp in experiments:
+    print(f"  {exp.name}: status={exp.status}, registry={exp.registry_path}")
+```
+
+## Next Steps
+
+- [GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd) -- Deep dive into the
+  variant API and multi-axis sweeps
+- [Multi-Session Sweeps](multi-session-sweeps.qmd) -- Catalog as bookkeeper
+  across multiple sweep sessions
+- [Analysis & Visualization](analysis.qmd) -- Queries, spatial plots, and
+  R/ggplot2 integration
+- [Project Organization](project-organization.qmd) -- Directory layout for
+  multi-grid, multi-model projects
+
+## Cleanup
+
+```{python}
+catalog.close()
+```
+
+```{python}
+#| echo: false
+import os
+for f in ["complete_demo.duckdb", "complete_demo.duckdb.wal",
+          "complete_sweep.duckdb", "complete_sweep.duckdb.wal",
+          "complete_catalog.duckdb"]:
+    if os.path.exists(f):
+        os.remove(f)
+```

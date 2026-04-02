@@ -1518,5 +1518,64 @@ class TestGitHash(unittest.TestCase):
         registry.close()
 
 
+class TestGetFileMappings(unittest.TestCase):
+    """Tests for the get_file_mappings convenience method."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(config=_make_config())
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_returns_paths(self):
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash_with_fm",
+            josh_path="sim.josh",
+            config_content="x = 1",
+            file_mappings={
+                "soil": {"path": "/data/soil.jshd", "hash": "aaa"},
+                "climate": {"path": "/data/climate.jshd", "hash": "bbb"},
+            },
+            parameters={},
+        )
+        result = self.registry.get_file_mappings("hash_with_fm")
+        self.assertEqual(result, {
+            "soil": Path("/data/soil.jshd"),
+            "climate": Path("/data/climate.jshd"),
+        })
+
+    def test_by_label(self):
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash_labeled",
+            josh_path="sim.josh",
+            config_content="x = 1",
+            file_mappings={"soil": {"path": "/data/soil.jshd", "hash": "aaa"}},
+            parameters={},
+        )
+        self.registry.label_run("hash_labeled", "my_run")
+        result = self.registry.get_file_mappings("my_run")
+        self.assertEqual(result, {"soil": Path("/data/soil.jshd")})
+
+    def test_none_when_no_mappings(self):
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash_no_fm",
+            josh_path="sim.josh",
+            config_content="x = 1",
+            file_mappings=None,
+            parameters={},
+        )
+        self.assertIsNone(self.registry.get_file_mappings("hash_no_fm"))
+
+    def test_unknown_hash_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.get_file_mappings("nonexistent")
+
+
 if __name__ == "__main__":
     unittest.main()

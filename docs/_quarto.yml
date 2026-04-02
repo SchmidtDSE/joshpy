@@ -15,12 +15,12 @@ project:
     - tutorials/preprocessing.qmd           # Creates .jshd files
     - tutorials/external-data-sweep.qmd     # Depends on preprocessing output
     - tutorials/gridspec-variant-sweeps.qmd # Depends on preprocessing output
+    - tutorials/complete-example.qmd       # Depends on preprocessing output
     - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
     - tutorials/debug-inspection.qmd     # Debug output inspection
     - tutorials/jfr-profiling.qmd       # JVM profiling with Flight Recorder
     - tutorials/switching-versions.qmd   # Josh version switching
-    - tutorials/multi-session-experiments.qmd # ProjectCatalog for ad-hoc runs
     - tutorials/multi-session-sweeps.qmd    # ProjectCatalog for sweeps
     - tutorials/remote-execution.qmd     # Josh Cloud execution
     - tutorials/low-level-components.qmd # Advanced: manual component usage
@@ -61,8 +61,8 @@ website:
           - text: "Project Structure"
           - text: "Project Organization"
             href: tutorials/project-organization.qmd
-          - text: "Multi-Session Experiments"
-            href: tutorials/multi-session-experiments.qmd
+          - text: "Complete Example"
+            href: tutorials/complete-example.qmd
           - text: "Multi-Session Sweeps"
             href: tutorials/multi-session-sweeps.qmd
           - text: "---"
@@ -118,7 +118,7 @@ website:
         - section: "Project Structure"
           contents:
             - tutorials/project-organization.qmd
-            - tutorials/multi-session-experiments.qmd
+            - tutorials/complete-example.qmd
             - tutorials/multi-session-sweeps.qmd
         - section: "Debugging & Profiling"
           contents:

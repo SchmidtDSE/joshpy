@@ -1047,6 +1047,36 @@ class RunRegistry:
             created_at=result[6],
         )
 
+    def get_file_mappings(
+        self, label_or_hash: str
+    ) -> dict[str, Path] | None:
+        """Get the external data file mappings for a run.
+
+        Args:
+            label_or_hash: Run label or run_hash.
+
+        Returns:
+            Dict mapping data names to file paths, or None if no
+            file mappings were registered for this run.
+
+        Raises:
+            KeyError: If the label or hash is not found.
+        """
+        try:
+            run_hash = self.resolve_label(label_or_hash)
+        except KeyError:
+            run_hash = label_or_hash
+
+        config = self.get_config_by_hash(run_hash)
+        if config is None:
+            raise KeyError(f"No run found for '{label_or_hash}'")
+        if config.file_mappings is None:
+            return None
+        return {
+            name: Path(info["path"])
+            for name, info in config.file_mappings.items()
+        }
+
     def get_configs_for_session(self, session_id: str) -> list[ConfigInfo]:
         """Get all configs for a session.
 

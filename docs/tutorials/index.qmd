@@ -10,10 +10,10 @@ Step-by-step guides for learning joshpy.
 
 The essential workflow: run a simulation, tweak parameters, compare results.
 
-- Load a `GridSpec` for grid geometry and data files
 - Use raw `.jshc` config files with auto-parsed parameters
 - Label runs with `.with_label()` for easy comparison
 - Compare with `plot_comparison(group_by="label")`
+- Track experiments across sessions with `ProjectCatalog`
 
 Best for: Day-to-day research iteration. **Start here.**
 
@@ -94,15 +94,15 @@ Structure multi-grid, multi-model projects:
 
 Best for: Real projects with multiple grids or model variants.
 
-### [Multi-Session Experiments](multi-session-experiments.qmd)
+### [Complete Example](complete-example.qmd)
 
-Track labeled ad-hoc runs across sessions with `ProjectCatalog`:
+Full lifecycle with all three template types working together:
 
-- Accumulate runs in a shared registry across sessions
-- Find past registries via the catalog
-- Compare labeled runs with `group_by="label"`
+- Ad-hoc iteration with GridSpec, `.josh.j2`, and `.jshc.j2`
+- Promote to a cartesian parameter x variant sweep
+- Track everything with ProjectCatalog
 
-Best for: Iterative research where you tweak and compare across days.
+Best for: Seeing all joshpy components in one end-to-end workflow.
 
 ### [Multi-Session Sweeps](multi-session-sweeps.qmd)
 
@@ -184,6 +184,7 @@ All tutorials assume:
 3. [Analysis](analysis.qmd) -- visualization and queries
 4. [Project Organization](project-organization.qmd) -- multi-grid/model structure
 5. [Preprocessing](preprocessing.qmd) -- external geospatial data
+6. [Complete Example](complete-example.qmd) -- everything together
 
 **Reference:**
 

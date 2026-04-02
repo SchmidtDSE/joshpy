@@ -63,8 +63,10 @@ from joshpy.jobs import JobConfig
 from joshpy.sweep import SweepManager
 from joshpy.cli import JoshCLI
 from joshpy.jar import JarMode
+from joshpy.catalog import ProjectCatalog
 
 REGISTRY_PATH = "iteration_demo.duckdb"
+catalog = ProjectCatalog("catalog_demo.duckdb")
 
 config = JobConfig(
     source_path=SOURCE_PATH,
@@ -80,6 +82,7 @@ manager = (
     .with_registry(REGISTRY_PATH, experiment_name="baseline")
     .with_cli(cli)
     .with_label("baseline")
+    .with_catalog(catalog, experiment_name="iteration_demo")
     .build()
 )
 
@@ -148,6 +151,7 @@ manager = (
     .with_registry(REGISTRY_PATH, experiment_name="high_growth")
     .with_cli(cli)
     .with_label("high_growth")
+    .with_catalog(catalog, experiment_name="iteration_demo")
     .build()
 )
 
@@ -338,6 +342,62 @@ enables `group_by="maxGrowth"` without defining a sweep.
 All runs that share a registry are queryable together. Keep pointing at the same
 `.duckdb` file and results accumulate.
 
+### ProjectCatalog (for multi-session tracking)
+
+The `.with_catalog()` lines in Steps 1 and 2 registered each run in a
+`ProjectCatalog` -- a persistent DuckDB database that indexes your experiments
+across sessions. The catalog tracks which models, configs, and data were used,
+where results live, and whether an experiment was already run. It does NOT store
+simulation data -- that stays in per-experiment registry files.
+
+When you come back to a project after days or weeks, the catalog tells you
+what's been done:
+
+```{python}
+experiments = catalog.list_experiments()
+print(f"Total experiments: {len(experiments)}\n")
+for exp in experiments:
+    print(f"  {exp.name}: status={exp.status}, registry={exp.registry_path}")
+```
+
+Before running a new experiment, check if it's already been done:
+
+```{python}
+existing = catalog.find_experiment(config)
+if existing:
+    print(f"Already run: '{existing.name}' at {existing.registry_path}")
+else:
+    print("Not yet run")
+```
+
+| | ProjectCatalog | RunRegistry |
+|---|---|---|
+| **Stores** | Hashes and pointers | Simulation data |
+| **Scope** | One per project | One per experiment |
+| **Persistence** | Across all sessions | Across sessions for one experiment |
+| **Primary use** | "What have I run?" | "What were the results?" |
+
+::: {.callout-note collapse="true" title="Advanced: Cross-registry queries"}
+If different researchers maintain separate registries (or you used separate
+registries for each run), `catalog.open_registries()` can combine them via
+DuckDB ATTACH:
+
+```python
+experiments = catalog.list_experiments(status="completed")
+
+with catalog.open_registries(experiments) as conn:
+    parts = []
+    for i, exp in enumerate(experiments):
+        parts.append(
+            f"SELECT '{exp.name}' as experiment, step, "
+            f"AVG(averageHeight) as mean_height "
+            f"FROM exp_{i}.cell_data GROUP BY step"
+        )
+    sql = " UNION ALL ".join(parts) + " ORDER BY experiment, step"
+    df = conn.execute(sql).df()
+```
+:::
+
 ### GridSpec (for projects with external data)
 
 GridSpec is not required for basic iteration -- you can pass `file_mappings` as
@@ -391,10 +451,11 @@ including variant data files and sweep generation.
 
 - [SweepManager Workflow](sweep-manager.qmd) -- Systematic parameter sweeps
   when you know what to sweep
+- [Multi-Session Sweeps](multi-session-sweeps.qmd) -- Catalog as bookkeeper for parameter sweeps
 - [Analysis & Visualization](analysis.qmd) -- Deeper dive into queries, spatial
   plots, and R integration
 - [Project Organization](project-organization.qmd) -- Multi-grid, multi-model
-  project structure with GridSpec and ProjectCatalog
+  project structure with GridSpec
 
 ## Cleanup
 
@@ -402,8 +463,10 @@ including variant data files and sweep generation.
 import os
 
 registry.close()
+catalog.close()
 
-for f in ["iteration_demo.duckdb", "iteration_demo.duckdb.wal"]:
+for f in ["iteration_demo.duckdb", "iteration_demo.duckdb.wal",
+          "catalog_demo.duckdb"]:
     if os.path.exists(f):
         os.remove(f)
 ```

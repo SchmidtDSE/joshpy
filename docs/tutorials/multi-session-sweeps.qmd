@@ -17,7 +17,7 @@ When running parameter sweeps across multiple sessions -- a baseline sweep today
 a wider sweep tomorrow -- the **ProjectCatalog** keeps track of what's been run
 and prevents duplicate work.
 
-Unlike [ad-hoc iteration](multi-session-experiments.qmd) where runs accumulate in
+Unlike [ad-hoc iteration](manual-workflow.qmd#projectcatalog-for-multi-session-tracking) where runs accumulate in
 a single registry, each sweep typically gets its own registry. The catalog indexes
 them all.
 
@@ -211,11 +211,11 @@ The catalog answers project-level questions:
 | **Use case** | Exploratory tinkering | Systematic parameter exploration |
 | **Comparison** | `group_by="label"` | `group_by="maxGrowth"` |
 | **Catalog role** | Find the iteration registry | Index all sweep registries |
-| **Tutorial** | [Multi-Session Experiments](multi-session-experiments.qmd) | This page |
+| **Tutorial** | [Single Run & Iteration](manual-workflow.qmd) | This page |
 
 ## Next Steps
 
-- [Multi-Session Experiments](multi-session-experiments.qmd) -- Ad-hoc iteration across sessions
+- [Single Run & Iteration](manual-workflow.qmd) -- Ad-hoc iteration and catalog tracking
 - [SweepManager Workflow](sweep-manager.qmd) -- In-depth sweep tutorial
 - [Architecture](../architecture.qmd) -- How all abstractions fit together
 
