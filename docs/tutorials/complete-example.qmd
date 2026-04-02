@@ -208,9 +208,60 @@ finally:
     manager.close()
 ```
 
+### Run 3: Re-run gradient with tweaked growth (same label)
+
+What if you want to iterate on the gradient run but keep calling it
+`"gradient_low"`? Use `on_collision="timestamp"` to automatically archive the
+old label:
+
+```{python}
+config_gradient_v2 = JobConfig(
+    source_template_path=SOURCE_TEMPLATE,
+    template_vars={**grid.template_vars, "simulation_name": "Main", "maxGrowth": 7},
+    template_path=CONFIG_TEMPLATE,
+    file_mappings=grid.file_mappings_for(pattern="gradient"),
+    simulation="Main",
+    replicates=2,
+)
+
+manager = (
+    SweepManager.builder(config_gradient_v2)
+    .with_registry(ADHOC_REGISTRY, experiment_name="gradient_low_v2")
+    .with_cli(cli)
+    .with_label("gradient_low", on_collision="timestamp")
+    .with_catalog(catalog, experiment_name="adhoc_iteration")
+    .build()
+)
+
+try:
+    results = manager.run()
+    print(f"Completed: {results.succeeded} succeeded, {results.failed} failed")
+    if results.failed > 0:
+        for job, result in results:
+            if not result.success:
+                print(f"Error: {result.stderr[:300]}")
+        raise RuntimeError("Run failed")
+    manager.load_results()
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+The old `"gradient_low"` run is now archived under a timestamped label. The
+bare label points to the new run:
+
+```{python}
+registry = RunRegistry(ADHOC_REGISTRY)
+print("Labels after collision:")
+for label, run_hash in registry.list_labels():
+    print(f"  {label} -> {run_hash}")
+registry.close()
+```
+
 ### Compare
 
-Both runs share the same registry, so comparison is one line:
+All three labeled runs (the archived timestamped one, the new `gradient_low`,
+and `stripes_high`) appear in the comparison:
 
 ```{python}
 #| label: fig-adhoc-comparison

@@ -128,15 +128,15 @@ registry.close()
 
 ## Step 2: Tweak and Re-Run
 
-What happens if we double `maxGrowth` from 50 to 100? We have a second config
-file with just that change:
+What happens if we double `maxGrowth` from 50 to 100? Edit `baseline.jshc`
+(or use a second config file) and re-run with the **same label**. The
+`on_collision="timestamp"` option automatically archives the old run so the
+bare `"baseline"` label always points to your latest attempt:
 
 ```{python}
 HIGH_GROWTH_CONFIG = Path("../../examples/configs/high_growth.jshc")
 print(HIGH_GROWTH_CONFIG.read_text())
 ```
-
-Run again, **pointing at the same registry**:
 
 ```{python}
 config2 = JobConfig(
@@ -150,7 +150,7 @@ manager = (
     SweepManager.builder(config2)
     .with_registry(REGISTRY_PATH, experiment_name="high_growth")
     .with_cli(cli)
-    .with_label("high_growth")
+    .with_label("baseline", on_collision="timestamp")
     .with_catalog(catalog, experiment_name="iteration_demo")
     .build()
 )
@@ -171,15 +171,15 @@ finally:
     manager.close()
 ```
 
-Both runs now live in the same DuckDB file. Each has a unique label and a
-content-based hash.
+Both runs now live in the same DuckDB file. The old baseline was archived with
+a timestamp suffix, and `"baseline"` points to the new run:
 
-::: {.callout-tip title="Single-File Workflow"}
-You don't need separate `.jshc` files for each run. You can edit
-`baseline.jshc` directly -- change `maxGrowth` from 50 to 100 -- and re-run
-with `.with_label("high_growth")`. The registry stores the full config content
-at registration time, so both versions are preserved even though only one file
-exists on disk. The run hash changes automatically because the content changed.
+::: {.callout-tip title="Alternatives to on_collision"}
+If you prefer explicit control, you can use a separate `.jshc` file with its
+own label (e.g., `.with_label("high_growth")`), or call
+`registry.label_run(run_hash, "name")` after the fact. The `on_collision`
+approach is convenient when you're iterating quickly and want the bare label to
+always mean "latest."
 :::
 
 ## Step 3: Compare
@@ -207,25 +207,25 @@ parameter grouping uses the run's own data.
 
 ### Compare by Label
 
-One line per labeled run:
+One line per labeled run. The archived run shows its timestamp suffix:
 
 ```{python}
 #| label: fig-label-comparison
-#| fig-cap: "Average tree height: baseline (maxGrowth=50) vs high growth (maxGrowth=100)."
+#| fig-cap: "Average tree height by label: current baseline vs archived baseline."
 
 diag = SimulationDiagnostics(registry)
 
 diag.plot_comparison(
     "averageHeight",
     group_by="label",
-    title="Baseline vs High Growth",
+    title="Baseline Iterations",
 )
 ```
 
 ### Compare by Parameter Value
 
-Since `.jshc` parameters were auto-parsed, you can also group by the parameter
-that actually changed:
+Since `.jshc` parameters were auto-parsed, you can group by the parameter
+that actually changed -- often more useful than label grouping:
 
 ```{python}
 #| label: fig-param-comparison
@@ -278,7 +278,7 @@ ggplot(df, aes(x = step, y = mean_height, color = label, fill = label)) +
   geom_line(linewidth = 0.8) +
   geom_point(size = 2) +
   labs(x = "Simulation Step", y = "Average Height (meters)",
-       title = "Tree Height: Baseline vs High Growth",
+       title = "Tree Height: Baseline Iterations",
        color = "Run", fill = "Run") +
   theme_minimal() +
   theme(panel.grid.minor = element_blank())
@@ -296,6 +296,12 @@ Labels are human-readable names for individual runs. Set them upfront with
 - **Single-job configs**: `.with_label("name")` works at build time
 - **Multi-job sweeps**: Label individual runs after the fact with
   `registry.label_run(run_hash, "name")`
+- **Re-running with the same label** (shown in Step 2): `on_collision="timestamp"`
+  archives the old holder with a timestamp suffix. `resolve_label("baseline")`
+  always returns the latest run, and `resolve_latest("baseline")` finds the
+  most recent among all `baseline*`-prefixed labels.
+- **Force-reassigning a label**: `force=True` silently drops the old label
+  instead of archiving it.
 
 ### Auto-Parsed Config Parameters
 
