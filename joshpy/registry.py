@@ -227,6 +227,7 @@ class ConfigInfo:
         run_hash: MD5 hash of josh + config + file_mappings (12 chars).
         session_id: Session this config belongs to.
         josh_path: Path to the .josh script file.
+        josh_content: Rendered .josh source content (may be None for legacy data).
         config_content: Full text content of the configuration.
         file_mappings: Dict mapping names to {"path": "...", "hash": "..."}.
         parameters: Parameter values used to generate this config.
@@ -237,6 +238,7 @@ class ConfigInfo:
     run_hash: str
     session_id: str
     josh_path: str | None
+    josh_content: str | None
     config_content: str
     file_mappings: dict[str, dict[str, str]] | None
     parameters: dict[str, Any]
@@ -923,6 +925,7 @@ class RunRegistry:
         config_content: str,
         file_mappings: dict[str, dict[str, str]] | None,
         parameters: dict[str, Any],
+        josh_content: str | None = None,
     ) -> None:
         """Register a job configuration (run specification).
 
@@ -933,6 +936,7 @@ class RunRegistry:
             config_content: Full text of the rendered configuration.
             file_mappings: Dict mapping names to {"path": "...", "hash": "..."}.
             parameters: Parameter values used to generate this config.
+            josh_content: Rendered .josh source content (optional).
         """
         file_mappings_json = json.dumps(file_mappings) if file_mappings else None
 
@@ -940,10 +944,10 @@ class RunRegistry:
         self.conn.execute(
             """
             INSERT OR IGNORE INTO job_configs
-            (run_hash, session_id, josh_path, config_content, file_mappings)
-            VALUES (?, ?, ?, ?, ?)
+            (run_hash, session_id, josh_path, josh_content, config_content, file_mappings)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            [run_hash, session_id, josh_path, config_content, file_mappings_json],
+            [run_hash, session_id, josh_path, josh_content, config_content, file_mappings_json],
         )
 
         # Insert typed parameters into config_parameters table
@@ -1022,8 +1026,8 @@ class RunRegistry:
         """
         result = self.conn.execute(
             """
-            SELECT run_hash, session_id, josh_path, config_content,
-                   file_mappings, label, created_at
+            SELECT run_hash, session_id, josh_path, josh_content,
+                   config_content, file_mappings, label, created_at
             FROM job_configs
             WHERE run_hash = ?
             """,
@@ -1040,11 +1044,12 @@ class RunRegistry:
             run_hash=result[0],
             session_id=result[1],
             josh_path=result[2],
-            config_content=result[3],
-            file_mappings=json.loads(result[4]) if result[4] else None,
+            josh_content=result[3],
+            config_content=result[4],
+            file_mappings=json.loads(result[5]) if result[5] else None,
             parameters=parameters,
-            label=result[5],
-            created_at=result[6],
+            label=result[6],
+            created_at=result[7],
         )
 
     def get_file_mappings(
@@ -1089,8 +1094,8 @@ class RunRegistry:
         # First get the run_hashes and basic config info
         result = self.conn.execute(
             """
-            SELECT run_hash, session_id, josh_path, config_content,
-                   file_mappings, label, created_at
+            SELECT run_hash, session_id, josh_path, josh_content,
+                   config_content, file_mappings, label, created_at
             FROM job_configs
             WHERE session_id = ?
             ORDER BY created_at
@@ -1107,11 +1112,12 @@ class RunRegistry:
                     run_hash=run_hash,
                     session_id=row[1],
                     josh_path=row[2],
-                    config_content=row[3],
-                    file_mappings=json.loads(row[4]) if row[4] else None,
+                    josh_content=row[3],
+                    config_content=row[4],
+                    file_mappings=json.loads(row[5]) if row[5] else None,
                     parameters=parameters,
-                    label=row[5],
-                    created_at=row[6],
+                    label=row[6],
+                    created_at=row[7],
                 )
             )
         return configs
@@ -1231,6 +1237,49 @@ class RunRegistry:
         output_path.write_text(header + config.config_content)
         return output_path
 
+    def export_josh(self, label_or_hash: str, output_dir: str | Path) -> Path:
+        """Export a run's josh source content to a file for IDE viewing/diffing.
+
+        Resolves by label first, falls back to run_hash.
+
+        Args:
+            label_or_hash: Label or run_hash to look up.
+            output_dir: Directory to write the josh file to.
+
+        Returns:
+            Path to the written file.
+
+        Raises:
+            KeyError: If no matching run is found or josh content is not stored.
+        """
+        try:
+            run_hash = self.resolve_label(label_or_hash)
+            filename = f"{label_or_hash}.josh"
+        except KeyError:
+            run_hash = label_or_hash
+            filename = f"{run_hash}.josh"
+
+        config = self.get_config_by_hash(run_hash)
+        if config is None:
+            raise KeyError(f"No run found for '{label_or_hash}'")
+        if config.josh_content is None:
+            raise KeyError(
+                f"No josh content stored for run '{label_or_hash}'. "
+                f"Re-register the run with josh_content to enable this feature."
+            )
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / filename
+
+        header = (
+            f"# READ-ONLY snapshot exported from registry\n"
+            f"# Run: {run_hash}\n"
+            f"# Editing this file has no effect.\n\n"
+        )
+        output_path.write_text(header + config.josh_content)
+        return output_path
+
     def resolve_config_source(self, run_hash: str) -> ConfigSourceInfo:
         """Locate the original .jshc file on disk and check if it still matches.
 
@@ -1274,6 +1323,42 @@ class RunRegistry:
             path=original_path, exists=True, content_matches=matches
         )
 
+    def resolve_josh_source(self, run_hash: str) -> ConfigSourceInfo:
+        """Locate the original .josh file on disk and check if it still matches.
+
+        Compares the file at ``josh_path`` against the stored ``josh_content``.
+
+        Args:
+            run_hash: The run hash to look up.
+
+        Returns:
+            A :class:`ConfigSourceInfo` describing the file's status.
+        """
+        config_info = self.get_config_by_hash(run_hash)
+        if config_info is None:
+            return ConfigSourceInfo(path=None, exists=False, content_matches=False)
+
+        if config_info.josh_path is None or config_info.josh_content is None:
+            return ConfigSourceInfo(path=None, exists=False, content_matches=False)
+
+        original_path = Path(config_info.josh_path)
+        if not original_path.exists():
+            return ConfigSourceInfo(
+                path=original_path, exists=False, content_matches=False
+            )
+
+        try:
+            current_content = original_path.read_text()
+        except OSError:
+            return ConfigSourceInfo(
+                path=original_path, exists=False, content_matches=False
+            )
+
+        matches = current_content == config_info.josh_content
+        return ConfigSourceInfo(
+            path=original_path, exists=True, content_matches=matches
+        )
+
     def compare_configs(
         self,
         label_or_hash_1: str,
@@ -1297,9 +1382,37 @@ class RunRegistry:
             KeyError: If a label or hash is not found.
             RuntimeError: If the IDE CLI is not found in PATH.
         """
-        from joshpy.config import open_diff
+        from joshpy.inspect import open_diff
 
         return open_diff(self, label_or_hash_1, label_or_hash_2, ide=ide)
+
+    def compare_josh(
+        self,
+        label_or_hash_1: str,
+        label_or_hash_2: str,
+        ide: str = "vscode",
+    ) -> tuple[Path, Path]:
+        """Export two runs' josh sources and open a side-by-side diff in an IDE.
+
+        Convenience wrapper around :func:`joshpy.inspect.open_josh_diff`.
+
+        Args:
+            label_or_hash_1: Label or run_hash of the first run.
+            label_or_hash_2: Label or run_hash of the second run.
+            ide: IDE to open diff in (default: ``"vscode"``).
+                Supported: ``"vscode"``, ``"cursor"``.
+
+        Returns:
+            Tuple of Paths to the exported josh files.
+
+        Raises:
+            KeyError: If a label or hash is not found, or josh content
+                is not stored.
+            RuntimeError: If the IDE CLI is not found in PATH.
+        """
+        from joshpy.inspect import open_josh_diff
+
+        return open_josh_diff(self, label_or_hash_1, label_or_hash_2, ide=ide)
 
     # ========== Run Tracking ==========
 

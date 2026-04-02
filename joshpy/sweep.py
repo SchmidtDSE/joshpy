@@ -1008,6 +1008,10 @@ class SweepManagerBuilder:
                 )
                 # Register runs
                 for job in job_set:
+                    josh_content = None
+                    if job.source_path and job.source_path.exists():
+                        josh_content = job.source_path.read_text()
+
                     self._registry.register_run(
                         session_id=session_id,
                         run_hash=job.run_hash,
@@ -1015,6 +1019,7 @@ class SweepManagerBuilder:
                         config_content=job.config_content,
                         file_mappings=self._convert_file_mappings(job.file_mappings),
                         parameters=job.parameters,
+                        josh_content=josh_content,
                     )
 
                 # Apply label if set
