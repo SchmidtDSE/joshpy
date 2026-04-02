@@ -65,6 +65,11 @@ def _check_yaml() -> None:
         )
 
 
+# Josh identifiers cannot contain underscores or start with special characters,
+# so we use a fixed CamelCase name for the temporary preprocess script.
+_PREPROCESS_SIM_NAME = "Preprocess"
+
+
 @dataclass
 class GridSpec:
     """Spatial grid definition plus data file inventory.
@@ -395,7 +400,7 @@ class GridSpec:
             Path to a temporary .josh file. Caller must delete after use.
         """
         content = (
-            f"start simulation _preprocess_{self.name}\n"
+            f"start simulation {_PREPROCESS_SIM_NAME}\n"
             f"  grid.size = {self.size_m} m\n"
             f"  grid.low = {self.low[0]} degrees latitude, "
             f"{self.low[1]} degrees longitude\n"
@@ -503,7 +508,7 @@ class GridSpec:
         try:
             config = GeotiffPreprocessConfig(
                 script=script_path,
-                simulation=f"_preprocess_{self.name}",
+                simulation=_PREPROCESS_SIM_NAME,
                 data_file=Path(data_file),
                 band=band,
                 units=units,
@@ -571,7 +576,7 @@ class GridSpec:
         try:
             config = NetcdfPreprocessConfig(
                 script=script_path,
-                simulation=f"_preprocess_{self.name}",
+                simulation=_PREPROCESS_SIM_NAME,
                 data_file=Path(data_file),
                 variable=variable,
                 units=units,
@@ -636,7 +641,7 @@ class GridSpec:
         try:
             config = CsvPreprocessConfig(
                 script=script_path,
-                simulation=f"_preprocess_{self.name}",
+                simulation=_PREPROCESS_SIM_NAME,
                 data_file=Path(data_file),
                 variable=variable,
                 units=units,

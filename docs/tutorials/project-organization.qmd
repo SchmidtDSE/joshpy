@@ -105,8 +105,9 @@ config = JobConfig(
 )
 ```
 
-GridSpec also handles preprocessing -- see the [Preprocessing](preprocessing.qmd)
-tutorial for details.
+GridSpec also handles preprocessing -- see
+[GridSpec-Based Preprocessing](preprocessing.qmd#step-7-gridspec-based-preprocessing)
+in the Preprocessing tutorial for a runnable example.
 
 For the ad-hoc iteration workflow (run, tweak, compare with labels), see the
 [Single Run & Iteration](manual-workflow.qmd) tutorial.

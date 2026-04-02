@@ -713,6 +713,157 @@ fig = plot_jshd(data, timestep=0, cmap="RdYlBu_r",
                 title="Temperature from Weather Stations (interpolated)")
 ```
 
+## Step 7: GridSpec-Based Preprocessing
+
+Steps 2--6 showed the low-level `cli.preprocess()` API where you manage output
+paths and file inventories yourself. **GridSpec** provides a higher-level
+workflow: you preprocess *through* the grid, and it automatically registers each
+file and writes a `grid.yaml` manifest. This is the recommended approach for
+structured projects.
+
+### Static files (auto-registered)
+
+When you call `grid.preprocess_netcdf()` without a `variant` argument, the
+output goes to `output_dir/{josh_name}.jshd` and the file is auto-registered
+in `grid.files`:
+
+```{python}
+#| label: gridspec-static
+import tempfile
+from pathlib import Path
+from joshpy.grid import GridSpec
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+DATA_DIR = Path("../../examples/external_data")
+
+static_dir = Path(tempfile.mkdtemp()) / "static_grid"
+
+grid = GridSpec(
+    name="tutorial_static",
+    output_dir=static_dir,
+    size_m=1000,
+    low=(34.0, -116.4),
+    high=(33.7, -115.4),
+    steps=10,
+)
+
+# Preprocess — auto-registers in grid.files
+result = grid.preprocess_netcdf(
+    cli,
+    josh_name="soil_quality",
+    data_file=DATA_DIR / "soil_quality_gradient.nc",
+    variable="soil_quality",
+    units="percent",
+    x_coord="lon",
+    y_coord="lat",
+    time_coord="time",
+)
+
+print(f"Success: {result.success}")
+print(f"Registered files: {list(grid.files.keys())}")
+print(f"Entry: {grid.files['soil_quality']}")
+
+# Save to YAML
+yaml_path = grid.save()
+print(f"\n--- {yaml_path.name} ---")
+print(yaml_path.read_text())
+```
+
+The resulting `grid.yaml` contains both grid geometry and the file inventory.
+Load it later with `GridSpec.from_yaml()` to get `file_mappings` and
+`template_vars` for `JobConfig`.
+
+### Variant files
+
+When data files vary by scenario (e.g., different soil patterns or climate
+projections), declare **variant axes** in the GridSpec and preprocess each
+value with the `variant` parameter. This produces the `template_path` entries
+that power `variant_sweep()`.
+
+```{python}
+#| label: gridspec-variant
+variant_dir = Path(tempfile.mkdtemp()) / "variant_grid"
+
+grid_v = GridSpec(
+    name="tutorial_variant",
+    output_dir=variant_dir,
+    size_m=1000,
+    low=(34.0, -116.4),
+    high=(33.7, -115.4),
+    steps=10,
+    variants={
+        "pattern": {
+            "values": ["gradient", "triangle", "stripes"],
+            "default": "gradient",
+        }
+    },
+    files={
+        "soil_quality": {
+            "template_path": "soil_quality_{pattern}.jshd",
+            "units": "percent",
+        }
+    },
+)
+
+# Preprocess each variant value
+for pattern in ["gradient", "triangle", "stripes"]:
+    result = grid_v.preprocess_netcdf(
+        cli,
+        josh_name="soil_quality",
+        variant={"pattern": pattern},
+        data_file=DATA_DIR / f"soil_quality_{pattern}.nc",
+        variable="soil_quality",
+        units="percent",
+        x_coord="lon",
+        y_coord="lat",
+        time_coord="time",
+    )
+    print(f"  {pattern}: {'OK' if result.success else 'FAIL'}")
+
+yaml_path = grid_v.save()
+print(f"\n--- {yaml_path.name} ---")
+print(yaml_path.read_text())
+```
+
+### Loading back
+
+Once saved, the YAML is the single source of truth for grid geometry and data
+inventory:
+
+```{python}
+#| label: gridspec-load
+loaded = GridSpec.from_yaml(yaml_path)
+
+print(f"Grid: {loaded.name}")
+print(f"Template vars: {loaded.template_vars}")
+print(f"\nDefault file_mappings:")
+for name, path in loaded.file_mappings.items():
+    print(f"  {name}: {path.name}")
+
+print(f"\nfile_mappings_for(pattern='stripes'):")
+for name, path in loaded.file_mappings_for(pattern="stripes").items():
+    print(f"  {name}: {path.name}")
+```
+
+::: {.callout-tip title="When to Use Which"}
+| Approach | When to use |
+|----------|-------------|
+| `cli.preprocess()` | Quick one-off preprocessing, scripts, or non-grid workflows |
+| `grid.preprocess_*()` | Structured projects where you want a `grid.yaml` manifest |
+
+Both produce identical `.jshd` files -- the difference is whether the inventory
+is tracked in a YAML manifest or managed manually.
+:::
+
+```{python}
+#| echo: false
+import shutil
+shutil.rmtree(static_dir, ignore_errors=True)
+shutil.rmtree(variant_dir, ignore_errors=True)
+```
+
 ## Summary
 
 In this tutorial, we:
@@ -722,10 +873,13 @@ In this tutorial, we:
 3. **Preprocessed GeoTIFF** using `GeotiffPreprocessConfig` (with required `timestep`)
 4. **Preprocessed CSV point data** using `CsvPreprocessConfig` (with required `timestep`)
 5. **Verified results** using `cli.inspect_jshd()` and `plot_jshd()`
+6. **Built a GridSpec manifest** using `grid.preprocess_netcdf()` and `grid.save()`
 
 The preprocessed `.jshd` files are now ready for use in simulations. The next
 tutorial, [Sweeping Over External Data](external-data-sweep.qmd), demonstrates
-how to run parameter sweeps over multiple external data files.
+how to run parameter sweeps over multiple external data files. For the
+GridSpec-based variant sweep workflow, see
+[GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd).
 
 ### Format Comparison
 
@@ -760,7 +914,9 @@ for compatibility rules and directory organization patterns.
 
 ## Learn More
 
+- [GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd) - Use GridSpec variants in parameter sweeps
 - [External Data Sweep Tutorial](external-data-sweep.qmd) - Use these files in a file sweep
+- [Project Organization](project-organization.qmd) - Directory layout and GridSpec conventions
 - [Timestep Interventions](timestep-interventions.qmd) - Using single-time data for events
 - [Best Practices: Preprocessing](../best-practices.qmd#preprocessing-grid-alignment) - Grid alignment and JSHD reuse
 - [JoshCLI Reference](../reference/cli.JoshCLI.qmd) - CLI wrapper documentation

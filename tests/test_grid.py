@@ -179,7 +179,7 @@ class TestGridSpecPreprocessScript(unittest.TestCase):
         try:
             self.assertTrue(script_path.exists())
             content = script_path.read_text()
-            self.assertIn("start simulation _preprocess_dev_fine", content)
+            self.assertIn("start simulation Preprocess", content)
             self.assertIn("grid.size = 30 m", content)
             self.assertIn("33.902 degrees latitude", content)
             self.assertIn("-116.0465 degrees longitude", content)
@@ -235,7 +235,7 @@ class TestGridSpecPreprocess(unittest.TestCase):
             config_arg = cli.preprocess.call_args[0][0]
             self.assertEqual(config_arg.band, 0)
             self.assertEqual(config_arg.units, "percent")
-            self.assertEqual(config_arg.simulation, "_preprocess_test")
+            self.assertEqual(config_arg.simulation, "Preprocess")
 
     def test_preprocess_geotiff_registers_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
