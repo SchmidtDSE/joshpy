@@ -63,7 +63,7 @@ flowchart LR
 ```
 
 See tutorials: [SweepManager Workflow](tutorials/sweep-manager.qmd),
-[Multi-Session Experiments](tutorials/multi-session-experiments.qmd)
+[Single Run & Iteration](tutorials/manual-workflow.qmd)
 
 ## DuckDB Schema & Querying Patterns
 

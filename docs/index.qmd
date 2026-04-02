@@ -39,8 +39,7 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 ### Project Structure
 
 - [Project Organization](tutorials/project-organization.qmd) - Directory layout, model templating, GridSpec
-- [Multi-Session Experiments](tutorials/multi-session-experiments.qmd) - Track ad-hoc runs across sessions
-- [Multi-Session Sweeps](tutorials/multi-session-sweeps.qmd) - Track sweeps across sessions
+- [Multi-Session Sweeps](tutorials/multi-session-sweeps.qmd) - Track sweeps across sessions with ProjectCatalog
 
 ### Advanced
 

@@ -382,4 +382,4 @@ builder, which auto-registers the experiment on `build()` and updates status aft
 
 API: [ProjectCatalog](reference/index.qmd)
 | Tutorial: [Project Organization](tutorials/project-organization.qmd),
-[Multi-Session Experiments](tutorials/multi-session-experiments.qmd)
+[Single Run & Iteration](tutorials/manual-workflow.qmd)
