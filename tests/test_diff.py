@@ -1,4 +1,4 @@
-"""Tests for joshpy.config viewing and diffing utilities."""
+"""Tests for joshpy.inspect viewing and diffing utilities."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ def _make_registry_with_two_runs():
     session_id = registry.create_session(
         config=_make_config(), experiment_name="test"
     )
+    josh_source = "start simulation Main\n  grid.size = 30 m\nend simulation\n"
     registry.register_run(
         session_id=session_id,
         run_hash="hash_baseline",
@@ -35,6 +36,7 @@ def _make_registry_with_two_runs():
         config_content="maxGrowth = 50 meters\ninitialTreeCount = 10 count",
         file_mappings=None,
         parameters={"maxGrowth": 50, "initialTreeCount": 10},
+        josh_content=josh_source,
     )
     registry.label_run("hash_baseline", "baseline")
 
@@ -45,6 +47,7 @@ def _make_registry_with_two_runs():
         config_content="maxGrowth = 100 meters\ninitialTreeCount = 10 count",
         file_mappings=None,
         parameters={"maxGrowth": 100, "initialTreeCount": 10},
+        josh_content=josh_source,
     )
     registry.label_run("hash_highgrowth", "high_growth")
 
@@ -62,7 +65,7 @@ class TestExportPair(unittest.TestCase):
         self.registry.close()
 
     def test_export_pair_by_label(self):
-        from joshpy.config import export_pair
+        from joshpy.inspect import export_pair
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path1, path2 = export_pair(
@@ -74,7 +77,7 @@ class TestExportPair(unittest.TestCase):
             self.assertIn("maxGrowth = 100", path2.read_text())
 
     def test_export_pair_by_hash(self):
-        from joshpy.config import export_pair
+        from joshpy.inspect import export_pair
 
         with tempfile.TemporaryDirectory() as tmpdir:
             path1, path2 = export_pair(
@@ -84,7 +87,7 @@ class TestExportPair(unittest.TestCase):
             self.assertTrue(path2.exists())
 
     def test_export_pair_default_tempdir(self):
-        from joshpy.config import export_pair
+        from joshpy.inspect import export_pair
 
         path1, path2 = export_pair(
             self.registry, "baseline", "high_growth"
@@ -94,14 +97,14 @@ class TestExportPair(unittest.TestCase):
         self.assertTrue(str(path1.parent).startswith(tempfile.gettempdir()))
 
     def test_export_pair_missing_label(self):
-        from joshpy.config import export_pair
+        from joshpy.inspect import export_pair
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaises(KeyError):
                 export_pair(self.registry, "baseline", "nonexistent", tmpdir)
 
     def test_export_pair_creates_output_dir(self):
-        from joshpy.config import export_pair
+        from joshpy.inspect import export_pair
 
         with tempfile.TemporaryDirectory() as tmpdir:
             nested = Path(tmpdir) / "sub" / "dir"
@@ -123,19 +126,19 @@ class TestViewConfig(unittest.TestCase):
         self.registry.close()
 
     def test_view_by_label(self):
-        from joshpy.config import view_config
+        from joshpy.inspect import view_config
 
         content = view_config(self.registry, "baseline")
         self.assertIn("maxGrowth = 50", content)
 
     def test_view_by_hash(self):
-        from joshpy.config import view_config
+        from joshpy.inspect import view_config
 
         content = view_config(self.registry, "hash_baseline")
         self.assertIn("maxGrowth = 50", content)
 
     def test_view_missing_raises_key_error(self):
-        from joshpy.config import view_config
+        from joshpy.inspect import view_config
 
         with self.assertRaises(KeyError):
             view_config(self.registry, "nonexistent")
@@ -151,10 +154,10 @@ class TestOpenView(unittest.TestCase):
     def tearDown(self):
         self.registry.close()
 
-    @patch("joshpy.config.subprocess.run")
-    @patch("joshpy.config.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
     def test_opens_file_in_ide(self, mock_which, mock_run):
-        from joshpy.config import open_view
+        from joshpy.inspect import open_view
 
         path = open_view(self.registry, "baseline", ide="vscode")
         self.assertTrue(path.exists())
@@ -166,9 +169,9 @@ class TestOpenView(unittest.TestCase):
         self.assertEqual(cmd[0], "/usr/bin/code")
         self.assertEqual(cmd[1], str(path))
 
-    @patch("joshpy.config.shutil.which", return_value=None)
+    @patch("joshpy.inspect.shutil.which", return_value=None)
     def test_missing_cli_raises_runtime_error(self, mock_which):
-        from joshpy.config import open_view
+        from joshpy.inspect import open_view
 
         with self.assertRaises(RuntimeError) as ctx:
             open_view(self.registry, "baseline", ide="vscode")
@@ -186,25 +189,25 @@ class TestOpenDiff(unittest.TestCase):
         self.registry.close()
 
     def test_unknown_ide_raises_value_error(self):
-        from joshpy.config import open_diff
+        from joshpy.inspect import open_diff
 
         with self.assertRaises(ValueError) as ctx:
             open_diff(self.registry, "baseline", "high_growth", ide="emacs")
         self.assertIn("Unknown IDE", str(ctx.exception))
         self.assertIn("vscode", str(ctx.exception))
 
-    @patch("joshpy.config.shutil.which", return_value=None)
+    @patch("joshpy.inspect.shutil.which", return_value=None)
     def test_missing_cli_raises_runtime_error(self, mock_which):
-        from joshpy.config import open_diff
+        from joshpy.inspect import open_diff
 
         with self.assertRaises(RuntimeError) as ctx:
             open_diff(self.registry, "baseline", "high_growth", ide="vscode")
         self.assertIn("not found in PATH", str(ctx.exception))
 
-    @patch("joshpy.config.subprocess.run")
-    @patch("joshpy.config.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
     def test_opens_diff_in_ide(self, mock_which, mock_run):
-        from joshpy.config import open_diff
+        from joshpy.inspect import open_diff
 
         path1, path2 = open_diff(
             self.registry, "baseline", "high_growth", ide="vscode"
@@ -216,10 +219,10 @@ class TestOpenDiff(unittest.TestCase):
         self.assertEqual(cmd[2], str(path1))
         self.assertEqual(cmd[3], str(path2))
 
-    @patch("joshpy.config.subprocess.run")
-    @patch("joshpy.config.shutil.which", return_value="/usr/bin/cursor")
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/cursor")
     def test_cursor_ide(self, mock_which, mock_run):
-        from joshpy.config import open_diff
+        from joshpy.inspect import open_diff
 
         open_diff(
             self.registry, "baseline", "high_growth", ide="cursor"
@@ -239,8 +242,8 @@ class TestCompareConfigsMethod(unittest.TestCase):
     def tearDown(self):
         self.registry.close()
 
-    @patch("joshpy.config.subprocess.run")
-    @patch("joshpy.config.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
     def test_compare_configs_delegates(self, mock_which, mock_run):
         path1, path2 = self.registry.compare_configs(
             "baseline", "high_growth"
@@ -255,7 +258,7 @@ class TestDiffCLI(unittest.TestCase):
     """Tests for the CLI argument parser and main()."""
 
     def test_parser_view(self):
-        from joshpy.config.__main__ import _build_parser
+        from joshpy.inspect.__main__ import _build_parser
 
         parser = _build_parser()
         args = parser.parse_args(["my.duckdb", "--view", "baseline"])
@@ -264,7 +267,7 @@ class TestDiffCLI(unittest.TestCase):
         self.assertIsNone(args.diff)
 
     def test_parser_diff(self):
-        from joshpy.config.__main__ import _build_parser
+        from joshpy.inspect.__main__ import _build_parser
 
         parser = _build_parser()
         args = parser.parse_args(["my.duckdb", "--diff", "a", "b"])
@@ -274,7 +277,7 @@ class TestDiffCLI(unittest.TestCase):
         self.assertFalse(args.export_only)
 
     def test_parser_diff_all_flags(self):
-        from joshpy.config.__main__ import _build_parser
+        from joshpy.inspect.__main__ import _build_parser
 
         parser = _build_parser()
         args = parser.parse_args([
@@ -288,14 +291,14 @@ class TestDiffCLI(unittest.TestCase):
         self.assertEqual(args.output_dir, Path("/tmp/out"))
 
     def test_main_missing_registry(self):
-        from joshpy.config.__main__ import main
+        from joshpy.inspect.__main__ import main
 
         with patch("sys.argv", ["prog", "/nonexistent.duckdb", "--view", "a"]):
             result = main()
         self.assertEqual(result, 1)
 
     def test_main_view(self):
-        from joshpy.config.__main__ import main
+        from joshpy.inspect.__main__ import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.duckdb"
@@ -322,7 +325,7 @@ class TestDiffCLI(unittest.TestCase):
             self.assertEqual(result, 0)
 
     def test_main_diff_export_only(self):
-        from joshpy.config.__main__ import main
+        from joshpy.inspect.__main__ import main
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "test.duckdb"
@@ -448,10 +451,10 @@ class TestResolveConfigSource(unittest.TestCase):
 class TestSmartOpenView(unittest.TestCase):
     """Tests for open_view() smart file resolution."""
 
-    @patch("joshpy.config.subprocess.run")
-    @patch("joshpy.config.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
     def test_opens_real_file_when_unchanged(self, mock_which, mock_run):
-        from joshpy.config import open_view
+        from joshpy.inspect import open_view
 
         with tempfile.TemporaryDirectory() as tmpdir:
             registry, config_file = _make_registry_with_real_config(tmpdir)
@@ -463,10 +466,10 @@ class TestSmartOpenView(unittest.TestCase):
             finally:
                 registry.close()
 
-    @patch("joshpy.config.subprocess.run")
-    @patch("joshpy.config.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
     def test_opens_temp_with_warning_when_drifted(self, mock_which, mock_run):
-        from joshpy.config import open_view
+        from joshpy.inspect import open_view
 
         with tempfile.TemporaryDirectory() as tmpdir:
             registry, config_file = _make_registry_with_real_config(tmpdir)
@@ -486,10 +489,10 @@ class TestSmartOpenView(unittest.TestCase):
             finally:
                 registry.close()
 
-    @patch("joshpy.config.subprocess.run")
-    @patch("joshpy.config.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
     def test_opens_temp_when_file_gone(self, mock_which, mock_run):
-        from joshpy.config import open_view
+        from joshpy.inspect import open_view
 
         with tempfile.TemporaryDirectory() as tmpdir:
             registry, config_file = _make_registry_with_real_config(tmpdir)
@@ -500,6 +503,193 @@ class TestSmartOpenView(unittest.TestCase):
                 self.assertIn("READ-ONLY", path.read_text())
             finally:
                 registry.close()
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestViewJosh(unittest.TestCase):
+    """Tests for view_josh()."""
+
+    def setUp(self):
+        self.registry = _make_registry_with_two_runs()
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_view_by_label(self):
+        from joshpy.inspect import view_josh
+
+        content = view_josh(self.registry, "baseline")
+        self.assertIn("start simulation Main", content)
+
+    def test_view_missing_raises_key_error(self):
+        from joshpy.inspect import view_josh
+
+        with self.assertRaises(KeyError):
+            view_josh(self.registry, "nonexistent")
+
+    def test_view_no_content_raises_key_error(self):
+        """Runs registered without josh_content raise KeyError."""
+        from joshpy.inspect import view_josh
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+        session_id = registry.create_session(
+            config=_make_config(), experiment_name="test"
+        )
+        registry.register_run(
+            session_id=session_id,
+            run_hash="hash_no_josh",
+            josh_path="/path/to/sim.josh",
+            config_content="a = 1 count",
+            file_mappings=None,
+            parameters={"a": 1},
+        )
+        registry.label_run("hash_no_josh", "no_josh")
+        try:
+            with self.assertRaises(KeyError):
+                view_josh(registry, "no_josh")
+        finally:
+            registry.close()
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestExportJoshPair(unittest.TestCase):
+    """Tests for export_josh_pair()."""
+
+    def setUp(self):
+        self.registry = _make_registry_with_two_runs()
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_export_pair_by_label(self):
+        from joshpy.inspect import export_josh_pair
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path1, path2 = export_josh_pair(
+                self.registry, "baseline", "high_growth", tmpdir
+            )
+            self.assertTrue(path1.exists())
+            self.assertTrue(path2.exists())
+            self.assertTrue(path1.name.endswith(".josh"))
+            self.assertTrue(path2.name.endswith(".josh"))
+            self.assertIn("start simulation Main", path1.read_text())
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestOpenJoshDiff(unittest.TestCase):
+    """Tests for open_josh_diff()."""
+
+    def setUp(self):
+        self.registry = _make_registry_with_two_runs()
+
+    def tearDown(self):
+        self.registry.close()
+
+    @patch("joshpy.inspect.subprocess.run")
+    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    def test_opens_diff_in_ide(self, mock_which, mock_run):
+        from joshpy.inspect import open_josh_diff
+
+        path1, path2 = open_josh_diff(
+            self.registry, "baseline", "high_growth", ide="vscode"
+        )
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args[0][0]
+        self.assertEqual(cmd[0], "/usr/bin/code")
+        self.assertEqual(cmd[1], "--diff")
+        self.assertTrue(path1.name.endswith(".josh"))
+        self.assertTrue(path2.name.endswith(".josh"))
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestJoshCLI(unittest.TestCase):
+    """Tests for CLI with --type josh."""
+
+    def test_parser_type_josh(self):
+        from joshpy.inspect.__main__ import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args([
+            "my.duckdb", "--view", "baseline", "--type", "josh"
+        ])
+        self.assertEqual(args.type, "josh")
+
+    def test_main_view_josh(self):
+        from joshpy.inspect.__main__ import main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.duckdb"
+            from joshpy.registry import RunRegistry
+
+            file_registry = RunRegistry(str(db_path))
+            session_id = file_registry.create_session(
+                config=_make_config(), experiment_name="test"
+            )
+            file_registry.register_run(
+                session_id=session_id,
+                run_hash="h1",
+                josh_path="sim.josh",
+                config_content="a = 1 count",
+                file_mappings=None,
+                parameters={"a": 1},
+                josh_content="start simulation Main\nend simulation\n",
+            )
+            file_registry.label_run("h1", "run_a")
+            file_registry.close()
+
+            with patch("sys.argv", [
+                "prog", str(db_path), "--view", "run_a",
+                "--type", "josh", "--export-only",
+            ]):
+                result = main()
+
+            self.assertEqual(result, 0)
+
+    def test_main_diff_josh_export_only(self):
+        from joshpy.inspect.__main__ import main
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.duckdb"
+            from joshpy.registry import RunRegistry
+
+            file_registry = RunRegistry(str(db_path))
+            session_id = file_registry.create_session(
+                config=_make_config(), experiment_name="test"
+            )
+            file_registry.register_run(
+                session_id=session_id,
+                run_hash="h1",
+                josh_path="sim.josh",
+                config_content="a = 1 count",
+                file_mappings=None,
+                parameters={"a": 1},
+                josh_content="start simulation Main\nend simulation\n",
+            )
+            file_registry.label_run("h1", "run_a")
+            file_registry.register_run(
+                session_id=session_id,
+                run_hash="h2",
+                josh_path="sim.josh",
+                config_content="a = 2 count",
+                file_mappings=None,
+                parameters={"a": 2},
+                josh_content="start simulation Main\n  grid.size = 30 m\nend simulation\n",
+            )
+            file_registry.label_run("h2", "run_b")
+            file_registry.close()
+
+            out_dir = Path(tmpdir) / "exported"
+            with patch("sys.argv", [
+                "prog", str(db_path), "--diff", "run_a", "run_b",
+                "--type", "josh", "--export-only", "--output-dir", str(out_dir),
+            ]):
+                result = main()
+
+            self.assertEqual(result, 0)
+            exported = list(out_dir.iterdir())
+            self.assertEqual(len(exported), 2)
+            self.assertTrue(all(f.name.endswith(".josh") for f in exported))
 
 
 if __name__ == "__main__":
