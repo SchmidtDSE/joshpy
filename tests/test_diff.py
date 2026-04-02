@@ -154,8 +154,8 @@ class TestOpenView(unittest.TestCase):
     def tearDown(self):
         self.registry.close()
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/code")
     def test_opens_file_in_ide(self, mock_which, mock_run):
         from joshpy.inspect import open_view
 
@@ -169,7 +169,7 @@ class TestOpenView(unittest.TestCase):
         self.assertEqual(cmd[0], "/usr/bin/code")
         self.assertEqual(cmd[1], str(path))
 
-    @patch("joshpy.inspect.shutil.which", return_value=None)
+    @patch("joshpy.inspect._core.shutil.which", return_value=None)
     def test_missing_cli_raises_runtime_error(self, mock_which):
         from joshpy.inspect import open_view
 
@@ -196,7 +196,7 @@ class TestOpenDiff(unittest.TestCase):
         self.assertIn("Unknown IDE", str(ctx.exception))
         self.assertIn("vscode", str(ctx.exception))
 
-    @patch("joshpy.inspect.shutil.which", return_value=None)
+    @patch("joshpy.inspect._core.shutil.which", return_value=None)
     def test_missing_cli_raises_runtime_error(self, mock_which):
         from joshpy.inspect import open_diff
 
@@ -204,8 +204,8 @@ class TestOpenDiff(unittest.TestCase):
             open_diff(self.registry, "baseline", "high_growth", ide="vscode")
         self.assertIn("not found in PATH", str(ctx.exception))
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/code")
     def test_opens_diff_in_ide(self, mock_which, mock_run):
         from joshpy.inspect import open_diff
 
@@ -219,8 +219,8 @@ class TestOpenDiff(unittest.TestCase):
         self.assertEqual(cmd[2], str(path1))
         self.assertEqual(cmd[3], str(path2))
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/cursor")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/cursor")
     def test_cursor_ide(self, mock_which, mock_run):
         from joshpy.inspect import open_diff
 
@@ -242,8 +242,8 @@ class TestCompareConfigsMethod(unittest.TestCase):
     def tearDown(self):
         self.registry.close()
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/code")
     def test_compare_configs_delegates(self, mock_which, mock_run):
         path1, path2 = self.registry.compare_configs(
             "baseline", "high_growth"
@@ -451,8 +451,8 @@ class TestResolveConfigSource(unittest.TestCase):
 class TestSmartOpenView(unittest.TestCase):
     """Tests for open_view() smart file resolution."""
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/code")
     def test_opens_real_file_when_unchanged(self, mock_which, mock_run):
         from joshpy.inspect import open_view
 
@@ -466,8 +466,8 @@ class TestSmartOpenView(unittest.TestCase):
             finally:
                 registry.close()
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/code")
     def test_opens_temp_with_warning_when_drifted(self, mock_which, mock_run):
         from joshpy.inspect import open_view
 
@@ -489,8 +489,8 @@ class TestSmartOpenView(unittest.TestCase):
             finally:
                 registry.close()
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/code")
     def test_opens_temp_when_file_gone(self, mock_which, mock_run):
         from joshpy.inspect import open_view
 
@@ -586,8 +586,8 @@ class TestOpenJoshDiff(unittest.TestCase):
     def tearDown(self):
         self.registry.close()
 
-    @patch("joshpy.inspect.subprocess.run")
-    @patch("joshpy.inspect.shutil.which", return_value="/usr/bin/code")
+    @patch("joshpy.inspect._core.subprocess.run")
+    @patch("joshpy.inspect._core.shutil.which", return_value="/usr/bin/code")
     def test_opens_diff_in_ide(self, mock_which, mock_run):
         from joshpy.inspect import open_josh_diff
 
