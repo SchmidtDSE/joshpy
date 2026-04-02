@@ -1,0 +1,270 @@
+---
+title: "Inspecting Runs from the Registry"
+description: "View, export, and diff stored configs and josh sources"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Introduction
+
+Every run registered in a joshpy registry stores its rendered config (`.jshc`)
+and josh source (`.josh`) content. The `joshpy.inspect` module lets you view,
+export, and diff these stored files -- even after the original files have been
+modified or deleted.
+
+This is useful for:
+
+- **Comparing runs**: See exactly what changed between two parameter configurations
+- **Debugging failures**: Inspect the config and model source for a failed run
+- **Auditing**: Verify what was actually run, not what's currently on disk
+
+## Setup
+
+```{python}
+#| label: setup-registry
+from joshpy.registry import RunRegistry
+from joshpy.jobs import JobConfig
+
+registry = RunRegistry(":memory:")
+session_id = registry.create_session(
+    config=JobConfig(simulation="Main"),
+    experiment_name="inspect_demo",
+)
+
+# Register two runs with different configs and the same josh source
+josh_source = """\
+start simulation Main
+  grid.size = 30 m
+  grid.low = 33.9 degrees latitude, -116.05 degrees longitude
+  grid.high = 33.91 degrees latitude, -116.04 degrees longitude
+  steps.low = 0 count
+  steps.high = 86 count
+end simulation
+
+start patch Default
+  Tree.init = create 10 count of Tree
+  export.treeCount.step = count(Tree)
+  export.averageHeight.step = mean(Tree.height)
+end patch
+
+start organism Tree
+  age.init = 0 years
+  age.step = prior.age + 1 year
+  height.init = 0 meters
+  height.step = prior.height + sample uniform from 0 meters to config sweep_config.maxGrowth
+end organism
+"""
+
+registry.register_run(
+    session_id=session_id,
+    run_hash="abc123def456",
+    josh_path="model.josh",
+    josh_content=josh_source,
+    config_content="maxGrowth = 5 meters\nfireYear = 75 count",
+    file_mappings=None,
+    parameters={"maxGrowth": 5, "fireYear": 75},
+)
+registry.label_run("abc123def456", "low_growth")
+
+registry.register_run(
+    session_id=session_id,
+    run_hash="fed987cba654",
+    josh_path="model.josh",
+    josh_content=josh_source,
+    config_content="maxGrowth = 15 meters\nfireYear = 75 count",
+    file_mappings=None,
+    parameters={"maxGrowth": 15, "fireYear": 75},
+)
+registry.label_run("fed987cba654", "high_growth")
+
+print(f"Registered 2 runs: low_growth, high_growth")
+```
+
+## Viewing Configs
+
+### Python API
+
+Use `registry.export_config()` to export a run's stored config to a file:
+
+```{python}
+#| label: export-config
+import tempfile
+
+tmpdir = tempfile.mkdtemp()
+path = registry.export_config("low_growth", tmpdir)
+print(path.read_text())
+```
+
+Or use `view_config()` to get the content as a string without writing a file:
+
+```{python}
+#| label: view-config
+from joshpy.inspect import view_config
+
+content = view_config(registry, "high_growth")
+print(content)
+```
+
+### Diffing Two Configs
+
+Export both configs and compare them side by side:
+
+```{python}
+#| label: diff-config
+from joshpy.inspect import export_pair
+
+path1, path2 = export_pair(registry, "low_growth", "high_growth", tmpdir)
+print(f"--- {path1.name} ---")
+print(path1.read_text())
+print(f"--- {path2.name} ---")
+print(path2.read_text())
+```
+
+To open an interactive diff in VS Code or Cursor:
+
+```python
+# Opens side-by-side diff in VS Code
+registry.compare_configs("low_growth", "high_growth")
+
+# Or with Cursor
+registry.compare_configs("low_growth", "high_growth", ide="cursor")
+```
+
+## Viewing Josh Sources
+
+The same workflow applies to the stored josh simulation source. This is
+especially useful when the original `.josh` file was rendered from a `.josh.j2`
+template -- the temp file is deleted after the sweep, but the content lives on
+in the registry.
+
+```{python}
+#| label: view-josh
+from joshpy.inspect import view_josh
+
+source = view_josh(registry, "low_growth")
+print(source[:200], "...")
+```
+
+### Diffing Josh Sources
+
+```python
+# Opens side-by-side diff of josh sources in VS Code
+registry.compare_josh("low_growth", "high_growth")
+```
+
+::: {.callout-note}
+If both runs used the same josh source (common when only config parameters
+vary), the diff will show identical files. This confirms that only the config
+changed between runs.
+:::
+
+## Command-Line Interface
+
+The `python -m joshpy.inspect` CLI provides the same functionality from the
+terminal, without writing Python.
+
+### View
+
+```bash
+# Print stored config to stdout
+python -m joshpy.inspect experiment.duckdb --view low_growth
+
+# Print stored josh source
+python -m joshpy.inspect experiment.duckdb --view low_growth --type josh
+```
+
+### Diff
+
+```bash
+# Open config diff in VS Code
+python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth
+
+# Open josh source diff in Cursor
+python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --type josh --ide cursor
+```
+
+### Export Only
+
+Use `--export-only` to write files without opening an IDE:
+
+```bash
+# Export configs to a directory
+python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --export-only --output-dir ./exports
+
+# Export josh sources
+python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --type josh --export-only
+```
+
+### CLI Reference
+
+| Flag | Description |
+|------|-------------|
+| `--view RUN` | View a single run (label or hash) |
+| `--diff RUN1 RUN2` | Diff two runs |
+| `--type {config,josh}` | What to inspect (default: `config`) |
+| `--ide {vscode,cursor}` | IDE for viewing/diffing (default: `vscode`) |
+| `--export-only` | Write files without opening IDE |
+| `--output-dir DIR` | Directory for exported files (default: system temp) |
+
+## Smart File Resolution
+
+When you open a view or diff, the inspect module checks whether the original
+file still exists on disk:
+
+| Situation | Behavior |
+|-----------|----------|
+| Original file exists, content matches | Opens the real file (editable) |
+| Original file exists, content has drifted | Opens a read-only snapshot with a note |
+| Original file is gone | Opens a read-only snapshot from registry |
+
+This means `open_view()` and `compare_configs()` do the right thing
+automatically -- you get the real file when possible, a faithful snapshot when
+not.
+
+## File Mappings
+
+The registry also stores which `.jshd` data files were used for each run.
+Use `get_file_mappings()` to recall them:
+
+```{python}
+#| label: file-mappings-demo
+# Register a run with file mappings
+from pathlib import Path
+
+registry.register_run(
+    session_id=session_id,
+    run_hash="with_data_hash",
+    josh_path="model.josh",
+    josh_content=josh_source,
+    config_content="maxGrowth = 10 meters",
+    file_mappings={
+        "soil_quality": {"path": "/data/soil_quality_gradient.jshd", "hash": "abc123"},
+        "climate": {"path": "/data/climate_ssp245.jshd", "hash": "def456"},
+    },
+    parameters={"maxGrowth": 10},
+)
+registry.label_run("with_data_hash", "with_data")
+
+mappings = registry.get_file_mappings("with_data")
+for name, path in mappings.items():
+    print(f"  {name}: {path}")
+```
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+registry.close()
+```
+
+## Learn More
+
+- [Single Run & Iteration](manual-workflow.qmd) -- labeling runs for comparison
+- [Analysis & Visualization](analysis.qmd) -- diagnostic plots from registry data
+- [Low-Level Components](low-level-components.qmd) -- direct registry management
