@@ -1,28 +1,41 @@
 """Self-contained reproducibility archives for Josh simulation runs.
 
 A bottle is a ``.tar.gz`` archive containing everything needed to reproduce
-a single Josh run without Python or joshpy — just Java and the JAR.
+Josh runs without Python or joshpy — just Java and the JAR.
 
-Archive structure::
+Single-job bottle (``first_failure`` / ``first_success``)::
 
     bottle_{run_hash}/
-        simulation.josh          # rendered .josh source
-        sweep_config.jshc        # rendered config
-        data/                    # external data files (.jshd)
-        run.sh                   # exact java command with relative paths
-        manifest.json            # metadata for debugging context
+        simulation.josh
+        sweep_config.jshc
+        data/
+        run.sh
+        manifest.json
+
+Sweep bottle (``all`` / ``all_failures``)::
+
+    bottle_sweep_{timestamp}/
+        data/                        # shared .jshd files (copied once)
+        jobs/
+            {run_hash_1}/
+                simulation.josh
+                sweep_config.jshc
+                run.sh               # --data paths → ../../data/
+            {run_hash_2}/
+                ...
+        manifest.json                # metadata for all jobs
 
 Usage::
 
     # During execution
-    results = manager.run(bottle="first_failure")
+    results = manager.run(bottle="first_failure")  # single-job bottle
+    results = manager.run(bottle="all")            # sweep bottle
 
-    # After the fact
+    # After the fact (single run)
     registry.bottle("baseline", cli=cli)
 
     # Standalone
-    from joshpy.bottle import create_bottle
-    create_bottle(job, cli_result, cli)
+    from joshpy.bottle import create_bottle, create_sweep_bottle
 """
 
 from __future__ import annotations
@@ -483,6 +496,181 @@ def create_bottle_from_registry(
         # 8. Create .tar.gz
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         archive_name = f"{bottle_name}_{timestamp}.tar.gz"
+        archive_path = output_dir / archive_name
+
+        with tarfile.open(archive_path, "w:gz") as tar:
+            tar.add(staging, arcname=bottle_name)
+
+        return archive_path
+
+    finally:
+        shutil.rmtree(staging.parent, ignore_errors=True)
+
+
+def create_sweep_bottle(
+    job_results: list[tuple[ExpandedJob, CLIResult]],
+    cli: JoshCLI | None = None,
+    output_dir: str | Path = Path("bottles"),
+    omit_jshd: bool = False,
+) -> Path:
+    """Create a single bottle archive containing multiple sweep jobs.
+
+    Data files are shared across jobs (copied once into ``data/``).
+    Each job gets its own subdirectory under ``jobs/`` with its rendered
+    source, config, and ``run.sh``.
+
+    Archive structure::
+
+        bottle_sweep_{timestamp}/
+            data/                        # shared .jshd files (copied once)
+            jobs/
+                {run_hash_1}/
+                    simulation.josh
+                    sweep_config.jshc
+                    run.sh               # --data paths point to ../../data/
+                {run_hash_2}/
+                    ...
+            manifest.json                # metadata for all jobs
+
+    Args:
+        job_results: List of (ExpandedJob, CLIResult) tuples.
+        cli: Optional JoshCLI instance for JAR metadata.
+        output_dir: Directory for the archive. Default: ``./bottles/``.
+        omit_jshd: If True, skip copying .jshd data files.
+
+    Returns:
+        Path to the created ``.tar.gz`` archive.
+
+    Raises:
+        FileNotFoundError: If ``omit_jshd`` is False and a data file is missing.
+        ValueError: If job_results is empty.
+    """
+    from joshpy.jar import get_jar_hash, get_jar_version
+
+    if not job_results:
+        raise ValueError("Cannot create sweep bottle from empty job_results")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    bottle_name = f"bottle_sweep_{timestamp}"
+    staging = Path(tempfile.mkdtemp()) / bottle_name
+
+    try:
+        staging.mkdir(parents=True)
+        data_staging = staging / "data"
+        jobs_staging = staging / "jobs"
+        jobs_staging.mkdir()
+
+        # JAR metadata (shared across all jobs)
+        jar_version = None
+        jar_sha256 = None
+        if cli is not None:
+            try:
+                jar_sha256 = get_jar_hash(cli._resolved_jar)
+                jar_version = get_jar_version(
+                    cli._resolved_jar, java_path=cli.java_path
+                )
+            except Exception:
+                pass
+
+        # Collect all unique data files across jobs (deduplicate by path)
+        all_data_files: dict[str, Path] = {}  # name -> src_path
+        for job, _ in job_results:
+            for name, src_path in job.file_mappings.items():
+                if name not in all_data_files:
+                    all_data_files[name] = src_path
+
+        # Copy shared data files once
+        original_data_paths: dict[str, str] = {}
+        for name, src_path in all_data_files.items():
+            original_data_paths[name] = str(src_path)
+            if omit_jshd:
+                continue
+            if not src_path.exists():
+                raise FileNotFoundError(
+                    f"Data file '{name}' not found at {src_path}. "
+                    f"Use omit_jshd=True to create a bottle without data files."
+                )
+            data_staging.mkdir(exist_ok=True)
+            shutil.copy2(src_path, data_staging / src_path.name)
+
+        # Create per-job directories
+        job_manifests: list[dict[str, Any]] = []
+        for job, cli_result in job_results:
+            job_dir = jobs_staging / job.run_hash
+            job_dir.mkdir()
+
+            # simulation.josh
+            if job.source_path and job.source_path.exists():
+                shutil.copy2(job.source_path, job_dir / "simulation.josh")
+
+            # Config
+            config_name = f"{job.config_name}.jshc"
+            (job_dir / config_name).write_text(job.config_content)
+
+            # Data file relative paths (point back to shared ../../data/)
+            data_rel_paths: dict[str, str] = {}
+            for name, src_path in job.file_mappings.items():
+                data_rel_paths[name] = f"../../data/{src_path.name}"
+
+            # run.sh
+            run_sh = _build_run_sh(
+                simulation=job.simulation,
+                replicates=job.replicates,
+                config_name=config_name,
+                data_files=data_rel_paths,
+                custom_tags=job.custom_tags,
+                run_hash=job.run_hash,
+                jar_version=jar_version,
+                jar_sha256=jar_sha256,
+                seed=job.seed,
+                crs=job.crs,
+                use_float64=job.use_float64,
+                output_steps=job.output_steps,
+            )
+            run_sh_path = job_dir / "run.sh"
+            run_sh_path.write_text(run_sh)
+            run_sh_path.chmod(0o755)
+
+            # Per-job manifest entry
+            entry: dict[str, Any] = {
+                "run_hash": job.run_hash,
+                "parameters": job.parameters,
+                "exit_code": cli_result.exit_code,
+                "success": cli_result.success,
+            }
+            if not cli_result.success:
+                entry["stderr"] = cli_result.stderr
+            job_manifests.append(entry)
+
+        # Top-level manifest
+        first_job = job_results[0][0]
+        manifest: dict[str, Any] = {
+            "joshpy_version": _get_joshpy_version(),
+            "jar_version": jar_version,
+            "jar_sha256": jar_sha256,
+            "simulation": first_job.simulation,
+            "total_jobs": len(job_results),
+            "succeeded": sum(1 for _, r in job_results if r.success),
+            "failed": sum(1 for _, r in job_results if not r.success),
+            "omit_jshd": omit_jshd,
+            "original_data_paths": original_data_paths,
+            "jobs": job_manifests,
+            "python_version": sys.version,
+            "platform": platform.platform(),
+            "git_hash": _get_git_hash(),
+            "bottled_at": datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+        }
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, default=str) + "\n"
+        )
+
+        # Create .tar.gz
+        archive_name = f"{bottle_name}.tar.gz"
         archive_path = output_dir / archive_name
 
         with tarfile.open(archive_path, "w:gz") as tar:

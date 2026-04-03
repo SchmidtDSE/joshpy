@@ -1652,6 +1652,7 @@ def run_sweep(
     failed = 0
     _bottled_failure = False
     _bottled_success = False
+    _bottle_collect: list[tuple[ExpandedJob, Any]] = []
 
     try:
         for i, job in enumerate(job_set):
@@ -1690,7 +1691,14 @@ def run_sweep(
             if bottle is not None:
                 from joshpy.bottle import _should_bottle, create_bottle
 
-                if _should_bottle(bottle, result.success, _bottled_failure, _bottled_success):
+                _is_sweep_mode = bottle in ("all", "all_failures")
+
+                if _is_sweep_mode:
+                    # Collect for sweep bottle (created after the loop)
+                    if _should_bottle(bottle, result.success, False, False):
+                        _bottle_collect.append((job, result))
+                elif _should_bottle(bottle, result.success, _bottled_failure, _bottled_success):
+                    # Single-job bottle (first_failure, first_success)
                     try:
                         bottle_path = create_bottle(
                             job=job,
@@ -1722,6 +1730,23 @@ def run_sweep(
 
         if not quiet:
             print(f"Completed: {succeeded} succeeded, {failed} failed")
+
+        # Create sweep bottle for all/all_failures modes (after loop)
+        if bottle is not None and _bottle_collect:
+            from joshpy.bottle import create_sweep_bottle
+
+            try:
+                bottle_path = create_sweep_bottle(
+                    job_results=_bottle_collect,
+                    cli=cli,
+                    output_dir=bottle_dir or Path("bottles"),
+                    omit_jshd=bottle_omit_jshd,
+                )
+                if not quiet:
+                    print(f"[BOTTLE] {bottle_path} ({len(_bottle_collect)} jobs)")
+            except Exception as e:
+                if not quiet:
+                    print(f"[BOTTLE] Warning: sweep bottling failed: {e}")
 
         # Set final status if managing status
         if manage_status and registry is not None and session_id is not None:
