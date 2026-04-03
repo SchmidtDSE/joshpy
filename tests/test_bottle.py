@@ -37,9 +37,10 @@ def _make_job(
     file_mappings: dict[str, Path] = {}
     if with_data:
         data_dir = Path(tmpdir) / "data"
-        data_dir.mkdir()
+        data_dir.mkdir(exist_ok=True)
         soil = data_dir / "soil_quality.jshd"
-        soil.write_bytes(b"fake jshd data")
+        if not soil.exists():
+            soil.write_bytes(b"fake jshd data")
         file_mappings["soil_quality"] = soil
 
     return ExpandedJob(
@@ -355,6 +356,159 @@ class TestBottleInRunSweep(unittest.TestCase):
 
             self.assertEqual(result.failed, 1)
             mock_bottle.assert_called_once()
+
+
+class TestCreateSweepBottle(unittest.TestCase):
+    """Tests for create_sweep_bottle()."""
+
+    @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
+    @patch("joshpy.jar.get_jar_hash", return_value="sha256abc")
+    def test_sweep_bottle_structure(self, mock_hash, mock_ver):
+        from joshpy.bottle import create_sweep_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job1 = _make_job(tmpdir, run_hash="hash_aaa")
+            job2 = _make_job(tmpdir, run_hash="hash_bbb")
+            r1 = _make_cli_result(success=True)
+            r2 = _make_cli_result(success=False)
+            cli = _make_mock_cli()
+
+            out_dir = Path(tmpdir) / "bottles"
+            archive = create_sweep_bottle(
+                [(job1, r1), (job2, r2)], cli=cli, output_dir=out_dir
+            )
+
+            self.assertTrue(archive.exists())
+            self.assertIn("bottle_sweep_", archive.name)
+
+            with tarfile.open(archive, "r:gz") as tar:
+                names = tar.getnames()
+
+            # Find the prefix (bottle_sweep_{timestamp})
+            prefix = names[0].split("/")[0]
+
+            # Shared data
+            self.assertTrue(any(f"{prefix}/data/soil_quality.jshd" in n for n in names))
+
+            # Per-job dirs
+            self.assertIn(f"{prefix}/jobs/hash_aaa/simulation.josh", names)
+            self.assertIn(f"{prefix}/jobs/hash_aaa/sweep_config.jshc", names)
+            self.assertIn(f"{prefix}/jobs/hash_aaa/run.sh", names)
+            self.assertIn(f"{prefix}/jobs/hash_bbb/simulation.josh", names)
+            self.assertIn(f"{prefix}/jobs/hash_bbb/run.sh", names)
+
+            # Top-level manifest
+            self.assertIn(f"{prefix}/manifest.json", names)
+
+    @patch("joshpy.jar.get_jar_version", return_value=None)
+    @patch("joshpy.jar.get_jar_hash", return_value=None)
+    def test_sweep_bottle_shared_data(self, mock_hash, mock_ver):
+        """Data files are deduplicated — copied once even with multiple jobs."""
+        from joshpy.bottle import create_sweep_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Both jobs reference the same data file
+            job1 = _make_job(tmpdir, run_hash="hash_aaa")
+            job2 = _make_job(tmpdir, run_hash="hash_bbb")
+            r1 = _make_cli_result()
+            r2 = _make_cli_result()
+
+            out_dir = Path(tmpdir) / "bottles"
+            archive = create_sweep_bottle(
+                [(job1, r1), (job2, r2)], output_dir=out_dir
+            )
+
+            with tarfile.open(archive, "r:gz") as tar:
+                names = tar.getnames()
+
+            # Only one copy of the data file
+            data_entries = [n for n in names if "soil_quality.jshd" in n]
+            self.assertEqual(len(data_entries), 1)
+
+    @patch("joshpy.jar.get_jar_version", return_value=None)
+    @patch("joshpy.jar.get_jar_hash", return_value=None)
+    def test_sweep_bottle_run_sh_relative_paths(self, mock_hash, mock_ver):
+        """Per-job run.sh points to ../../data/ for shared data."""
+        from joshpy.bottle import create_sweep_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job = _make_job(tmpdir, run_hash="hash_aaa")
+            r = _make_cli_result()
+
+            out_dir = Path(tmpdir) / "bottles"
+            archive = create_sweep_bottle(
+                [(job, r)], output_dir=out_dir
+            )
+
+            extract_dir = Path(tmpdir) / "extracted"
+            with tarfile.open(archive, "r:gz") as tar:
+                tar.extractall(extract_dir)
+
+            prefix = list(extract_dir.iterdir())[0]
+            run_sh = (prefix / "jobs" / "hash_aaa" / "run.sh").read_text()
+            self.assertIn("../../data/soil_quality.jshd", run_sh)
+
+    @patch("joshpy.jar.get_jar_version", return_value=None)
+    @patch("joshpy.jar.get_jar_hash", return_value=None)
+    def test_sweep_bottle_manifest(self, mock_hash, mock_ver):
+        from joshpy.bottle import create_sweep_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job1 = _make_job(tmpdir, run_hash="hash_aaa")
+            job2 = _make_job(tmpdir, run_hash="hash_bbb")
+            r1 = _make_cli_result(success=True)
+            r2 = _make_cli_result(success=False)
+
+            out_dir = Path(tmpdir) / "bottles"
+            archive = create_sweep_bottle(
+                [(job1, r1), (job2, r2)], output_dir=out_dir
+            )
+
+            extract_dir = Path(tmpdir) / "extracted"
+            with tarfile.open(archive, "r:gz") as tar:
+                tar.extractall(extract_dir)
+
+            prefix = list(extract_dir.iterdir())[0]
+            manifest = json.loads((prefix / "manifest.json").read_text())
+
+            self.assertEqual(manifest["total_jobs"], 2)
+            self.assertEqual(manifest["succeeded"], 1)
+            self.assertEqual(manifest["failed"], 1)
+            self.assertEqual(len(manifest["jobs"]), 2)
+            self.assertEqual(manifest["jobs"][0]["run_hash"], "hash_aaa")
+            self.assertTrue(manifest["jobs"][0]["success"])
+            self.assertFalse(manifest["jobs"][1]["success"])
+
+    @patch("joshpy.jar.get_jar_version", return_value=None)
+    @patch("joshpy.jar.get_jar_hash", return_value=None)
+    def test_sweep_bottle_in_run_sweep_all(self, mock_hash, mock_ver):
+        """bottle='all' creates a single sweep bottle after the loop."""
+        from joshpy.jobs import JobSet, run_sweep
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job1 = _make_job(tmpdir, run_hash="hash_aaa")
+            job2 = _make_job(tmpdir, run_hash="hash_bbb")
+            job_set = JobSet(jobs=[job1, job2])
+
+            cli = MagicMock()
+            cli._resolved_jar = Path("/fake/jar.jar")
+            cli.java_path = "java"
+            cli.run.return_value = _make_cli_result(success=True)
+
+            bottle_dir = Path(tmpdir) / "bottles"
+            result = run_sweep(
+                cli, job_set,
+                stop_on_failure=False,
+                quiet=True,
+                bottle="all",
+                bottle_dir=bottle_dir,
+            )
+
+            self.assertEqual(result.succeeded, 2)
+            archives = list(bottle_dir.glob("*.tar.gz"))
+            # Single sweep archive, not two separate bottles
+            self.assertEqual(len(archives), 1)
+            self.assertIn("bottle_sweep_", archives[0].name)
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
