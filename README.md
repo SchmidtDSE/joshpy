@@ -206,6 +206,72 @@ diag.plot_spatial("treeCount", step=50, config_hash="abc123")
 diag.plot_comparison("averageAge", group_by="maxGrowth", show_sql=True)
 ```
 
+### Bottling Runs for Reproducibility
+
+Create self-contained archives for bug reports, archival, and sharing.
+A bottle is a `.tar.gz` with rendered sources, configs, data files,
+`run.sh` scripts, and a `manifest.json` — everything needed to reproduce
+runs with just Java and the JAR.
+
+```python
+# Bottle the first failure (single-job archive)
+results = manager.run(bottle="first_failure")
+
+# Bottle the entire sweep (shared data, one archive)
+results = manager.run(bottle="all")
+
+# Bottle a past run from the registry
+registry.bottle("baseline", cli=cli)
+
+# Lightweight bottle (skip large .jshd files)
+registry.bottle("baseline", cli=cli, omit_jshd=True)
+```
+
+Sweep bottles share data files across jobs — no redundant copies:
+
+```
+bottle_sweep_20260403/
+    data/                    # shared .jshd files (copied once)
+    jobs/
+        abc123/              # per-job: simulation.josh, config, run.sh
+        def456/
+    manifest.json
+```
+
+Recipients can reproduce with `cd jobs/abc123 && ./run.sh /path/to/jar`,
+or unpack back into joshpy:
+
+```python
+from joshpy.bottle import unbottle
+
+config = unbottle("bottle_abc123.tar.gz")
+config = unbottle("bottle_abc123.tar.gz", data_dir=Path("my/local/data"))
+```
+
+### Inspecting Stored Runs
+
+View and diff the stored config and josh source for any registered run:
+
+```python
+from joshpy.inspect import view_config, view_josh
+
+# View stored config or josh source
+print(view_config(registry, "baseline"))
+print(view_josh(registry, "baseline"))
+
+# Open side-by-side diff in VS Code
+registry.compare_configs("baseline", "high_growth")
+registry.compare_josh("baseline", "high_growth")
+```
+
+Or from the command line:
+
+```bash
+python -m joshpy.inspect experiment.duckdb --view baseline
+python -m joshpy.inspect experiment.duckdb --diff baseline high_growth
+python -m joshpy.inspect experiment.duckdb --diff baseline high_growth --type josh
+```
+
 ## Development
 
 ### Using DevContainer (Recommended)

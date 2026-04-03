@@ -536,6 +536,9 @@ class SweepManager:
         on_complete: Callable[[ExpandedJob, Any], None] | None = None,
         objective: Any | None = None,
         jfr: Any | None = None,  # JfrConfig
+        bottle: str | None = None,
+        bottle_dir: Path | None = None,
+        bottle_omit_jshd: bool = False,
     ) -> SweepResult:
         """Execute all jobs in the sweep.
 
@@ -630,6 +633,9 @@ class SweepManager:
                 dry_run=dry_run,
                 quiet=quiet,
                 jfr=jfr,
+                bottle=bottle,
+                bottle_dir=bottle_dir,
+                bottle_omit_jshd=bottle_omit_jshd,
             )
 
             # Update catalog status if configured
