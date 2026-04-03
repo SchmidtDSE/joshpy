@@ -19,6 +19,7 @@ project:
     - tutorials/complete-example.qmd       # Depends on preprocessing output
     - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
+    - tutorials/bottling-runs.qmd        # Reproducibility archives
     - tutorials/debug-inspection.qmd     # Debug output inspection
     - tutorials/jfr-profiling.qmd       # JVM profiling with Flight Recorder
     - tutorials/switching-versions.qmd   # Josh version switching
@@ -74,6 +75,8 @@ website:
             href: tutorials/adaptive-sweep.qmd
           - text: "Low-Level Components"
             href: tutorials/low-level-components.qmd
+          - text: "Bottling Runs"
+            href: tutorials/bottling-runs.qmd
           - text: "Debug Output Inspection"
             href: tutorials/debug-inspection.qmd
           - text: "JVM Profiling (JFR)"
@@ -126,6 +129,7 @@ website:
             - tutorials/multi-session-sweeps.qmd
         - section: "Debugging & Profiling"
           contents:
+            - tutorials/bottling-runs.qmd
             - tutorials/debug-inspection.qmd
             - tutorials/jfr-profiling.qmd
         - section: "Advanced"

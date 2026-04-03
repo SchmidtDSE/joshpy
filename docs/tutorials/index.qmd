@@ -127,6 +127,16 @@ Best for: Understanding what changed between runs, debugging failures.
 
 ## Debugging & Profiling
 
+### [Bottling Runs for Reproducibility](bottling-runs.qmd)
+
+Create self-contained archives for bug reports, archival, and sharing:
+
+- `manager.run(bottle="first_failure")` to capture failures automatically
+- `registry.bottle("baseline")` to package a past run after the fact
+- Archive includes `run.sh` -- reproduce with just Java and the JAR
+
+Best for: Bug reports, sharing reproducible examples, long-term archival.
+
 ### [Debug Output Inspection](debug-inspection.qmd)
 
 Trace agent behavior with structured debug log analysis:

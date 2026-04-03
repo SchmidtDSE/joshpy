@@ -1,0 +1,331 @@
+---
+title: "Bottling Runs for Reproducibility"
+description: "Create self-contained archives for bug reports, archival, and sharing"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## The Problem
+
+You run a simulation. It crashes, or produces unexpected results. You want to
+share the exact setup with a colleague, file a bug report, or archive it for
+your future self. But the run depends on:
+
+- A rendered `.josh` source (possibly from a `.josh.j2` template)
+- A rendered `.jshc` config (from a Jinja sweep)
+- Several `.jshd` data files scattered across directories
+- Specific parameter values
+- A specific Josh JAR version
+
+Reconstructing all of this from a run hash alone is fragile. Files move, configs
+get edited, templates change.
+
+## What a Bottle Is
+
+A **bottle** is a self-contained `.tar.gz` archive with everything needed to
+reproduce a single Josh simulation run -- without Python, joshpy, or any project
+structure. Just Java and the JAR.
+
+```
+bottle_abc123def456_20260403_143000.tar.gz
+  bottle_abc123def456/
+      simulation.josh          # the rendered .josh source
+      sweep_config.jshc        # the rendered config (not the .j2 template)
+      data/
+          soil_quality.jshd    # all external data files, copied in
+      run.sh                   # exact java command with relative paths
+      manifest.json            # full provenance metadata
+```
+
+Everything is **realized**: the `.jshc` is the rendered output, not the Jinja
+template. The `.josh` is the rendered source, not the `.josh.j2`. Data files
+are copied in. `run.sh` uses relative paths so the archive works anywhere.
+
+To reproduce, a recipient just needs Java and the JAR:
+
+```bash
+tar xzf bottle_abc123def456_20260403_143000.tar.gz
+cd bottle_abc123def456
+./run.sh /path/to/joshsim-fat.jar
+```
+
+## Bottling During a Sweep
+
+The most common use case: bottle the first failure automatically so you have
+a ready-made bug report.
+
+```python
+results = manager.run(bottle="first_failure")
+```
+
+This creates an archive in `./bottles/` as soon as a job fails -- after the
+registry callback fires but before `stop_on_failure` raises. Even if the sweep
+stops, you have the archive.
+
+### Bottle Modes
+
+| Mode | What gets bottled | Use case |
+|------|-------------------|----------|
+| `"first_failure"` | First failed job only | Bug reports (most common) |
+| `"all_failures"` | Every failed job | Multiple distinct failures |
+| `"first_success"` | First successful job | Sharing a working example |
+| `"all"` | Every job | Full archival |
+
+### Custom Output Directory
+
+```python
+results = manager.run(
+    bottle="first_failure",
+    bottle_dir=Path("bug_reports/"),
+)
+```
+
+### Example
+
+```{python}
+#| label: bottle-during-sweep
+import tempfile
+from pathlib import Path
+from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+# A simple sweep that will run successfully
+SOURCE = Path("../../examples/external_sweep.josh")
+DATA_DIR = Path("../../examples/external_data")
+
+tmpdir = tempfile.mkdtemp()
+registry_path = Path(tmpdir) / "demo.duckdb"
+
+config = JobConfig(
+    source_path=SOURCE,
+    simulation="Main",
+    replicates=1,
+    file_mappings={"soil_quality": DATA_DIR / "soil_quality_gradient.jshd"},
+)
+
+manager = (
+    SweepManager.builder(config)
+    .with_registry(str(registry_path), experiment_name="bottle_demo")
+    .with_cli(cli)
+    .with_label("demo_run")
+    .build()
+)
+
+bottle_dir = Path(tmpdir) / "bottles"
+try:
+    results = manager.run(
+        bottle="all",
+        bottle_dir=bottle_dir,
+        quiet=True,
+    )
+    print(f"Sweep: {results.succeeded} succeeded, {results.failed} failed")
+
+    archives = list(bottle_dir.glob("*.tar.gz"))
+    if archives:
+        print(f"Bottle created: {archives[0].name}")
+        print(f"Size: {archives[0].stat().st_size:,} bytes")
+finally:
+    manager.cleanup()
+    manager.close()
+```
+
+### What's Inside
+
+```{python}
+#| label: inspect-bottle
+import tarfile
+
+if archives:
+    with tarfile.open(archives[0], "r:gz") as tar:
+        for member in tar.getmembers():
+            kind = "dir" if member.isdir() else f"{member.size:>8,} bytes"
+            print(f"  {member.name:<50s} {kind}")
+```
+
+### The run.sh Script
+
+```{python}
+#| label: show-run-sh
+if archives:
+    with tarfile.open(archives[0], "r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name.endswith("run.sh"):
+                print(tar.extractfile(member).read().decode())
+                break
+```
+
+### The Manifest
+
+```{python}
+#| label: show-manifest
+import json
+
+if archives:
+    with tarfile.open(archives[0], "r:gz") as tar:
+        for member in tar.getmembers():
+            if member.name.endswith("manifest.json"):
+                manifest = json.loads(tar.extractfile(member).read())
+                for key, value in manifest.items():
+                    if key in ("stderr", "stdout") and len(str(value)) > 80:
+                        value = str(value)[:80] + "..."
+                    print(f"  {key}: {value}")
+                break
+```
+
+The manifest records everything needed to understand the context of a run:
+JAR version and hash, parameter values, exit code and error output, original
+file paths, git hash, Python version, and platform.
+
+## Bottling from the Registry
+
+Sometimes you discover a problem days after the run. The registry stores the
+rendered josh source and config content (since PR1), so you can bottle
+after the fact:
+
+```{python}
+#| label: registry-bottle
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry(str(registry_path))
+
+bottle_dir_2 = Path(tmpdir) / "bottles_later"
+archive = registry.bottle("demo_run", output_dir=bottle_dir_2, cli=cli)
+print(f"Bottled from registry: {archive.name}")
+
+registry.close()
+```
+
+This reconstructs the bottle from stored data. The original `.jshd` data
+files must still exist at their recorded paths (they are copied into the
+archive).
+
+::: {.callout-warning title="Data File Availability"}
+Bottling copies `.jshd` files from their original locations. If a data file is
+missing, bottling raises `FileNotFoundError` — data files are critical for
+reproducibility. Use `omit_jshd=True` to intentionally skip them (see below).
+:::
+
+## Lightweight Bottles (omit_jshd)
+
+Data files can be large. When the recipient already has the data locally (e.g.,
+a colleague on the same team), you can skip copying `.jshd` files to keep the
+archive small:
+
+```python
+# During a sweep
+results = manager.run(bottle="first_failure", bottle_omit_jshd=True)
+
+# From the registry
+registry.bottle("baseline", cli=cli, omit_jshd=True)
+```
+
+The `run.sh` still lists all `--data` flags so the recipient knows which files
+to provide. The manifest records the original paths and `"omit_jshd": true`.
+
+## Unpacking a Bottle
+
+Use `unbottle()` to unpack an archive back into a `JobConfig` for use with
+joshpy:
+
+```python
+from joshpy.bottle import unbottle
+
+# Basic: data files included in the bottle
+config = unbottle("bottle_abc123.tar.gz")
+# -> JobConfig with source_path, config_path, file_mappings all set
+```
+
+When `omit_jshd=True` was used, provide a local `data_dir`. The original
+directory structure is preserved — `data_dir` replaces the common root of
+the original paths:
+
+```python
+# Tell unbottle where YOUR copy of the data lives
+config = unbottle(
+    "bottle_abc123.tar.gz",
+    data_dir=Path("/home/alice/josh-data/dev_fine"),
+)
+
+# unbottle reads the manifest to find the sender's original paths:
+#   cover       → /home/bob/project/data/grids/dev_fine/cover.jshd
+#   futureTempJan → /home/bob/project/data/grids/dev_fine/monthly/tas_jan.jshd
+#
+# It strips the common root (/home/bob/project/data/grids/dev_fine)
+# and resolves relative paths under YOUR data_dir:
+#   cover       → /home/alice/josh-data/dev_fine/cover.jshd
+#   futureTempJan → /home/alice/josh-data/dev_fine/monthly/tas_jan.jshd
+```
+
+The returned `JobConfig` works directly with `SweepManager`:
+
+```python
+manager = (
+    SweepManager.builder(config)
+    .with_registry("replicated.duckdb")
+    .with_cli(cli)
+    .build()
+)
+results = manager.run()
+```
+
+## Bottling Failures Are Non-Fatal
+
+If bottling fails for any reason (disk full, permissions, etc.), the sweep
+continues. A warning is printed but the sweep is never aborted by a bottling
+error. The simulation results are more important than the archive.
+
+## Standalone Usage
+
+For custom workflows outside of `SweepManager`, use `create_bottle()` directly:
+
+```python
+from joshpy.bottle import create_bottle
+
+archive = create_bottle(
+    job=expanded_job,
+    cli_result=result,
+    cli=cli,
+    output_dir=Path("bottles/"),
+)
+```
+
+## Filing Bug Reports
+
+When you hit a Josh runtime error:
+
+1. Run with `bottle="first_failure"`:
+   ```python
+   results = manager.run(bottle="first_failure")
+   ```
+2. The archive lands in `./bottles/`
+3. Open a [Josh issue](https://github.com/SchmidtDSE/josh/issues) and attach
+   the `.tar.gz`
+4. The Josh team can reproduce with just `./run.sh /path/to/jar`
+
+The `manifest.json` includes the error output, JAR version, and platform --
+everything needed for triage without back-and-forth.
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+#| echo: false
+import shutil
+shutil.rmtree(tmpdir, ignore_errors=True)
+```
+
+## Learn More
+
+- [Inspecting Runs from the Registry](inspecting-runs.qmd) -- view and diff stored configs and josh sources
+- [SweepManager Workflow](sweep-manager.qmd) -- the `manager.run()` API
+- [Low-Level Components](low-level-components.qmd) -- `run_sweep()` also accepts `bottle`/`bottle_dir`
