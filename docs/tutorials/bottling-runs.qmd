@@ -274,9 +274,11 @@ joshpy:
 ```python
 from joshpy.bottle import unbottle
 
-# Basic: data files included in the bottle
-config = unbottle("bottle_abc123.tar.gz")
-# -> JobConfig with source_path, config_path, file_mappings all set
+# Always returns a list of JobConfigs (one per job in the bottle)
+configs = unbottle("bottle_abc123.tar.gz")
+
+# Single-job bottle: configs has one element
+# Sweep bottle: configs has one element per job
 ```
 
 When `omit_jshd=True` was used, provide a local `data_dir`. The original
@@ -285,7 +287,7 @@ the original paths:
 
 ```python
 # Tell unbottle where YOUR copy of the data lives
-config = unbottle(
+configs = unbottle(
     "bottle_abc123.tar.gz",
     data_dir=Path("/home/alice/josh-data/dev_fine"),
 )
@@ -300,9 +302,10 @@ config = unbottle(
 #   futureTempJan → /home/alice/josh-data/dev_fine/monthly/tas_jan.jshd
 ```
 
-The returned `JobConfig` works directly with `SweepManager`:
+Each `JobConfig` works directly with `SweepManager`:
 
 ```python
+config = configs[0]
 manager = (
     SweepManager.builder(config)
     .with_registry("replicated.duckdb")

@@ -1,7 +1,11 @@
-"""CLI entry point for viewing and diffing run configurations and josh sources.
+"""CLI entry point for querying, viewing, and diffing run configurations and josh sources.
 
 Usage::
 
+    python -m joshpy.inspect registry.duckdb --labels
+    python -m joshpy.inspect registry.duckdb --sessions
+    python -m joshpy.inspect registry.duckdb --info baseline
+    python -m joshpy.inspect registry.duckdb --summary
     python -m joshpy.inspect registry.duckdb --view baseline
     python -m joshpy.inspect registry.duckdb --view baseline --export-only
     python -m joshpy.inspect registry.duckdb --diff baseline high_growth
@@ -30,6 +34,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--labels",
+        action="store_true",
+        help="List all labeled runs with their run_hash and creation time.",
+    )
+    mode.add_argument(
+        "--sessions",
+        action="store_true",
+        help="List all sessions with experiment name, status, and run counts.",
+    )
+    mode.add_argument(
+        "--info",
+        metavar="RUN",
+        help="Show detailed info for a run (label or run_hash).",
+    )
+    mode.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print a data summary for the entire registry.",
+    )
     mode.add_argument(
         "--view",
         metavar="RUN",
@@ -75,6 +99,10 @@ def main() -> int:
     from joshpy.inspect import (
         export_josh_pair,
         export_pair,
+        format_labels,
+        format_run_info,
+        format_sessions,
+        format_summary,
         open_diff,
         open_josh_diff,
         open_josh_view,
@@ -90,7 +118,15 @@ def main() -> int:
 
     registry = RunRegistry(str(args.registry))
     try:
-        if args.type == "josh":
+        if args.labels:
+            print(format_labels(registry))
+        elif args.sessions:
+            print(format_sessions(registry))
+        elif args.info is not None:
+            print(format_run_info(registry, args.info))
+        elif args.summary:
+            print(format_summary(registry))
+        elif args.type == "josh":
             if args.view is not None and args.export_only:
                 content = view_josh(registry, args.view)
                 print(content, end="" if content.endswith("\n") else "\n")

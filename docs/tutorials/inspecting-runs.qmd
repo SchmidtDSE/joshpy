@@ -1,6 +1,6 @@
 ---
 title: "Inspecting Runs from the Registry"
-description: "View, export, and diff stored configs and josh sources"
+description: "Query, view, export, and diff stored configs and josh sources"
 execute:
   warning: false
 ---
@@ -20,6 +20,7 @@ modified or deleted.
 
 This is useful for:
 
+- **Discovering what's in a registry**: List labels, sessions, and run details from the terminal
 - **Comparing runs**: See exactly what changed between two parameter configurations
 - **Debugging failures**: Inspect the config and model source for a failed run
 - **Auditing**: Verify what was actually run, not what's currently on disk
@@ -67,7 +68,9 @@ registry.register_run(
     josh_path="model.josh",
     josh_content=josh_source,
     config_content="maxGrowth = 5 meters\nfireYear = 75 count",
-    file_mappings=None,
+    file_mappings={
+        "soil_quality": {"path": "data/soil_quality.jshd", "hash": "a1b2c3"},
+    },
     parameters={"maxGrowth": 5, "fireYear": 75},
 )
 registry.label_run("abc123def456", "low_growth")
@@ -78,13 +81,99 @@ registry.register_run(
     josh_path="model.josh",
     josh_content=josh_source,
     config_content="maxGrowth = 15 meters\nfireYear = 75 count",
-    file_mappings=None,
+    file_mappings={
+        "soil_quality": {"path": "data/soil_quality.jshd", "hash": "a1b2c3"},
+    },
     parameters={"maxGrowth": 15, "fireYear": 75},
 )
 registry.label_run("fed987cba654", "high_growth")
 
+# Record completed runs (3 replicates each)
+for run_hash in ["abc123def456", "fed987cba654"]:
+    for rep in range(3):
+        run_id = registry.start_run(run_hash, replicate=rep, output_path=f"output/{run_hash}/rep{rep}.csv")
+        registry.complete_run(run_id, exit_code=0)
+registry.update_session_status(session_id, "completed")
+
 print(f"Registered 2 runs: low_growth, high_growth")
 ```
+
+## Querying the Registry
+
+Before viewing or diffing runs, you often need to know what's in the registry.
+The `joshpy.inspect` module provides four query utilities that work from both
+Python and the command line -- no interactive session required.
+
+### Listing Labels
+
+Labels are the human-readable names assigned to run configurations. Use
+`format_labels()` to see what's available:
+
+```{python}
+#| label: format-labels
+from joshpy.inspect import format_labels
+
+print(format_labels(registry))
+```
+
+### Listing Sessions
+
+A session groups the configs from a single sweep. Use `format_sessions()` to
+see all sessions with their experiment name, status, and run counts:
+
+```{python}
+#| label: format-sessions
+from joshpy.inspect import format_sessions
+
+print(format_sessions(registry))
+```
+
+### Run Details
+
+Use `format_run_info()` to see full details for a specific run -- parameters,
+data files, and replicate results:
+
+```{python}
+#| label: format-run-info
+from joshpy.inspect import format_run_info
+
+print(format_run_info(registry, "low_growth"))
+```
+
+### Registry Summary
+
+Use `format_summary()` for a high-level overview of everything in the registry:
+
+```{python}
+#| label: format-summary
+from joshpy.inspect import format_summary
+
+print(format_summary(registry))
+```
+
+### From the Command Line
+
+All four queries are available as CLI flags, so you can inspect a registry
+without writing any Python:
+
+```bash
+# List all labeled runs
+python -m joshpy.inspect experiment.duckdb --labels
+
+# List sessions with status and run counts
+python -m joshpy.inspect experiment.duckdb --sessions
+
+# Show full details for a run (by label or hash)
+python -m joshpy.inspect experiment.duckdb --info low_growth
+
+# Print a data summary for the whole registry
+python -m joshpy.inspect experiment.duckdb --summary
+```
+
+::: {.callout-tip}
+Use `--labels` first to discover what labels are available, then `--info` or
+`--diff` to dig deeper.
+:::
 
 ## Viewing Configs
 
@@ -205,9 +294,13 @@ python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --type 
 
 | Flag | Description |
 |------|-------------|
-| `--view RUN` | View a single run (label or hash) |
+| `--labels` | List all labeled runs with hash and creation time |
+| `--sessions` | List sessions with experiment name, status, and run counts |
+| `--info RUN` | Show detailed info for a run (parameters, data files, results) |
+| `--summary` | Print a data summary for the entire registry |
+| `--view RUN` | View a single run's stored content (label or hash) |
 | `--diff RUN1 RUN2` | Diff two runs |
-| `--type {config,josh}` | What to inspect (default: `config`) |
+| `--type {config,josh}` | What to view/diff (default: `config`) |
 | `--ide {vscode,cursor}` | IDE for viewing/diffing (default: `vscode`) |
 | `--export-only` | Write files without opening IDE |
 | `--output-dir DIR` | Directory for exported files (default: system temp) |

@@ -1,4 +1,4 @@
-"""Viewing and diffing utilities for run configurations and josh sources.
+"""Viewing, diffing, and querying utilities for run configurations and josh sources.
 
 Usage from Python::
 
@@ -7,6 +7,10 @@ Usage from Python::
 
 Usage from the command line::
 
+    python -m joshpy.inspect registry.duckdb --labels
+    python -m joshpy.inspect registry.duckdb --sessions
+    python -m joshpy.inspect registry.duckdb --info baseline
+    python -m joshpy.inspect registry.duckdb --summary
     python -m joshpy.inspect registry.duckdb --view baseline
     python -m joshpy.inspect registry.duckdb --diff baseline high_growth
     python -m joshpy.inspect registry.duckdb --view baseline --type josh
@@ -15,6 +19,10 @@ Usage from the command line::
 from joshpy.inspect._core import (  # noqa: F401
     export_josh_pair,
     export_pair,
+    format_labels,
+    format_run_info,
+    format_sessions,
+    format_summary,
     open_diff,
     open_josh_diff,
     open_josh_view,

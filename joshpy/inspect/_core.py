@@ -398,3 +398,174 @@ def open_josh_diff(
     )
     _launch_ide(ide, ["--diff", str(path1), str(path2)])
     return path1, path2
+
+
+# ========== Query Utilities ==========
+
+
+def _format_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Format a list of rows as an aligned table with headers."""
+    widths = [
+        max(len(h), max((len(r[i]) for r in rows), default=0))
+        for i, h in enumerate(headers)
+    ]
+    lines = ["  ".join(h.ljust(w) for h, w in zip(headers, widths))]
+    for row in rows:
+        lines.append("  ".join(v.ljust(w) for v, w in zip(row, widths)))
+    return "\n".join(lines)
+
+
+def format_labels(registry: RunRegistry) -> str:
+    """List all labeled runs with their run_hash and creation date.
+
+    Args:
+        registry: RunRegistry instance.
+
+    Returns:
+        Formatted table string, or a message if no labels exist.
+    """
+    labels = registry.list_labels()
+    if not labels:
+        return "No labels found."
+
+    rows: list[list[str]] = []
+    for label, run_hash in labels:
+        config = registry.get_config_by_hash(run_hash)
+        created = (
+            config.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            if config and config.created_at
+            else "-"
+        )
+        rows.append([label, run_hash, created])
+
+    return _format_table(["LABEL", "RUN_HASH", "CREATED"], rows)
+
+
+def format_sessions(registry: RunRegistry) -> str:
+    """List all sessions with experiment name, status, and run counts.
+
+    Args:
+        registry: RunRegistry instance.
+
+    Returns:
+        Formatted table string, or a message if no sessions exist.
+    """
+    sessions = registry.list_sessions()
+    if not sessions:
+        return "No sessions found."
+
+    rows: list[list[str]] = []
+    for s in sessions:
+        summary = registry.get_session_summary(s.session_id)
+        if summary:
+            runs = f"{summary.runs_succeeded}/{summary.runs_failed}/{summary.runs_pending}"
+            jobs = str(summary.total_jobs)
+        else:
+            runs = "-"
+            jobs = "-"
+        sid = s.session_id[:8] + "..." if len(s.session_id) > 11 else s.session_id
+        experiment = s.experiment_name or "(unnamed)"
+        created = (
+            s.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            if s.created_at
+            else "-"
+        )
+        rows.append([sid, experiment, s.status, jobs, runs, created])
+
+    return _format_table(
+        ["SESSION", "EXPERIMENT", "STATUS", "JOBS", "RUNS (ok/fail/pend)", "CREATED"],
+        rows,
+    )
+
+
+def format_run_info(registry: RunRegistry, label_or_hash: str) -> str:
+    """Show detailed info for a single run.
+
+    Args:
+        registry: RunRegistry instance.
+        label_or_hash: Run label or run_hash.
+
+    Returns:
+        Multi-section detail string.
+
+    Raises:
+        KeyError: If the label or hash is not found in the registry.
+    """
+    run_hash = _resolve_label(registry, label_or_hash)
+    config = registry.get_config_by_hash(run_hash)
+    if config is None:
+        raise KeyError(f"No run found for '{label_or_hash}'")
+
+    # Header
+    if config.label:
+        header = f"Run: {config.label} ({run_hash})"
+    else:
+        header = f"Run: {run_hash}"
+    lines = [header, "=" * len(header)]
+
+    # Metadata
+    lines.append(f"Session:  {config.session_id}")
+    lines.append(f"Josh:     {config.josh_path or '(not stored)'}")
+    created = (
+        config.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        if config.created_at
+        else "-"
+    )
+    lines.append(f"Created:  {created}")
+
+    # Parameters
+    lines.append("")
+    lines.append("Parameters:")
+    if config.parameters:
+        for key, value in sorted(config.parameters.items()):
+            lines.append(f"  {key} = {value}")
+    else:
+        lines.append("  (none)")
+
+    # Data files
+    lines.append("")
+    lines.append("Data files:")
+    if config.file_mappings:
+        for name, info in sorted(config.file_mappings.items()):
+            path = info.get("path", "?") if isinstance(info, dict) else str(info)
+            lines.append(f"  {name}: {path}")
+    else:
+        lines.append("  (none)")
+
+    # Runs
+    runs = registry.get_runs_for_hash(run_hash)
+    lines.append("")
+    if not runs:
+        lines.append("Runs: (none recorded)")
+    else:
+        succeeded = sum(1 for r in runs if r.exit_code is not None and r.exit_code == 0)
+        failed = sum(1 for r in runs if r.exit_code is not None and r.exit_code != 0)
+        pending = sum(1 for r in runs if r.exit_code is None)
+        lines.append(f"Runs: {succeeded} succeeded, {failed} failed, {pending} pending")
+
+        run_rows: list[list[str]] = []
+        for r in runs:
+            rep = str(r.replicate)
+            exit_code = str(r.exit_code) if r.exit_code is not None else "-"
+            started = (
+                r.started_at.strftime("%Y-%m-%d %H:%M:%S")
+                if r.started_at
+                else "-"
+            )
+            output = r.output_path or "-"
+            run_rows.append([rep, exit_code, started, output])
+        lines.append(_format_table(["REP", "EXIT", "STARTED", "OUTPUT"], run_rows))
+
+    return "\n".join(lines)
+
+
+def format_summary(registry: RunRegistry) -> str:
+    """Print a data summary for the entire registry.
+
+    Args:
+        registry: RunRegistry instance.
+
+    Returns:
+        Human-readable summary string.
+    """
+    return str(registry.get_data_summary())

@@ -261,7 +261,9 @@ def create_bottle(
             )
 
         # 2. Config file (rendered .jshc)
-        config_name = f"{job.config_name}.jshc"
+        config_name = job.config_name
+        if not config_name.endswith(".jshc"):
+            config_name = config_name + ".jshc"
         (staging / config_name).write_text(job.config_content)
 
         # 3. Data files
@@ -596,9 +598,13 @@ def create_sweep_bottle(
             data_staging.mkdir(exist_ok=True)
             shutil.copy2(src_path, data_staging / src_path.name)
 
-        # Create per-job directories
+        # Create per-job directories (deduplicate by run_hash)
+        seen_hashes: set[str] = set()
         job_manifests: list[dict[str, Any]] = []
         for job, cli_result in job_results:
+            if job.run_hash in seen_hashes:
+                continue
+            seen_hashes.add(job.run_hash)
             job_dir = jobs_staging / job.run_hash
             job_dir.mkdir()
 
@@ -607,7 +613,9 @@ def create_sweep_bottle(
                 shutil.copy2(job.source_path, job_dir / "simulation.josh")
 
             # Config
-            config_name = f"{job.config_name}.jshc"
+            config_name = job.config_name
+            if not config_name.endswith(".jshc"):
+                config_name = config_name + ".jshc"
             (job_dir / config_name).write_text(job.config_content)
 
             # Data file relative paths (point back to shared ../../data/)
@@ -700,74 +708,15 @@ def _should_bottle(
     return False
 
 
-def unbottle(
-    archive: str | Path,
-    extract_dir: str | Path | None = None,
-    data_dir: str | Path | None = None,
-) -> Any:
-    """Unpack a bottle archive into a JobConfig ready for joshpy.
-
-    Extracts the archive, reads the manifest, and builds a ``JobConfig``
-    with ``source_path``, ``config_path``, ``simulation``, and
-    ``file_mappings`` pointing at the extracted (or remapped) files.
-
-    Args:
-        archive: Path to the ``.tar.gz`` bottle archive.
-        extract_dir: Directory to extract into. Defaults to a temp dir.
-        data_dir: Local directory containing ``.jshd`` data files. When
-            provided, replaces the original data root: the common prefix
-            of all original paths is swapped for ``data_dir``, preserving
-            subdirectory structure. When omitted, uses data files from
-            the extracted ``data/`` subdirectory (if present).
-
-    Returns:
-        A ``JobConfig`` ready for use with ``SweepManager`` or ``run_sweep()``.
-
-    Raises:
-        FileNotFoundError: If the archive does not exist.
-        ValueError: If the archive has no manifest.json.
-    """
-    from joshpy.jobs import JobConfig
-
-    archive = Path(archive)
-    if not archive.exists():
-        raise FileNotFoundError(f"Bottle archive not found: {archive}")
-
-    if extract_dir is None:
-        extract_dir = Path(tempfile.mkdtemp(prefix="joshpy_unbottle_"))
-    else:
-        extract_dir = Path(extract_dir)
-        extract_dir.mkdir(parents=True, exist_ok=True)
-
-    # Extract
-    with tarfile.open(archive, "r:gz") as tar:
-        tar.extractall(extract_dir)
-
-    # Find the bottle directory (first directory in the archive)
-    entries = list(extract_dir.iterdir())
-    if len(entries) == 1 and entries[0].is_dir():
-        bottle_dir = entries[0]
-    else:
-        bottle_dir = extract_dir
-
-    # Read manifest
-    manifest_path = bottle_dir / "manifest.json"
-    if not manifest_path.exists():
-        raise ValueError(f"No manifest.json found in bottle at {bottle_dir}")
-    manifest = json.loads(manifest_path.read_text())
-
-    # Find source and config
-    source_path = bottle_dir / "simulation.josh"
-    config_files = list(bottle_dir.glob("*.jshc"))
-    config_path = config_files[0] if config_files else None
-
-    # Build file_mappings
+def _resolve_data_mappings(
+    original_data_paths: dict[str, str],
+    data_dir: Path | None,
+    extracted_data_dir: Path,
+) -> dict[str, Path]:
+    """Resolve data file mappings from original paths, data_dir, or extracted data."""
     file_mappings: dict[str, Path] = {}
-    original_data_paths: dict[str, str] = manifest.get("original_data_paths", {})
 
     if data_dir is not None:
-        # Remap: replace common prefix of original paths with data_dir
-        data_dir = Path(data_dir)
         if original_data_paths:
             import os
 
@@ -775,7 +724,6 @@ def unbottle(
             try:
                 common = Path(os.path.commonpath(orig_paths))
             except ValueError:
-                # No common path (e.g., paths on different drives)
                 common = Path("/")
 
             # commonpath of a single file returns the file itself;
@@ -789,22 +737,135 @@ def unbottle(
                     rel = orig.relative_to(common)
                 except ValueError:
                     rel = Path(orig.name)
-                remapped = data_dir / rel
-                file_mappings[name] = remapped
+                file_mappings[name] = data_dir / rel
+    elif extracted_data_dir.exists():
+        for name, orig_str in original_data_paths.items():
+            local = extracted_data_dir / Path(orig_str).name
+            if local.exists():
+                file_mappings[name] = local
+
+    return file_mappings
+
+
+def unbottle(
+    archive: str | Path,
+    extract_dir: str | Path | None = None,
+    data_dir: str | Path | None = None,
+    run_hash: str | None = None,
+) -> list[Any]:
+    """Unpack a bottle archive into a list of JobConfigs ready for joshpy.
+
+    Always returns a list, even for single-job bottles (which return a
+    one-element list). This makes the return type predictable regardless
+    of whether the archive is a single-job or sweep bottle.
+
+    Args:
+        archive: Path to the ``.tar.gz`` bottle archive.
+        extract_dir: Directory to extract into. Defaults to a temp dir.
+        data_dir: Local directory containing ``.jshd`` data files. When
+            provided, replaces the original data root: the common prefix
+            of all original paths is swapped for ``data_dir``, preserving
+            subdirectory structure. When omitted, uses data files from
+            the extracted ``data/`` subdirectory (if present).
+        run_hash: For sweep bottles, select a specific job by run hash.
+            Returns a one-element list. Ignored for single-job bottles.
+
+    Returns:
+        List of ``JobConfig`` objects. One element for single-job bottles
+        or when ``run_hash`` filters to one job; multiple for sweep bottles.
+
+    Raises:
+        FileNotFoundError: If the archive does not exist.
+        ValueError: If the archive has no manifest.json.
+        KeyError: If ``run_hash`` is specified but not found in a sweep bottle.
+    """
+    from joshpy.jobs import JobConfig
+
+    archive = Path(archive)
+    if not archive.exists():
+        raise FileNotFoundError(f"Bottle archive not found: {archive}")
+
+    if extract_dir is None:
+        extract_dir = Path(tempfile.mkdtemp(prefix="joshpy_unbottle_"))
     else:
-        # Use extracted data/ subdirectory
-        extracted_data = bottle_dir / "data"
-        if extracted_data.exists():
-            for name, orig_str in original_data_paths.items():
-                local = extracted_data / Path(orig_str).name
-                if local.exists():
-                    file_mappings[name] = local
+        extract_dir = Path(extract_dir)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+    if data_dir is not None:
+        data_dir = Path(data_dir)
+
+    with tarfile.open(archive, "r:gz") as tar:
+        tar.extractall(extract_dir)
+
+    # Find the bottle root directory
+    entries = list(extract_dir.iterdir())
+    if len(entries) == 1 and entries[0].is_dir():
+        bottle_dir = entries[0]
+    else:
+        bottle_dir = extract_dir
+
+    # Read manifest
+    manifest_path = bottle_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise ValueError(f"No manifest.json found in bottle at {bottle_dir}")
+    manifest = json.loads(manifest_path.read_text())
 
     simulation = manifest.get("simulation", "Main")
+    original_data_paths = manifest.get("original_data_paths", {})
+    is_sweep = (bottle_dir / "jobs").is_dir()
 
-    return JobConfig(
-        source_path=source_path if source_path.exists() else None,
-        config_path=config_path,
-        simulation=simulation,
-        file_mappings=file_mappings,
-    )
+    if is_sweep:
+        # Sweep bottle: shared data + per-job directories
+        shared_data = bottle_dir / "data"
+        data_mappings = _resolve_data_mappings(
+            original_data_paths, data_dir, shared_data
+        )
+
+        jobs_dir = bottle_dir / "jobs"
+        job_dirs = sorted(d for d in jobs_dir.iterdir() if d.is_dir())
+
+        if run_hash is not None:
+            # Select a specific job
+            match = [d for d in job_dirs if d.name == run_hash]
+            if not match:
+                available = [d.name for d in job_dirs]
+                raise KeyError(
+                    f"Run hash '{run_hash}' not found in sweep bottle. "
+                    f"Available: {available}"
+                )
+            job_dirs = match
+
+        configs = []
+        for job_dir in job_dirs:
+            source = job_dir / "simulation.josh"
+            config_files = list(job_dir.glob("*.jshc"))
+            configs.append(
+                JobConfig(
+                    source_path=source if source.exists() else None,
+                    config_path=config_files[0] if config_files else None,
+                    simulation=simulation,
+                    file_mappings=dict(data_mappings),
+                )
+            )
+
+        return configs
+
+    else:
+        # Single-job bottle
+        source_path = bottle_dir / "simulation.josh"
+        config_files = list(bottle_dir.glob("*.jshc"))
+        config_path = config_files[0] if config_files else None
+
+        extracted_data = bottle_dir / "data"
+        file_mappings = _resolve_data_mappings(
+            original_data_paths, data_dir, extracted_data
+        )
+
+        return [
+            JobConfig(
+                source_path=source_path if source_path.exists() else None,
+                config_path=config_path,
+                simulation=simulation,
+                file_mappings=file_mappings,
+            )
+        ]

@@ -692,5 +692,210 @@ class TestJoshCLI(unittest.TestCase):
             self.assertTrue(all(f.name.endswith(".josh") for f in exported))
 
 
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestFormatLabels(unittest.TestCase):
+    """Tests for format_labels()."""
+
+    def test_labels_with_data(self):
+        from joshpy.inspect import format_labels
+
+        registry = _make_registry_with_two_runs()
+        try:
+            result = format_labels(registry)
+            self.assertIn("LABEL", result)
+            self.assertIn("baseline", result)
+            self.assertIn("high_growth", result)
+            self.assertIn("hash_baseline", result)
+            self.assertIn("hash_highgrowth", result)
+        finally:
+            registry.close()
+
+    def test_labels_empty_registry(self):
+        from joshpy.inspect import format_labels
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+        try:
+            result = format_labels(registry)
+            self.assertEqual(result, "No labels found.")
+        finally:
+            registry.close()
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestFormatSessions(unittest.TestCase):
+    """Tests for format_sessions()."""
+
+    def test_sessions_with_data(self):
+        from joshpy.inspect import format_sessions
+
+        registry = _make_registry_with_two_runs()
+        try:
+            result = format_sessions(registry)
+            self.assertIn("SESSION", result)
+            self.assertIn("test", result)  # experiment_name
+            self.assertIn("pending", result)  # default status
+        finally:
+            registry.close()
+
+    def test_sessions_empty_registry(self):
+        from joshpy.inspect import format_sessions
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+        try:
+            result = format_sessions(registry)
+            self.assertEqual(result, "No sessions found.")
+        finally:
+            registry.close()
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestFormatRunInfo(unittest.TestCase):
+    """Tests for format_run_info()."""
+
+    def setUp(self):
+        self.registry = _make_registry_with_two_runs()
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_info_by_label(self):
+        from joshpy.inspect import format_run_info
+
+        result = format_run_info(self.registry, "baseline")
+        self.assertIn("baseline", result)
+        self.assertIn("hash_baseline", result)
+        self.assertIn("maxGrowth", result)
+        self.assertIn("50", result)
+        self.assertIn("/path/to/sim.josh", result)
+
+    def test_info_by_hash(self):
+        from joshpy.inspect import format_run_info
+
+        result = format_run_info(self.registry, "hash_baseline")
+        self.assertIn("hash_baseline", result)
+        self.assertIn("maxGrowth", result)
+
+    def test_info_with_runs(self):
+        from joshpy.inspect import format_run_info
+
+        run_id = self.registry.start_run(
+            "hash_baseline", replicate=0, output_path="/out/baseline/0"
+        )
+        self.registry.complete_run(run_id, exit_code=0)
+        result = format_run_info(self.registry, "baseline")
+        self.assertIn("1 succeeded", result)
+        self.assertIn("0 failed", result)
+        self.assertIn("REP", result)
+        self.assertIn("/out/baseline/0", result)
+
+    def test_info_missing_raises_key_error(self):
+        from joshpy.inspect import format_run_info
+
+        with self.assertRaises(KeyError):
+            format_run_info(self.registry, "nonexistent")
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestFormatSummary(unittest.TestCase):
+    """Tests for format_summary()."""
+
+    def test_summary_output(self):
+        from joshpy.inspect import format_summary
+
+        registry = _make_registry_with_two_runs()
+        try:
+            result = format_summary(registry)
+            self.assertIn("Registry Data Summary", result)
+            self.assertIn("Sessions:", result)
+            self.assertIn("Configs:", result)
+        finally:
+            registry.close()
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestQueryCLI(unittest.TestCase):
+    """Tests for CLI query modes (--labels, --sessions, --info, --summary)."""
+
+    def test_parser_labels(self):
+        from joshpy.inspect.__main__ import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args(["registry.duckdb", "--labels"])
+        self.assertTrue(args.labels)
+
+    def test_parser_sessions(self):
+        from joshpy.inspect.__main__ import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args(["registry.duckdb", "--sessions"])
+        self.assertTrue(args.sessions)
+
+    def test_parser_info(self):
+        from joshpy.inspect.__main__ import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args(["registry.duckdb", "--info", "baseline"])
+        self.assertEqual(args.info, "baseline")
+
+    def test_parser_summary(self):
+        from joshpy.inspect.__main__ import _build_parser
+
+        parser = _build_parser()
+        args = parser.parse_args(["registry.duckdb", "--summary"])
+        self.assertTrue(args.summary)
+
+    def test_main_labels(self):
+        from joshpy.inspect.__main__ import main
+        from joshpy.registry import RunRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.duckdb"
+            file_registry = RunRegistry(str(db_path))
+            session_id = file_registry.create_session(
+                config=_make_config(), experiment_name="test"
+            )
+            file_registry.register_run(
+                session_id=session_id,
+                run_hash="h1",
+                josh_path="sim.josh",
+                config_content="a = 1 count",
+                file_mappings=None,
+                parameters={"a": 1},
+            )
+            file_registry.label_run("h1", "run_a")
+            file_registry.close()
+
+            with patch("sys.argv", ["prog", str(db_path), "--labels"]):
+                result = main()
+            self.assertEqual(result, 0)
+
+    def test_main_info(self):
+        from joshpy.inspect.__main__ import main
+        from joshpy.registry import RunRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.duckdb"
+            file_registry = RunRegistry(str(db_path))
+            session_id = file_registry.create_session(
+                config=_make_config(), experiment_name="test"
+            )
+            file_registry.register_run(
+                session_id=session_id,
+                run_hash="h1",
+                josh_path="sim.josh",
+                config_content="a = 1 count",
+                file_mappings=None,
+                parameters={"a": 1},
+            )
+            file_registry.label_run("h1", "run_a")
+            file_registry.close()
+
+            with patch("sys.argv", ["prog", str(db_path), "--info", "run_a"]):
+                result = main()
+            self.assertEqual(result, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

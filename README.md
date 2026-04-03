@@ -244,8 +244,8 @@ or unpack back into joshpy:
 ```python
 from joshpy.bottle import unbottle
 
-config = unbottle("bottle_abc123.tar.gz")
-config = unbottle("bottle_abc123.tar.gz", data_dir=Path("my/local/data"))
+configs = unbottle("bottle_abc123.tar.gz")  # always returns a list
+configs = unbottle("bottle_abc123.tar.gz", data_dir=Path("my/local/data"))
 ```
 
 ### Inspecting Stored Runs
