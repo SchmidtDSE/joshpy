@@ -70,12 +70,46 @@ stops, you have the archive.
 
 ### Bottle Modes
 
-| Mode | What gets bottled | Use case |
-|------|-------------------|----------|
-| `"first_failure"` | First failed job only | Bug reports (most common) |
-| `"all_failures"` | Every failed job | Multiple distinct failures |
-| `"first_success"` | First successful job | Sharing a working example |
-| `"all"` | Every job | Full archival |
+| Mode | What gets bottled | Archive type |
+|------|-------------------|--------------|
+| `"first_failure"` | First failed job only | Single-job bottle |
+| `"first_success"` | First successful job | Single-job bottle |
+| `"all_failures"` | Every failed job | **Sweep bottle** (shared data) |
+| `"all"` | Every job | **Sweep bottle** (shared data) |
+
+`first_failure` and `first_success` create an archive immediately when a
+matching job completes. `all` and `all_failures` collect matching jobs during
+the sweep and create a single archive at the end with shared data files
+(copied once, not per-job).
+
+### Sweep Bottles
+
+When using `"all"` or `"all_failures"`, the archive groups jobs together with
+shared data:
+
+```
+bottle_sweep_20260403_143000/
+    data/
+        soil_quality_gradient.jshd    # shared across all jobs
+        soil_quality_stripes.jshd
+    jobs/
+        abc123def456/
+            simulation.josh
+            sweep_config.jshc
+            run.sh                    # --data points to ../../data/
+        fed987cba654/
+            simulation.josh
+            sweep_config.jshc
+            run.sh
+    manifest.json                     # lists all jobs + summary
+```
+
+To reproduce a single job from a sweep bottle:
+
+```bash
+cd jobs/abc123def456
+./run.sh /path/to/joshsim-fat.jar
+```
 
 ### Custom Output Directory
 
