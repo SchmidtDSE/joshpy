@@ -25,6 +25,13 @@ CREATE TABLE IF NOT EXISTS job_configs (
 );
 
 
+CREATE TABLE IF NOT EXISTS session_configs (
+    session_id  VARCHAR REFERENCES sweep_sessions(session_id),
+    run_hash    VARCHAR(12) REFERENCES job_configs(run_hash),
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (session_id, run_hash)
+);
+
 CREATE TABLE IF NOT EXISTS config_parameters (
     run_hash        VARCHAR(12) PRIMARY KEY REFERENCES job_configs(run_hash)
 );
