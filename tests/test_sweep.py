@@ -86,6 +86,7 @@ class TestRecoverSweepResults(unittest.TestCase):
                 cli=mock_cli,
                 job_set=mock_job_set,
                 registry=mock_registry,
+                run_ids={},
             )
 
         self.assertIn("source_path", str(ctx.exception))
@@ -111,6 +112,7 @@ class TestRecoverSweepResults(unittest.TestCase):
                 cli=mock_cli,
                 job_set=mock_job_set,
                 registry=mock_registry,
+                run_ids={},
             )
 
         self.assertIn("same source_path", str(ctx.exception))
@@ -139,13 +141,14 @@ class TestRecoverSweepResults(unittest.TestCase):
                 cli=mock_cli,
                 job_set=mock_job_set,
                 registry=mock_registry,
+                run_ids={"abc": "run-1"},
             )
 
         self.assertIn("patch export configured", str(ctx.exception))
 
     @patch("joshpy.sweep.CellDataLoader")
-    def test_skips_jobs_without_runs(self, mock_loader_class):
-        """Should skip jobs that don't have recorded runs."""
+    def test_skips_jobs_without_run_id(self, mock_loader_class):
+        """Should skip jobs whose run_hash is not in run_ids."""
         mock_cli = MagicMock()
         mock_registry = MagicMock()
 
@@ -167,13 +170,12 @@ class TestRecoverSweepResults(unittest.TestCase):
         mock_export_paths.get_patch_path.return_value = "/tmp/output_{replicate}.csv"
         mock_cli.inspect_exports.return_value = mock_export_paths
 
-        # Mock registry to return no runs
-        mock_registry.get_runs_for_hash.return_value = []
-
+        # Empty run_ids — job has no run_id mapping
         rows = recover_sweep_results(
             cli=mock_cli,
             job_set=mock_job_set,
             registry=mock_registry,
+            run_ids={},
             quiet=True,
         )
 
@@ -235,12 +237,13 @@ class TestRecoverSweepResults(unittest.TestCase):
                 cli=mock_cli,
                 job_set=mock_job_set,
                 registry=registry,
+                run_ids={"abc123def456": run_id},
                 quiet=True,
             )
 
             self.assertEqual(rows, 10)
             mock_loader.load_csv.assert_called_once()
-            
+
             registry.close()
 
     @patch("joshpy.sweep.CellDataLoader")
@@ -305,13 +308,14 @@ class TestRecoverSweepResults(unittest.TestCase):
                 cli=mock_cli,
                 job_set=mock_job_set,
                 registry=registry,
+                run_ids={"abc123def456": run_id},
                 quiet=True,
             )
 
             # Should have loaded 3 files * 5 rows = 15 total
             self.assertEqual(rows, 15)
             self.assertEqual(mock_loader.load_csv.call_count, 3)
-            
+
             registry.close()
 
 
@@ -674,14 +678,27 @@ class TestSweepManager(unittest.TestCase):
     def test_load_results_calls_recover(self, mock_recover):
         """load_results() should call recover_sweep_results."""
         mock_recover.return_value = 100
-        
+
         manager = SweepManager.from_config(self.config, registry=":memory:")
-        
+
         try:
+            # Simulate run() having been called by setting run_ids
+            manager._last_run_ids = {"hash1": "run-1"}
             rows = manager.load_results(quiet=True)
-            
+
             mock_recover.assert_called_once()
             self.assertEqual(rows, 100)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_load_results_raises_without_run(self):
+        """load_results() should raise if run() hasn't been called."""
+        manager = SweepManager.from_config(self.config, registry=":memory:")
+
+        try:
+            with self.assertRaises(RuntimeError):
+                manager.load_results(quiet=True)
         finally:
             manager.cleanup()
             manager.close()
