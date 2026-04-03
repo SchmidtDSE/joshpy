@@ -1527,6 +1527,9 @@ def run_sweep(
     dry_run: bool = False,
     quiet: bool = False,
     jfr: JfrConfig | None = None,
+    bottle: str | None = None,
+    bottle_dir: Path | None = None,
+    bottle_omit_jshd: bool = False,
 ) -> SweepResult:
     """Execute all jobs in a JobSet.
 
@@ -1634,9 +1637,21 @@ def run_sweep(
     if manage_status and registry is not None and session_id is not None:
         registry.update_session_status(session_id, "running")
 
+    # Validate bottle mode
+    if bottle is not None:
+        from joshpy.bottle import BOTTLE_MODES
+
+        if bottle not in BOTTLE_MODES:
+            raise ValueError(
+                f"Invalid bottle mode '{bottle}'. "
+                f"Valid modes: {sorted(BOTTLE_MODES)}"
+            )
+
     job_results: list[tuple[ExpandedJob, Any]] = []
     succeeded = 0
     failed = 0
+    _bottled_failure = False
+    _bottled_success = False
 
     try:
         for i, job in enumerate(job_set):
@@ -1670,6 +1685,29 @@ def run_sweep(
             # Call user's callback if provided
             if on_complete is not None:
                 on_complete(job, result)
+
+            # Bottle if configured (after on_complete, before stop_on_failure)
+            if bottle is not None:
+                from joshpy.bottle import _should_bottle, create_bottle
+
+                if _should_bottle(bottle, result.success, _bottled_failure, _bottled_success):
+                    try:
+                        bottle_path = create_bottle(
+                            job=job,
+                            cli_result=result,
+                            cli=cli,
+                            output_dir=bottle_dir or Path("bottles"),
+                            omit_jshd=bottle_omit_jshd,
+                        )
+                        if not quiet:
+                            print(f"  [BOTTLE] {bottle_path}")
+                        if not result.success:
+                            _bottled_failure = True
+                        else:
+                            _bottled_success = True
+                    except Exception as e:
+                        if not quiet:
+                            print(f"  [BOTTLE] Warning: bottling failed: {e}")
 
             if stop_on_failure and not result.success:
                 # Set status to "failed" before raising

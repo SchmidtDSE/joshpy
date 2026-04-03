@@ -1492,6 +1492,46 @@ class RunRegistry:
 
         return open_josh_diff(self, label_or_hash_1, label_or_hash_2, ide=ide)
 
+    # ========== Bottle ==========
+
+    def bottle(
+        self,
+        label_or_hash: str,
+        output_dir: str | Path = Path("bottles"),
+        cli: Any | None = None,
+        omit_jshd: bool = False,
+    ) -> Path:
+        """Create a self-contained bottle archive from a registered run.
+
+        By default, copies data files into the archive and raises if any are
+        missing. Use ``omit_jshd=True`` for lightweight archives when the
+        recipient has the data locally.
+
+        Args:
+            label_or_hash: Run label or run_hash to bottle.
+            output_dir: Directory for the archive. Default: ``./bottles/``.
+            cli: Optional JoshCLI instance for JAR metadata.
+            omit_jshd: If True, skip copying .jshd data files.
+
+        Returns:
+            Path to the created ``.tar.gz`` archive.
+
+        Raises:
+            KeyError: If the run is not found.
+            ValueError: If josh content is not stored for the run.
+            FileNotFoundError: If ``omit_jshd`` is False and a data file
+                is missing.
+        """
+        from joshpy.bottle import create_bottle_from_registry
+
+        return create_bottle_from_registry(
+            registry=self,
+            label_or_hash=label_or_hash,
+            cli=cli,
+            output_dir=output_dir,
+            omit_jshd=omit_jshd,
+        )
+
     # ========== Run Tracking ==========
 
     def start_run(
