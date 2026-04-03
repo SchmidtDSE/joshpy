@@ -621,7 +621,7 @@ class TestUnbottle(unittest.TestCase):
     @patch("joshpy.jar.get_jar_version", return_value=None)
     @patch("joshpy.jar.get_jar_hash", return_value=None)
     def test_unbottle_basic(self, mock_hash, mock_ver):
-        """Create a bottle with data, unbottle it, verify JobConfig."""
+        """Create a bottle with data, unbottle it, verify JobConfig list."""
         from joshpy.bottle import create_bottle, unbottle
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -629,8 +629,11 @@ class TestUnbottle(unittest.TestCase):
             archive = create_bottle(job, output_dir=Path(tmpdir) / "bottles")
 
             extract_dir = Path(tmpdir) / "unpacked"
-            config = unbottle(archive, extract_dir=extract_dir)
+            configs = unbottle(archive, extract_dir=extract_dir)
 
+            self.assertIsInstance(configs, list)
+            self.assertEqual(len(configs), 1)
+            config = configs[0]
             self.assertEqual(config.simulation, "Main")
             self.assertTrue(config.source_path.exists())
             self.assertIn("start simulation", config.source_path.read_text())
@@ -658,8 +661,9 @@ class TestUnbottle(unittest.TestCase):
             (local_data / "soil_quality.jshd").write_bytes(b"local data")
 
             extract_dir = Path(tmpdir) / "unpacked"
-            config = unbottle(archive, extract_dir=extract_dir, data_dir=local_data)
+            configs = unbottle(archive, extract_dir=extract_dir, data_dir=local_data)
 
+            config = configs[0]
             self.assertIn("soil_quality", config.file_mappings)
             self.assertEqual(
                 config.file_mappings["soil_quality"],
@@ -714,8 +718,9 @@ class TestUnbottle(unittest.TestCase):
             (local / "monthly").mkdir()
             (local / "monthly" / "temp_jan.jshd").write_bytes(b"local temp")
 
-            config = unbottle(archive, data_dir=local)
+            configs = unbottle(archive, data_dir=local)
 
+            config = configs[0]
             self.assertEqual(
                 config.file_mappings["cover"], local / "cover.jshd"
             )
