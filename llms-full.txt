@@ -2334,6 +2334,85 @@ plain output, or set the `NO_COLOR` environment variable.
 
 ---
 
+## Run Inspection
+
+The `joshpy.inspect` module provides utilities for querying, viewing, and diffing
+stored run configurations (`.jshc`) and josh sources (`.josh`) from a registry.
+
+### Querying the Registry
+
+Discover what's in a registry without starting a Python session:
+
+```python
+from joshpy.inspect import format_labels, format_sessions, format_run_info, format_summary
+
+# List all labeled runs with their hash and creation date
+print(format_labels(registry))
+
+# List sessions with experiment name, status, and run counts
+print(format_sessions(registry))
+
+# Show full details for a run: parameters, data files, replicate results
+print(format_run_info(registry, "baseline"))
+
+# Print a data summary for the entire registry
+print(format_summary(registry))
+```
+
+### Viewing and Diffing Stored Content
+
+```python
+from joshpy.inspect import view_config, view_josh
+
+# View stored config or josh source as a string
+print(view_config(registry, "baseline"))
+print(view_josh(registry, "baseline"))
+
+# Open side-by-side diff in VS Code
+registry.compare_configs("baseline", "high_growth")
+registry.compare_josh("baseline", "high_growth")
+```
+
+### Command-Line Interface
+
+All functionality is available from the terminal via `python -m joshpy.inspect`:
+
+```bash
+# Query commands (discover what's in the registry)
+python -m joshpy.inspect experiment.duckdb --labels
+python -m joshpy.inspect experiment.duckdb --sessions
+python -m joshpy.inspect experiment.duckdb --info baseline
+python -m joshpy.inspect experiment.duckdb --summary
+
+# View stored content
+python -m joshpy.inspect experiment.duckdb --view baseline
+python -m joshpy.inspect experiment.duckdb --view baseline --type josh
+
+# Diff two runs (opens in IDE)
+python -m joshpy.inspect experiment.duckdb --diff baseline high_growth
+python -m joshpy.inspect experiment.duckdb --diff baseline high_growth --type josh --ide cursor
+
+# Export without opening IDE
+python -m joshpy.inspect experiment.duckdb --diff baseline high_growth --export-only
+```
+
+### CLI Reference
+
+| Flag | Description |
+|------|-------------|
+| `--labels` | List all labeled runs with hash and creation time |
+| `--sessions` | List sessions with experiment name, status, and run counts |
+| `--info RUN` | Show detailed info for a run (parameters, data files, results) |
+| `--summary` | Print a data summary for the entire registry |
+| `--view RUN` | View stored content for a run (label or hash) |
+| `--diff RUN1 RUN2` | Diff two runs |
+| `--type {config,josh}` | What to view/diff (default: `config`) |
+| `--ide {vscode,cursor}` | IDE for viewing/diffing (default: `vscode`) |
+| `--export-only` | Write files without opening IDE |
+| `--output-dir DIR` | Directory for exported files (default: system temp) |
+
+---
+
 ## Configuration Files (.jshc)
 
 Josh configuration files parameterize simulations without modifying source code.
