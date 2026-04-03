@@ -1007,6 +1007,7 @@ def run_adaptive_sweep(
                         quiet=True,
                         load_config=load_config,
                         succeeded_before=succeeded - 1,
+                        run_id=run_id,
                     )
                 except Exception as e:
                     # Log but don't fail the whole sweep
