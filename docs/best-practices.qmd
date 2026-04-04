@@ -69,16 +69,17 @@ See tutorials: [SweepManager Workflow](tutorials/sweep-manager.qmd),
 
 ### Schema Overview
 
-The registry stores experiment data across six related tables. The `run_hash` is the
+The registry stores experiment data across seven related tables. The `run_hash` is the
 universal key connecting configuration to results.
 
 | Table | Purpose | Key Columns |
 |-------|---------|-------------|
 | `sweep_sessions` | Experiment-level metadata | session_id, experiment_name, status |
 | `job_configs` | Rendered config content + file hashes | run_hash, config_content, file_mappings |
+| `session_configs` | Links configs to sessions (many-to-many) | session_id, run_hash |
 | `config_parameters` | Typed parameter columns for SQL queries | run_hash + one column per swept param |
-| `job_runs` | Execution records (timing, exit codes) | run_id, run_hash, replicate, exit_code |
-| `cell_data` | Simulation outputs (spatiotemporal) | run_hash, step, replicate, coordinates + export vars |
+| `job_runs` | Execution records (timing, exit codes) | run_id, run_hash, session_id, exit_code |
+| `cell_data` | Simulation outputs (spatiotemporal) | run_id, run_hash, step, replicate, coordinates + export vars |
 | `run_outputs` | Output file metadata | run_id, output_type, file_path |
 
 ::: {.callout-note collapse="true"}
@@ -101,12 +102,23 @@ metadata: JSON
 **job_configs**
 ```
 run_hash: VARCHAR (primary key)
-session_id: VARCHAR (foreign key)
-josh_path: VARCHAR
-config_content: VARCHAR
+session_id: VARCHAR (foreign key — first session to register this config)
+josh_path: TEXT
+josh_content: TEXT
+config_content: TEXT
 file_mappings: JSON
+label: VARCHAR
 created_at: TIMESTAMP
 ```
+
+**session_configs** (junction table for pooled runs)
+```
+session_id: VARCHAR (foreign key, composite primary key)
+run_hash: VARCHAR (foreign key, composite primary key)
+created_at: TIMESTAMP
+```
+When the same config is run across multiple sessions (pooling replicates),
+each session gets a row here. This is what `get_configs_for_session()` queries.
 
 **config_parameters**
 ```
@@ -120,20 +132,23 @@ Columns are added dynamically based on swept parameters. For example, if you swe
 **job_runs**
 ```
 run_id: VARCHAR (primary key)
-run_hash: VARCHAR (foreign key)
+run_hash: VARCHAR (foreign key → job_configs)
+session_id: VARCHAR (foreign key → sweep_sessions)
 replicate: INTEGER
 started_at: TIMESTAMP
 completed_at: TIMESTAMP
 exit_code: INTEGER
 output_path: VARCHAR
-error_message: VARCHAR
+error_message: TEXT
 metadata: JSON
 ```
+Each row represents one CLI invocation. `session_id` records which session
+created this run, so session summaries count only their own runs.
 
 **cell_data**
 ```
 cell_id: BIGINT (auto-increment)
-run_id: VARCHAR
+run_id: VARCHAR (foreign key → job_runs)
 run_hash: VARCHAR
 step: INTEGER
 replicate: INTEGER
@@ -147,6 +162,8 @@ geom: GEOMETRY (if spatial extension enabled)
 ```
 Export variable columns are added dynamically based on what your Josh simulation exports.
 For example, `export.averageHeight.step = mean(Tree.height)` creates an `averageHeight DOUBLE` column.
+`run_id` ties each row to a specific CLI invocation — critical for distinguishing
+pooled replicates that share the same replicate number.
 
 **run_outputs**
 ```
@@ -290,14 +307,27 @@ sessions in a single registry when:
 
 - Running comparative experiments where you intentionally want cross-session queries
 - Iterating on the same experiment with minor adjustments
+- **Pooling replicates** — running the same config across multiple sessions to
+  accumulate more replicates (e.g., 2 reps in session 1, then 3 more in session 2)
 
-If you do this, **always filter by `session_id`** in your queries:
+If you do this, **filter by `session_id`** in your queries. For runs, filter
+directly on `job_runs.session_id`. For configs, join through `session_configs`:
 
 ```sql
-SELECT ...
+-- Runs for a specific session
+SELECT * FROM job_runs WHERE session_id = 'your-session-id'
+
+-- Cell data for a specific session's runs
+SELECT cd.*
 FROM cell_data cd
-JOIN job_configs jc ON cd.run_hash = jc.run_hash
-WHERE jc.session_id = 'your-session-id'
+JOIN job_runs jr ON cd.run_id = jr.run_id
+WHERE jr.session_id = 'your-session-id'
+
+-- Configs associated with a session (including pooled configs)
+SELECT jc.*
+FROM job_configs jc
+JOIN session_configs sc ON jc.run_hash = sc.run_hash
+WHERE sc.session_id = 'your-session-id'
 ```
 
 ### Cleanup & Archival
@@ -845,7 +875,7 @@ RunConfig(
 
 | Topic | Key Takeaway | Learn More |
 |-------|--------------|------------|
-| **Schema** | `run_hash` connects everything; use `list_export_variables()` before querying | [Analysis Tutorial](tutorials/analysis.qmd) |
+| **Schema** | `run_hash` connects configs to data; `run_id` ties data to a specific execution; use `list_export_variables()` before querying | [Analysis Tutorial](tutorials/analysis.qmd) |
 | **Registry** | One registry per experiment avoids hash collisions | [Manual Workflow](tutorials/manual-workflow.qmd) |
 | **Preprocessing** | JSHD files are grid-specific; no staleness detection | [Preprocessing Tutorial](tutorials/preprocessing.qmd) |
 | **Errors** | Validate first; check stderr for Josh errors | [SweepManager Tutorial](tutorials/sweep-manager.qmd) |

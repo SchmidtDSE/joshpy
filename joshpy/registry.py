@@ -950,6 +950,16 @@ class RunRegistry:
             [run_hash, session_id, josh_path, josh_content, config_content, file_mappings_json],
         )
 
+        # Always record the session<->config link (supports pooled runs
+        # where the same run_hash is used across multiple sessions)
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO session_configs (session_id, run_hash)
+            VALUES (?, ?)
+            """,
+            [session_id, run_hash],
+        )
+
         # Insert typed parameters into config_parameters table
         if parameters:
             # Infer types for each parameter and ensure columns exist
@@ -1092,13 +1102,16 @@ class RunRegistry:
             List of ConfigInfo objects.
         """
         # First get the run_hashes and basic config info
+        # Join through session_configs to support pooled runs (same
+        # run_hash registered across multiple sessions).
         result = self.conn.execute(
             """
-            SELECT run_hash, session_id, josh_path, josh_content,
-                   config_content, file_mappings, label, created_at
-            FROM job_configs
-            WHERE session_id = ?
-            ORDER BY created_at
+            SELECT jc.run_hash, jc.session_id, jc.josh_path, jc.josh_content,
+                   jc.config_content, jc.file_mappings, jc.label, jc.created_at
+            FROM job_configs jc
+            JOIN session_configs sc ON jc.run_hash = sc.run_hash
+            WHERE sc.session_id = ?
+            ORDER BY sc.created_at
             """,
             [session_id],
         ).fetchall()
@@ -1537,6 +1550,8 @@ class RunRegistry:
     def start_run(
         self,
         run_hash: str,
+        *,
+        session_id: str,
         replicate: int = 0,
         output_path: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -1545,6 +1560,7 @@ class RunRegistry:
 
         Args:
             run_hash: Run hash for this run.
+            session_id: Session that initiated this run.
             replicate: Replicate number (0-indexed).
             output_path: Path where output will be written.
             metadata: Additional metadata.
@@ -1558,10 +1574,10 @@ class RunRegistry:
         self.conn.execute(
             """
             INSERT INTO job_runs
-            (run_id, run_hash, replicate, started_at, output_path, metadata)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+            (run_id, run_hash, session_id, replicate, started_at, output_path, metadata)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
             """,
-            [run_id, run_hash, replicate, output_path, metadata_json],
+            [run_id, run_hash, session_id, replicate, output_path, metadata_json],
         )
         return run_id
 
@@ -1655,6 +1671,33 @@ class RunRegistry:
             )
             for row in result
         ]
+
+    def get_replicate_count(self, run_hash: str) -> int:
+        """Get the number of distinct replicates for a run hash from cell_data.
+
+        This is the source-of-truth count, derived from actual loaded data
+        rather than from job_runs metadata. Returns 0 if no data has been
+        loaded yet.
+
+        Counts distinct (run_id, replicate) pairs rather than just distinct
+        replicate values, because pooled runs may reuse replicate numbers
+        across different CLI invocations.
+
+        Args:
+            run_hash: The run hash to count replicates for.
+
+        Returns:
+            Number of distinct replicates in cell_data.
+        """
+        result = self.conn.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT run_id, replicate FROM cell_data WHERE run_hash = ?
+            )
+            """,
+            [run_hash],
+        ).fetchone()
+        return result[0] if result else 0
 
     # ========== Output Tracking ==========
 
@@ -1770,13 +1813,13 @@ class RunRegistry:
         if session is None:
             return None
 
-        # Count configs (total_jobs) for this session
+        # Count configs (total_jobs) for this session via junction table
         configs_count = self.conn.execute(
-            "SELECT COUNT(*) FROM job_configs WHERE session_id = ?",
+            "SELECT COUNT(*) FROM session_configs WHERE session_id = ?",
             [session_id],
         ).fetchone()[0]
 
-        # Count runs by status
+        # Count runs by status (job_runs has session_id directly)
         result = self.conn.execute(
             """
             SELECT
@@ -1784,9 +1827,8 @@ class RunRegistry:
                 COUNT(CASE WHEN completed_at IS NOT NULL THEN 1 END) as completed,
                 COUNT(CASE WHEN exit_code = 0 THEN 1 END) as succeeded,
                 COUNT(CASE WHEN exit_code IS NOT NULL AND exit_code != 0 THEN 1 END) as failed
-            FROM job_runs r
-            JOIN job_configs c ON r.run_hash = c.run_hash
-            WHERE c.session_id = ?
+            FROM job_runs
+            WHERE session_id = ?
             """,
             [session_id],
         ).fetchone()
@@ -1832,12 +1874,11 @@ class RunRegistry:
         # Query all runs for this session
         result = self.conn.execute(
             """
-            SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
-                   r.exit_code, r.output_path, r.error_message
-            FROM job_runs r
-            JOIN job_configs c ON r.run_hash = c.run_hash
-            WHERE c.session_id = ?
-            ORDER BY r.started_at
+            SELECT run_id, run_hash, replicate, started_at, completed_at,
+                   exit_code, output_path, error_message
+            FROM job_runs
+            WHERE session_id = ?
+            ORDER BY started_at
             """,
             [session_id],
         ).fetchall()
@@ -1927,8 +1968,8 @@ class RunRegistry:
                 f"""
                 SELECT 1
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.run_hash = jc.run_hash
-                WHERE jc.session_id = ? AND {quoted} IS NOT NULL
+                JOIN session_configs sc ON cd.run_hash = sc.run_hash
+                WHERE sc.session_id = ? AND {quoted} IS NOT NULL
                 LIMIT 1
                 """,
                 [session_id],
@@ -2158,8 +2199,8 @@ class RunRegistry:
                 f"""
                 SELECT 1
                 FROM config_parameters cp
-                JOIN job_configs jc ON cp.run_hash = jc.run_hash
-                WHERE jc.session_id = ? AND {quoted} IS NOT NULL
+                JOIN session_configs sc ON cp.run_hash = sc.run_hash
+                WHERE sc.session_id = ? AND {quoted} IS NOT NULL
                 LIMIT 1
                 """,
                 [session_id],
@@ -2188,8 +2229,8 @@ class RunRegistry:
                 """
                 SELECT DISTINCT entity_type
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.run_hash = jc.run_hash
-                WHERE jc.session_id = ? AND entity_type IS NOT NULL
+                JOIN session_configs sc ON cd.run_hash = sc.run_hash
+                WHERE sc.session_id = ? AND entity_type IS NOT NULL
                 ORDER BY entity_type
                 """,
                 [session_id],
@@ -2218,26 +2259,22 @@ class RunRegistry:
         Returns:
             DataSummary with counts and metadata.
         """
-        # Get counts
+        # Get counts (use session_configs junction table for session filtering)
         if session_id:
             sessions_count = 1
             configs_count = self.conn.execute(
-                "SELECT COUNT(*) FROM job_configs WHERE session_id = ?",
+                "SELECT COUNT(*) FROM session_configs WHERE session_id = ?",
                 [session_id],
             ).fetchone()[0]
             runs_count = self.conn.execute(
-                """
-                SELECT COUNT(*) FROM job_runs r
-            JOIN job_configs c ON r.run_hash = c.run_hash
-            WHERE c.session_id = ?
-                """,
+                "SELECT COUNT(*) FROM job_runs WHERE session_id = ?",
                 [session_id],
             ).fetchone()[0]
             rows_count = self.conn.execute(
                 """
                 SELECT COUNT(*) FROM cell_data cd
-                JOIN job_configs jc ON cd.run_hash = jc.run_hash
-                WHERE jc.session_id = ?
+                JOIN session_configs sc ON cd.run_hash = sc.run_hash
+                WHERE sc.session_id = ?
                 """,
                 [session_id],
             ).fetchone()[0]
@@ -2258,8 +2295,8 @@ class RunRegistry:
                 """
                 SELECT MIN(step), MAX(step), MIN(replicate), MAX(replicate)
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.run_hash = jc.run_hash
-                WHERE jc.session_id = ?
+                JOIN session_configs sc ON cd.run_hash = sc.run_hash
+                WHERE sc.session_id = ?
                 """,
                 [session_id],
             ).fetchone()
@@ -2280,8 +2317,8 @@ class RunRegistry:
                 """
                 SELECT MIN(longitude), MAX(longitude), MIN(latitude), MAX(latitude)
                 FROM cell_data cd
-                JOIN job_configs jc ON cd.run_hash = jc.run_hash
-                WHERE jc.session_id = ? AND longitude IS NOT NULL
+                JOIN session_configs sc ON cd.run_hash = sc.run_hash
+                WHERE sc.session_id = ? AND longitude IS NOT NULL
                 """,
                 [session_id],
             ).fetchone()
@@ -2364,9 +2401,13 @@ class RegistryCallback:
         # Create run record (records both start and completion)
         run_id = self.registry.start_run(
             run_hash=job.run_hash,
+            session_id=self.session_id,
             replicate=0,  # CLI runs all replicates at once
             output_path=str(job.config_path.parent) if job.config_path else None,
-            metadata={"parameters": job.parameters},
+            metadata={
+                "parameters": job.parameters,
+                "replicates": job.replicates,
+            },
         )
 
         # Complete the run with the result

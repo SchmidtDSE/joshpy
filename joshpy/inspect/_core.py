@@ -436,9 +436,15 @@ def format_labels(registry: RunRegistry) -> str:
             if config and config.created_at
             else "-"
         )
-        rows.append([label, run_hash, created])
+        # Derive replicate count from cell_data (source of truth for pooled runs).
+        # Fall back to job_runs count when cell_data hasn't been loaded yet.
+        rep_count = registry.get_replicate_count(run_hash)
+        if rep_count == 0:
+            rep_count = len(registry.get_runs_for_hash(run_hash))
+        reps = str(rep_count)
+        rows.append([label, run_hash, reps, created])
 
-    return _format_table(["LABEL", "RUN_HASH", "CREATED"], rows)
+    return _format_table(["LABEL", "RUN_HASH", "REPS", "CREATED"], rows)
 
 
 def format_sessions(registry: RunRegistry) -> str:
@@ -531,6 +537,12 @@ def format_run_info(registry: RunRegistry, label_or_hash: str) -> str:
             lines.append(f"  {name}: {path}")
     else:
         lines.append("  (none)")
+
+    # Replicates (from cell_data, the source of truth for pooled runs)
+    rep_count = registry.get_replicate_count(run_hash)
+    if rep_count > 0:
+        lines.append("")
+        lines.append(f"Replicates: {rep_count}")
 
     # Runs
     runs = registry.get_runs_for_hash(run_hash)

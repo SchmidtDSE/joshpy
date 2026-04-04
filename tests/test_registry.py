@@ -299,6 +299,7 @@ class TestRunTracking(unittest.TestCase):
         """start_run should create a run record."""
         run_id = self.registry.start_run(
             run_hash="config123",
+            session_id=self.session_id,
             replicate=0,
             output_path="/output/path",
         )
@@ -315,7 +316,7 @@ class TestRunTracking(unittest.TestCase):
 
     def test_complete_run_success(self):
         """complete_run should update run with exit code."""
-        run_id = self.registry.start_run(run_hash="config123")
+        run_id = self.registry.start_run(run_hash="config123", session_id=self.session_id)
 
         self.registry.complete_run(run_id=run_id, exit_code=0)
 
@@ -326,7 +327,7 @@ class TestRunTracking(unittest.TestCase):
 
     def test_complete_run_failure(self):
         """complete_run should store error message on failure."""
-        run_id = self.registry.start_run(run_hash="config123")
+        run_id = self.registry.start_run(run_hash="config123", session_id=self.session_id)
 
         self.registry.complete_run(
             run_id=run_id,
@@ -345,9 +346,9 @@ class TestRunTracking(unittest.TestCase):
 
     def test_get_runs_for_hash(self):
         """get_runs_for_hash should return all runs for a run hash."""
-        run1 = self.registry.start_run(run_hash="config123", replicate=0)
-        run2 = self.registry.start_run(run_hash="config123", replicate=1)
-        run3 = self.registry.start_run(run_hash="config123", replicate=2)
+        run1 = self.registry.start_run(run_hash="config123", session_id=self.session_id, replicate=0)
+        run2 = self.registry.start_run(run_hash="config123", session_id=self.session_id, replicate=1)
+        run3 = self.registry.start_run(run_hash="config123", session_id=self.session_id, replicate=2)
 
         runs = self.registry.get_runs_for_hash("config123")
         self.assertEqual(len(runs), 3)
@@ -358,6 +359,7 @@ class TestRunTracking(unittest.TestCase):
         """start_run should store metadata."""
         run_id = self.registry.start_run(
             run_hash="config123",
+            session_id=self.session_id,
             metadata={"host": "node01", "pid": 12345},
         )
 
@@ -383,7 +385,7 @@ class TestOutputTracking(unittest.TestCase):
             file_mappings=None,
             parameters={},
         )
-        self.run_id = self.registry.start_run(run_hash="config123")
+        self.run_id = self.registry.start_run(run_hash="config123", session_id=self.session_id)
 
     def tearDown(self):
         """Close registry after each test."""
@@ -449,13 +451,13 @@ class TestQueryMethods(unittest.TestCase):
         )
 
         # Create runs
-        run1 = self.registry.start_run(run_hash="hash1")
+        run1 = self.registry.start_run(run_hash="hash1", session_id=self.session_id)
         self.registry.complete_run(run1, exit_code=0)
 
-        run2 = self.registry.start_run(run_hash="hash2")
+        run2 = self.registry.start_run(run_hash="hash2", session_id=self.session_id)
         self.registry.complete_run(run2, exit_code=1, error_message="failed")
 
-        run3 = self.registry.start_run(run_hash="hash3")
+        run3 = self.registry.start_run(run_hash="hash3", session_id=self.session_id)
         self.registry.complete_run(run3, exit_code=0)
 
     def tearDown(self):
@@ -509,7 +511,7 @@ class TestQueryMethods(unittest.TestCase):
     def test_get_session_summary_with_pending(self):
         """get_session_summary correctly counts pending runs."""
         # Add a run that's started but not completed
-        self.registry.start_run(run_hash="hash1")
+        self.registry.start_run(run_hash="hash1", session_id=self.session_id)
 
         summary = self.registry.get_session_summary(self.session_id)
         self.assertEqual(summary.runs_completed, 3)  # Only the original 3
@@ -535,7 +537,7 @@ class TestExportResultsDf(unittest.TestCase):
             file_mappings=None,
             parameters={"survival": 85, "growth": 1.5},
         )
-        run_id = self.registry.start_run(run_hash="hash1")
+        run_id = self.registry.start_run(run_hash="hash1", session_id=self.session_id)
         self.registry.complete_run(run_id, exit_code=0)
 
     def tearDown(self):
@@ -1640,6 +1642,154 @@ class TestGetFileMappings(unittest.TestCase):
     def test_unknown_hash_raises(self):
         with self.assertRaises(KeyError):
             self.registry.get_file_mappings("nonexistent")
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestPooledRuns(unittest.TestCase):
+    """Tests for pooled runs — same run_hash across multiple sessions."""
+
+    def setUp(self):
+        """Create a registry with two sessions sharing a run_hash."""
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session1 = self.registry.create_session(
+            config=_make_config(), experiment_name="sweep_v1"
+        )
+        self.session2 = self.registry.create_session(
+            config=_make_config(), experiment_name="sweep_v2"
+        )
+
+        # Register the same config in both sessions
+        for sid in [self.session1, self.session2]:
+            self.registry.register_run(
+                session_id=sid,
+                run_hash="shared_hash",
+                josh_path="/path/to/sim.josh",
+                config_content="maxGrowth = 5 meters",
+                file_mappings=None,
+                parameters={"maxGrowth": 5},
+            )
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_configs_for_both_sessions(self):
+        """get_configs_for_session returns config for both sessions."""
+        configs1 = self.registry.get_configs_for_session(self.session1)
+        configs2 = self.registry.get_configs_for_session(self.session2)
+        self.assertEqual(len(configs1), 1)
+        self.assertEqual(len(configs2), 1)
+        self.assertEqual(configs1[0].run_hash, "shared_hash")
+        self.assertEqual(configs2[0].run_hash, "shared_hash")
+
+    def test_session_summary_counts_jobs_for_both(self):
+        """get_session_summary shows correct job count for both sessions."""
+        # Add a run in each session
+        run1 = self.registry.start_run(run_hash="shared_hash", session_id=self.session1, replicate=0)
+        self.registry.complete_run(run1, exit_code=0)
+        run2 = self.registry.start_run(run_hash="shared_hash", session_id=self.session2, replicate=0)
+        self.registry.complete_run(run2, exit_code=0)
+
+        summary1 = self.registry.get_session_summary(self.session1)
+        summary2 = self.registry.get_session_summary(self.session2)
+
+        # Both sessions should show 1 job
+        self.assertEqual(summary1.total_jobs, 1)
+        self.assertEqual(summary2.total_jobs, 1)
+
+        # Each session sees only its own run (session_id scopes runs)
+        self.assertEqual(summary1.runs_succeeded, 1)
+        self.assertEqual(summary2.runs_succeeded, 1)
+
+    def test_get_replicate_count_from_cell_data(self):
+        """get_replicate_count returns count of distinct replicates."""
+        # Insert cell_data rows for 5 replicates
+        self.registry._ensure_variable_columns({"height": "DOUBLE"})
+        for rep in range(5):
+            self.registry.conn.execute(
+                """
+                INSERT INTO cell_data (run_hash, step, replicate, position_x, position_y)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ["shared_hash", 0, rep, 0.0, 0.0],
+            )
+
+        count = self.registry.get_replicate_count("shared_hash")
+        self.assertEqual(count, 5)
+
+    def test_get_replicate_count_returns_zero_when_no_data(self):
+        """get_replicate_count returns 0 when no cell_data loaded."""
+        count = self.registry.get_replicate_count("shared_hash")
+        self.assertEqual(count, 0)
+
+    def test_session_configs_junction_populated(self):
+        """session_configs junction table has entries for both sessions."""
+        result = self.registry.conn.execute(
+            "SELECT session_id, run_hash FROM session_configs ORDER BY session_id"
+        ).fetchall()
+        session_ids = {row[0] for row in result}
+        self.assertEqual(len(result), 2)
+        self.assertIn(self.session1, session_ids)
+        self.assertIn(self.session2, session_ids)
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestPooledRunsInspect(unittest.TestCase):
+    """Tests for inspect display functions with pooled runs."""
+
+    def setUp(self):
+        """Create a registry with pooled data."""
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session1 = self.registry.create_session(
+            config=_make_config(), experiment_name="sweep_v1"
+        )
+        self.session2 = self.registry.create_session(
+            config=_make_config(), experiment_name="sweep_v2"
+        )
+
+        for sid in [self.session1, self.session2]:
+            self.registry.register_run(
+                session_id=sid,
+                run_hash="pooled_hash",
+                josh_path="/path/to/sim.josh",
+                config_content="maxGrowth = 5 meters",
+                file_mappings=None,
+                parameters={"maxGrowth": 5},
+            )
+
+        self.registry.label_run("pooled_hash", "growth_5")
+
+        # Add cell_data for 5 replicates (simulating 2 + 3 pooled)
+        for rep in range(5):
+            self.registry.conn.execute(
+                """
+                INSERT INTO cell_data (run_hash, step, replicate, position_x, position_y)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ["pooled_hash", 0, rep, 0.0, 0.0],
+            )
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_format_labels_shows_correct_reps(self):
+        """format_labels REPS column reflects cell_data replicate count."""
+        from joshpy.inspect import format_labels
+
+        output = format_labels(self.registry)
+        # Should contain "5" (from 5 distinct replicates in cell_data)
+        self.assertIn("5", output)
+        self.assertIn("growth_5", output)
+
+    def test_format_run_info_shows_replicates(self):
+        """format_run_info shows Replicates line from cell_data."""
+        from joshpy.inspect import format_run_info
+
+        output = format_run_info(self.registry, "growth_5")
+        self.assertIn("Replicates: 5", output)
 
 
 if __name__ == "__main__":

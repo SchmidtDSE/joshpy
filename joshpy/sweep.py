@@ -162,6 +162,7 @@ def load_job_results(
     registry: RunRegistry,
     export_paths: ExportPaths,
     *,
+    run_id: str,
     export_type: str = "patch",
     quiet: bool = False,
     load_config: LoadConfig | None = None,
@@ -178,6 +179,9 @@ def load_job_results(
         job: The completed job to load results for.
         registry: Registry to load results into.
         export_paths: Export path configuration from inspect_exports().
+        run_id: The run_id to attribute cell_data rows to. Must be the
+            run_id from the specific CLI invocation that produced these
+            results (from registry.start_run() or RegistryCallback.record()).
         export_type: Type of export ("patch", "meta", "entity").
         quiet: Suppress output.
         load_config: Retry and timing configuration. Uses defaults if None.
@@ -193,13 +197,11 @@ def load_job_results(
 
     Examples:
         >>> # Basic usage
+        >>> run_id = registry.start_run(run_hash=job.run_hash)
+        >>> result = cli.run(to_run_config(job))
+        >>> registry.complete_run(run_id, exit_code=result.exit_code)
         >>> export_paths = cli.inspect_exports(InspectExportsConfig(...))
-        >>> rows = load_job_results(cli, job, registry, export_paths)
-
-        >>> # With retry configuration
-        >>> config = LoadConfig(max_retries=5, raise_on_missing=True)
-        >>> rows = load_job_results(cli, job, registry, export_paths,
-        ...                         load_config=config)
+        >>> rows = load_job_results(cli, job, registry, export_paths, run_id=run_id)
     """
     if load_config is None:
         load_config = LoadConfig()
@@ -208,13 +210,6 @@ def load_job_results(
     path_template = _get_export_path(export_paths, export_type)
     if not path_template:
         return 0
-
-    # Get run_id from registry
-    runs = registry.get_runs_for_hash(job.run_hash)
-    if not runs:
-        return 0
-
-    run_id = runs[0].run_id
     loader = CellDataLoader(registry)
     total_rows = 0
     simulation = job.simulation
@@ -280,6 +275,7 @@ def recover_sweep_results(
     job_set: JobSet,
     registry: RunRegistry,
     *,
+    run_ids: dict[str, str],
     export_type: str = "patch",
     quiet: bool = False,
     load_config: LoadConfig | None = None,
@@ -296,6 +292,9 @@ def recover_sweep_results(
         cli: JoshCLI instance (needed for inspect_exports).
         job_set: The expanded jobs to collect results for.
         registry: Registry to load results into.
+        run_ids: Mapping of run_hash to run_id. Each job's cell_data is
+            attributed to the run_id for its run_hash. Obtain from
+            SweepResult.run_ids after calling run_sweep().
         export_type: Type of export to load ("patch", "meta", "entity").
         quiet: Suppress progress output.
         load_config: Retry and timing configuration. Uses defaults if None.
@@ -363,13 +362,12 @@ def recover_sweep_results(
     succeeded_jobs = 0
 
     for job in job_set:
-        # Check if job is in registry
-        runs = registry.get_runs_for_hash(job.run_hash)
-        if not runs:
+        job_run_id = run_ids.get(job.run_hash)
+        if job_run_id is None:
             jobs_not_in_registry += 1
             if not quiet:
                 params_str = ", ".join(f"{k}={v}" for k, v in job.parameters.items())
-                print(f"  No run recorded for job ({params_str or 'no params'})")
+                print(f"  No run_id for job ({params_str or 'no params'})")
             continue
 
         # Load results for this job
@@ -378,6 +376,7 @@ def recover_sweep_results(
             job=job,
             registry=registry,
             export_paths=export_paths,
+            run_id=job_run_id,
             export_type=export_type,
             quiet=quiet,
             load_config=load_config,
@@ -461,6 +460,7 @@ class SweepManager:
     _owns_cli: bool = field(default=False, repr=False)
     _catalog: Any | None = field(default=None, repr=False)  # ProjectCatalog
     _experiment_id: str | None = field(default=None, repr=False)
+    _last_run_ids: dict[str, str] = field(default_factory=dict, repr=False)
 
     # Entry points
     @classmethod
@@ -638,6 +638,9 @@ class SweepManager:
                 bottle_omit_jshd=bottle_omit_jshd,
             )
 
+            # Store run_ids for use by load_results()
+            self._last_run_ids = result.run_ids
+
             # Update catalog status if configured
             if self._catalog is not None and self._experiment_id is not None and not dry_run:
                 status = "completed" if result.failed == 0 else "failed"
@@ -672,10 +675,16 @@ class SweepManager:
             >>> rows = manager.load_results()
             >>> print(f"Loaded {rows} rows")
         """
+        if not self._last_run_ids:
+            raise RuntimeError(
+                "No run_ids available. Call run() before load_results(), "
+                "or use recover_sweep_results() with explicit run_ids."
+            )
         return recover_sweep_results(
             cli=self.cli,
             job_set=self.job_set,
             registry=self.registry,
+            run_ids=self._last_run_ids,
             export_type=export_type,
             quiet=quiet,
         )

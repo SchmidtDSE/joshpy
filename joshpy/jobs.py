@@ -1333,6 +1333,9 @@ class SweepResult:
         job_results: List of (ExpandedJob, CLIResult) tuples.
         succeeded: Number of successful jobs.
         failed: Number of failed jobs.
+        run_ids: Mapping of run_hash to the run_id created for that job's
+            execution. Used by load_results() to attribute cell_data to the
+            correct run, especially when pooling replicates across sessions.
 
     Examples:
         >>> results = run_sweep(cli, job_set)
@@ -1345,6 +1348,7 @@ class SweepResult:
     job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
     succeeded: int = 0
     failed: int = 0
+    run_ids: dict[str, str] = field(default_factory=dict)
 
     def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
         """Iterate over (job, result) tuples."""
@@ -1648,6 +1652,7 @@ def run_sweep(
             )
 
     job_results: list[tuple[ExpandedJob, Any]] = []
+    run_ids: dict[str, str] = {}
     succeeded = 0
     failed = 0
     _bottled_failure = False
@@ -1681,7 +1686,8 @@ def run_sweep(
 
             # Record to registry if configured
             if registry_callback is not None:
-                registry_callback.record(job, result)
+                run_id = registry_callback.record(job, result)
+                run_ids[job.run_hash] = run_id
 
             # Call user's callback if provided
             if on_complete is not None:
@@ -1757,6 +1763,7 @@ def run_sweep(
             job_results=job_results,
             succeeded=succeeded,
             failed=failed,
+            run_ids=run_ids,
         )
     except Exception:
         # Set status to "failed" on exception if managing status

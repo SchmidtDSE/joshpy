@@ -149,30 +149,13 @@ class TestLoadJobResults(unittest.TestCase):
                 job=self.job,
                 registry=self.registry,
                 export_paths=self.export_paths,
-            )
-
-        self.assertEqual(result, 0)
-
-    def test_returns_zero_for_no_runs(self):
-        """Should return 0 if job not in registry."""
-        self.registry.get_runs_for_hash.return_value = []
-
-        with patch("joshpy.sweep._get_export_path", return_value="/path/to/{replicate}.csv"):
-            result = load_job_results(
-                cli=self.cli,
-                job=self.job,
-                registry=self.registry,
-                export_paths=self.export_paths,
+                run_id="run-123",
             )
 
         self.assertEqual(result, 0)
 
     def test_raises_on_missing_with_flag(self):
         """Should raise ResultLoadError if raise_on_missing=True."""
-        run_info = MagicMock()
-        run_info.run_id = "run-123"
-        self.registry.get_runs_for_hash.return_value = [run_info]
-
         self.export_paths.resolve_path.return_value = Path("/nonexistent/file.csv")
 
         config = LoadConfig(
@@ -183,7 +166,7 @@ class TestLoadJobResults(unittest.TestCase):
         )
 
         mock_loader = MagicMock()
-        
+
         with patch("joshpy.sweep._get_export_path", return_value="/path/{replicate}.csv"):
             with patch("joshpy.sweep.CellDataLoader", return_value=mock_loader):
                 with self.assertRaises(ResultLoadError) as ctx:
@@ -192,6 +175,7 @@ class TestLoadJobResults(unittest.TestCase):
                         job=self.job,
                         registry=self.registry,
                         export_paths=self.export_paths,
+                        run_id="run-123",
                         load_config=config,
                         succeeded_before=5,
                     )
@@ -201,10 +185,6 @@ class TestLoadJobResults(unittest.TestCase):
 
     def test_skips_missing_without_raise(self):
         """Should skip missing files when raise_on_missing=False."""
-        run_info = MagicMock()
-        run_info.run_id = "run-123"
-        self.registry.get_runs_for_hash.return_value = [run_info]
-
         self.export_paths.resolve_path.return_value = Path("/nonexistent/file.csv")
 
         config = LoadConfig(
@@ -223,6 +203,7 @@ class TestLoadJobResults(unittest.TestCase):
                     job=self.job,
                     registry=self.registry,
                     export_paths=self.export_paths,
+                    run_id="run-123",
                     load_config=config,
                     quiet=True,
                 )
@@ -236,10 +217,6 @@ class TestLoadJobResults(unittest.TestCase):
             csv_path = Path(f.name)
 
         try:
-            run_info = MagicMock()
-            run_info.run_id = "run-123"
-            self.registry.get_runs_for_hash.return_value = [run_info]
-
             self.export_paths.resolve_path.return_value = csv_path
 
             # Mock CellDataLoader
@@ -255,6 +232,7 @@ class TestLoadJobResults(unittest.TestCase):
                         job=self.job,
                         registry=self.registry,
                         export_paths=self.export_paths,
+                        run_id="run-123",
                         load_config=config,
                         quiet=True,
                     )
