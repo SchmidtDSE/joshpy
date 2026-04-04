@@ -780,8 +780,9 @@ class TestFormatRunInfo(unittest.TestCase):
     def test_info_with_runs(self):
         from joshpy.inspect import format_run_info
 
+        session_id = self.registry.list_sessions()[0].session_id
         run_id = self.registry.start_run(
-            "hash_baseline", replicate=0, output_path="/out/baseline/0"
+            "hash_baseline", session_id=session_id, replicate=0, output_path="/out/baseline/0"
         )
         self.registry.complete_run(run_id, exit_code=0)
         result = format_run_info(self.registry, "baseline")

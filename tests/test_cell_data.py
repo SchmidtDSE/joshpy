@@ -58,7 +58,7 @@ class TestCellDataLoader:
         session_id = registry.create_session(_make_config(), experiment_name="test")
         registry.register_run(session_id, "abc123", "test.josh", "test", None, {})
         # Create run record (required for foreign key)
-        registry.start_run("abc123")
+        registry.start_run("abc123", session_id=session_id)
 
         # Create a sample CSV
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
@@ -71,7 +71,7 @@ class TestCellDataLoader:
         try:
             rows_loaded = loader.load_csv(
                 csv_path=csv_path,
-                run_id=registry.start_run("abc123"),
+                run_id=registry.start_run("abc123", session_id=session_id),
                 run_hash="abc123",
             )
 
@@ -146,7 +146,7 @@ class TestCellDataLoader:
         # Create session, config, and run
         session_id = registry.create_session(_make_config(), experiment_name="test")
         registry.register_run(session_id, "abc", "test.josh", "test", None, {})
-        run_id = registry.start_run("abc")
+        run_id = registry.start_run("abc", session_id=session_id)
 
         # Create CSV with some NaN values
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
@@ -181,7 +181,7 @@ class TestCellDataLoader:
         for i in range(2):
             run_hash = f"hash_{i}"
             registry.register_run(session_id, run_hash, "test.josh", "test", None, {})
-            run_id = registry.start_run(run_hash)
+            run_id = registry.start_run(run_hash, session_id=session_id)
 
             with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
                 f.write("step,replicate,treeCount\n")
@@ -226,7 +226,7 @@ class TestDiagnosticQueries:
         )
 
         # Create run record (required for foreign key)
-        self.run_id = self.registry.start_run("abc123")
+        self.run_id = self.registry.start_run("abc123", session_id=session_id)
 
         # Load some test data
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
@@ -317,7 +317,7 @@ class TestDiagnosticQueries:
             file_mappings=None,
             parameters={"maxGrowth": 20},
         )
-        run2 = self.registry.start_run("def456")
+        run2 = self.registry.start_run("def456", session_id=session2)
 
         # Load data for second config
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
@@ -453,7 +453,7 @@ class TestGetReplicateCv:
             file_mappings=None,
             parameters={"maxGrowth": 10},
         )
-        self.run_id = self.registry.start_run("cv_test")
+        self.run_id = self.registry.start_run("cv_test", session_id=session_id)
 
     def _load_cv_test_data(self, data_rows: list[tuple]):
         """Helper to load test CSV data.

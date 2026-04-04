@@ -118,8 +118,8 @@ class TestDiscoveryMethods:
         )
 
         # Create runs
-        self.run_id1 = self.registry.start_run("abc123")
-        self.run_id2 = self.registry.start_run("def456")
+        self.run_id1 = self.registry.start_run("abc123", session_id=self.session_id)
+        self.run_id2 = self.registry.start_run("def456", session_id=self.session_id)
 
         # Load cell data
         loader = CellDataLoader(self.registry)
@@ -262,7 +262,7 @@ class TestSimulationDiagnostics:
         loader = CellDataLoader(self.registry)
 
         # Data for first config - 2 spatial cells, 3 steps, 2 replicates
-        self.run_id1 = self.registry.start_run("abc123")
+        self.run_id1 = self.registry.start_run("abc123", session_id=self.session_id)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
             f.write("step,replicate,position.longitude,position.latitude,treeCount,avgHeight\n")
             for step in range(5):
@@ -275,7 +275,7 @@ class TestSimulationDiagnostics:
         loader.load_csv(self.csv1, self.run_id1, "abc123", entity_type="patch")
 
         # Data for second config
-        self.run_id2 = self.registry.start_run("def456")
+        self.run_id2 = self.registry.start_run("def456", session_id=self.session_id)
         with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
             f.write("step,replicate,position.longitude,position.latitude,treeCount,avgHeight\n")
             for step in range(5):

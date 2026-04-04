@@ -299,6 +299,7 @@ class TestRunTracking(unittest.TestCase):
         """start_run should create a run record."""
         run_id = self.registry.start_run(
             run_hash="config123",
+            session_id=self.session_id,
             replicate=0,
             output_path="/output/path",
         )
@@ -315,7 +316,7 @@ class TestRunTracking(unittest.TestCase):
 
     def test_complete_run_success(self):
         """complete_run should update run with exit code."""
-        run_id = self.registry.start_run(run_hash="config123")
+        run_id = self.registry.start_run(run_hash="config123", session_id=self.session_id)
 
         self.registry.complete_run(run_id=run_id, exit_code=0)
 
@@ -326,7 +327,7 @@ class TestRunTracking(unittest.TestCase):
 
     def test_complete_run_failure(self):
         """complete_run should store error message on failure."""
-        run_id = self.registry.start_run(run_hash="config123")
+        run_id = self.registry.start_run(run_hash="config123", session_id=self.session_id)
 
         self.registry.complete_run(
             run_id=run_id,
@@ -345,9 +346,9 @@ class TestRunTracking(unittest.TestCase):
 
     def test_get_runs_for_hash(self):
         """get_runs_for_hash should return all runs for a run hash."""
-        run1 = self.registry.start_run(run_hash="config123", replicate=0)
-        run2 = self.registry.start_run(run_hash="config123", replicate=1)
-        run3 = self.registry.start_run(run_hash="config123", replicate=2)
+        run1 = self.registry.start_run(run_hash="config123", session_id=self.session_id, replicate=0)
+        run2 = self.registry.start_run(run_hash="config123", session_id=self.session_id, replicate=1)
+        run3 = self.registry.start_run(run_hash="config123", session_id=self.session_id, replicate=2)
 
         runs = self.registry.get_runs_for_hash("config123")
         self.assertEqual(len(runs), 3)
@@ -358,6 +359,7 @@ class TestRunTracking(unittest.TestCase):
         """start_run should store metadata."""
         run_id = self.registry.start_run(
             run_hash="config123",
+            session_id=self.session_id,
             metadata={"host": "node01", "pid": 12345},
         )
 
@@ -383,7 +385,7 @@ class TestOutputTracking(unittest.TestCase):
             file_mappings=None,
             parameters={},
         )
-        self.run_id = self.registry.start_run(run_hash="config123")
+        self.run_id = self.registry.start_run(run_hash="config123", session_id=self.session_id)
 
     def tearDown(self):
         """Close registry after each test."""
@@ -449,13 +451,13 @@ class TestQueryMethods(unittest.TestCase):
         )
 
         # Create runs
-        run1 = self.registry.start_run(run_hash="hash1")
+        run1 = self.registry.start_run(run_hash="hash1", session_id=self.session_id)
         self.registry.complete_run(run1, exit_code=0)
 
-        run2 = self.registry.start_run(run_hash="hash2")
+        run2 = self.registry.start_run(run_hash="hash2", session_id=self.session_id)
         self.registry.complete_run(run2, exit_code=1, error_message="failed")
 
-        run3 = self.registry.start_run(run_hash="hash3")
+        run3 = self.registry.start_run(run_hash="hash3", session_id=self.session_id)
         self.registry.complete_run(run3, exit_code=0)
 
     def tearDown(self):
@@ -509,7 +511,7 @@ class TestQueryMethods(unittest.TestCase):
     def test_get_session_summary_with_pending(self):
         """get_session_summary correctly counts pending runs."""
         # Add a run that's started but not completed
-        self.registry.start_run(run_hash="hash1")
+        self.registry.start_run(run_hash="hash1", session_id=self.session_id)
 
         summary = self.registry.get_session_summary(self.session_id)
         self.assertEqual(summary.runs_completed, 3)  # Only the original 3
@@ -535,7 +537,7 @@ class TestExportResultsDf(unittest.TestCase):
             file_mappings=None,
             parameters={"survival": 85, "growth": 1.5},
         )
-        run_id = self.registry.start_run(run_hash="hash1")
+        run_id = self.registry.start_run(run_hash="hash1", session_id=self.session_id)
         self.registry.complete_run(run_id, exit_code=0)
 
     def tearDown(self):
@@ -1684,9 +1686,9 @@ class TestPooledRuns(unittest.TestCase):
     def test_session_summary_counts_jobs_for_both(self):
         """get_session_summary shows correct job count for both sessions."""
         # Add a run in each session
-        run1 = self.registry.start_run(run_hash="shared_hash", replicate=0)
+        run1 = self.registry.start_run(run_hash="shared_hash", session_id=self.session1, replicate=0)
         self.registry.complete_run(run1, exit_code=0)
-        run2 = self.registry.start_run(run_hash="shared_hash", replicate=0)
+        run2 = self.registry.start_run(run_hash="shared_hash", session_id=self.session2, replicate=0)
         self.registry.complete_run(run2, exit_code=0)
 
         summary1 = self.registry.get_session_summary(self.session1)
@@ -1696,9 +1698,9 @@ class TestPooledRuns(unittest.TestCase):
         self.assertEqual(summary1.total_jobs, 1)
         self.assertEqual(summary2.total_jobs, 1)
 
-        # Both sessions see the same runs (since runs link via run_hash)
-        self.assertEqual(summary1.runs_succeeded, 2)
-        self.assertEqual(summary2.runs_succeeded, 2)
+        # Each session sees only its own run (session_id scopes runs)
+        self.assertEqual(summary1.runs_succeeded, 1)
+        self.assertEqual(summary2.runs_succeeded, 1)
 
     def test_get_replicate_count_from_cell_data(self):
         """get_replicate_count returns count of distinct replicates."""

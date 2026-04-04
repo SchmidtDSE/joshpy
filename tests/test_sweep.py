@@ -226,7 +226,7 @@ class TestRecoverSweepResults(unittest.TestCase):
                 file_mappings=None,
                 parameters={},
             )
-            run_id = registry.start_run(run_hash="abc123def456")
+            run_id = registry.start_run(run_hash="abc123def456", session_id=session_id)
 
             # Mock loader
             mock_loader = MagicMock()
@@ -297,7 +297,7 @@ class TestRecoverSweepResults(unittest.TestCase):
                 file_mappings=None,
                 parameters={"param1": 10},
             )
-            run_id = registry.start_run(run_hash="abc123def456")
+            run_id = registry.start_run(run_hash="abc123def456", session_id=session_id)
 
             # Mock loader
             mock_loader = MagicMock()
