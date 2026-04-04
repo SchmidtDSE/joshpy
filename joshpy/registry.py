@@ -1550,6 +1550,8 @@ class RunRegistry:
     def start_run(
         self,
         run_hash: str,
+        *,
+        session_id: str,
         replicate: int = 0,
         output_path: str | None = None,
         metadata: dict[str, Any] | None = None,
@@ -1558,6 +1560,7 @@ class RunRegistry:
 
         Args:
             run_hash: Run hash for this run.
+            session_id: Session that initiated this run.
             replicate: Replicate number (0-indexed).
             output_path: Path where output will be written.
             metadata: Additional metadata.
@@ -1571,10 +1574,10 @@ class RunRegistry:
         self.conn.execute(
             """
             INSERT INTO job_runs
-            (run_id, run_hash, replicate, started_at, output_path, metadata)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
+            (run_id, run_hash, session_id, replicate, started_at, output_path, metadata)
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)
             """,
-            [run_id, run_hash, replicate, output_path, metadata_json],
+            [run_id, run_hash, session_id, replicate, output_path, metadata_json],
         )
         return run_id
 
@@ -1816,7 +1819,7 @@ class RunRegistry:
             [session_id],
         ).fetchone()[0]
 
-        # Count runs by status via junction table
+        # Count runs by status (job_runs has session_id directly)
         result = self.conn.execute(
             """
             SELECT
@@ -1824,9 +1827,8 @@ class RunRegistry:
                 COUNT(CASE WHEN completed_at IS NOT NULL THEN 1 END) as completed,
                 COUNT(CASE WHEN exit_code = 0 THEN 1 END) as succeeded,
                 COUNT(CASE WHEN exit_code IS NOT NULL AND exit_code != 0 THEN 1 END) as failed
-            FROM job_runs r
-            JOIN session_configs sc ON r.run_hash = sc.run_hash
-            WHERE sc.session_id = ?
+            FROM job_runs
+            WHERE session_id = ?
             """,
             [session_id],
         ).fetchone()
@@ -1869,15 +1871,14 @@ class RunRegistry:
                 "pandas is required for export_results_df. Install with: pip install pandas"
             ) from err
 
-        # Query all runs for this session via junction table
+        # Query all runs for this session
         result = self.conn.execute(
             """
-            SELECT r.run_id, r.run_hash, r.replicate, r.started_at, r.completed_at,
-                   r.exit_code, r.output_path, r.error_message
-            FROM job_runs r
-            JOIN session_configs sc ON r.run_hash = sc.run_hash
-            WHERE sc.session_id = ?
-            ORDER BY r.started_at
+            SELECT run_id, run_hash, replicate, started_at, completed_at,
+                   exit_code, output_path, error_message
+            FROM job_runs
+            WHERE session_id = ?
+            ORDER BY started_at
             """,
             [session_id],
         ).fetchall()
@@ -2266,11 +2267,7 @@ class RunRegistry:
                 [session_id],
             ).fetchone()[0]
             runs_count = self.conn.execute(
-                """
-                SELECT COUNT(*) FROM job_runs r
-                JOIN session_configs sc ON r.run_hash = sc.run_hash
-                WHERE sc.session_id = ?
-                """,
+                "SELECT COUNT(*) FROM job_runs WHERE session_id = ?",
                 [session_id],
             ).fetchone()[0]
             rows_count = self.conn.execute(
@@ -2404,6 +2401,7 @@ class RegistryCallback:
         # Create run record (records both start and completion)
         run_id = self.registry.start_run(
             run_hash=job.run_hash,
+            session_id=self.session_id,
             replicate=0,  # CLI runs all replicates at once
             output_path=str(job.config_path.parent) if job.config_path else None,
             metadata={

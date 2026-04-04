@@ -979,6 +979,7 @@ def run_adaptive_sweep(
             # 6. Record the run result in the registry (needed for load_job_results)
             run_id = registry.start_run(
                 run_hash=job.run_hash,
+                session_id=session_id,
                 replicate=0,  # CLI runs all replicates at once
                 output_path=str(job.config_path.parent) if job.config_path else None,
                 metadata={"parameters": job.parameters, "trial": trial_num},

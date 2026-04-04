@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS config_parameters (
 CREATE TABLE IF NOT EXISTS job_runs (
     run_id          VARCHAR PRIMARY KEY,
     run_hash        VARCHAR(12) REFERENCES job_configs(run_hash),
+    session_id      VARCHAR REFERENCES sweep_sessions(session_id),
     replicate       INTEGER,
     started_at      TIMESTAMP,
     completed_at    TIMESTAMP,
