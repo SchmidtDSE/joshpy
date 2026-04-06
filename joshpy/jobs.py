@@ -1516,6 +1516,94 @@ def _per_job_jfr(jfr: JfrConfig, run_hash: str) -> JfrConfig:
     return _JfrConfig(output=new_path, settings=jfr.settings, maxsize=jfr.maxsize)
 
 
+def _register_job_outputs(
+    cli: JoshCLI,
+    registry: RunRegistry,
+    job: ExpandedJob,
+    run_id: str,
+    *,
+    export_paths: Any | None = None,
+    quiet: bool = False,
+) -> Any | None:
+    """Register resolved export/debug output paths for a completed job run.
+
+    Stores path metadata in ``run_outputs`` for quick lookup by run hash/label
+    without loading output contents into DuckDB.
+
+    This function is best-effort and should not fail sweep execution. It silently
+    returns when required script metadata is unavailable.
+    """
+    from joshpy.cli import InspectExportsConfig
+
+    if job.source_path is None:
+        return None
+
+    try:
+        paths = export_paths or cli.inspect_exports(
+            InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+        )
+    except Exception as e:
+        if not quiet:
+            print(f"  [WARN] Could not inspect export/debug paths: {e}")
+        return None
+
+    # Resolve kwargs for template substitutions used by Josh paths.
+    resolve_kwargs: dict[str, Any] = {
+        **job.parameters,
+        **job.custom_tags,
+        "run_hash": job.run_hash,
+    }
+
+    output_specs: list[tuple[str, str]] = []
+    for export_type, info in paths.export_files.items():
+        if info is not None:
+            output_specs.append((f"export.{export_type}", info.path))
+    for debug_type, info in paths.debug_files.items():
+        if info is not None:
+            output_specs.append((f"debug.{debug_type}", info.path))
+
+    seen: set[tuple[str, str]] = set()
+    replicates = max(job.replicates, 1)
+
+    for output_type, template in output_specs:
+        for replicate in range(replicates):
+            kwargs = {**resolve_kwargs, "replicate": replicate}
+            try:
+                resolved = paths.resolve_path(template, **kwargs)
+            except KeyError as e:
+                if not quiet:
+                    print(
+                        f"  [WARN] Could not resolve {output_type} template "
+                        f"(missing {e})"
+                    )
+                continue
+            except Exception as e:
+                if not quiet:
+                    print(f"  [WARN] Could not resolve {output_type} path: {e}")
+                continue
+
+            key = (output_type, str(resolved))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            file_size = None
+            if resolved.exists() and resolved.is_file():
+                try:
+                    file_size = resolved.stat().st_size
+                except OSError:
+                    file_size = None
+
+            registry.register_output(
+                run_id=run_id,
+                output_type=output_type,
+                file_path=str(resolved),
+                file_size=file_size,
+            )
+
+    return paths
+
+
 def run_sweep(
     cli: JoshCLI,
     job_set: JobSet,
@@ -1653,6 +1741,7 @@ def run_sweep(
 
     job_results: list[tuple[ExpandedJob, Any]] = []
     run_ids: dict[str, str] = {}
+    export_paths_cache: dict[tuple[str, str], Any] = {}
     succeeded = 0
     failed = 0
     _bottled_failure = False
@@ -1688,6 +1777,31 @@ def run_sweep(
             if registry_callback is not None:
                 run_id = registry_callback.record(job, result)
                 run_ids[job.run_hash] = run_id
+
+                # Register resolved output/debug paths for quick registry lookup.
+                cache_key: tuple[str, str] | None = None
+                cached_paths: Any | None = None
+                if job.source_path is not None:
+                    cache_key = (str(job.source_path), job.simulation)
+                    cached_paths = export_paths_cache.get(cache_key)
+
+                resolved_paths = _register_job_outputs(
+                    cli=cli,
+                    registry=registry_callback.registry,
+                    job=job,
+                    run_id=run_id,
+                    export_paths=cached_paths,
+                    quiet=quiet,
+                )
+
+                # Cache inspect-exports result for subsequent jobs with the
+                # same script/simulation pair.
+                if (
+                    cache_key is not None
+                    and cache_key not in export_paths_cache
+                    and resolved_paths is not None
+                ):
+                    export_paths_cache[cache_key] = resolved_paths
 
             # Call user's callback if provided
             if on_complete is not None:

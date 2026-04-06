@@ -1077,11 +1077,7 @@ class RunRegistry:
         Raises:
             KeyError: If the label or hash is not found.
         """
-        try:
-            run_hash = self.resolve_label(label_or_hash)
-        except KeyError:
-            run_hash = label_or_hash
-
+        run_hash = self._resolve_label_or_hash(label_or_hash)
         config = self.get_config_by_hash(run_hash)
         if config is None:
             raise KeyError(f"No run found for '{label_or_hash}'")
@@ -1091,6 +1087,73 @@ class RunRegistry:
             name: Path(info["path"])
             for name, info in config.file_mappings.items()
         }
+
+    def _resolve_label_or_hash(self, label_or_hash: str) -> str:
+        """Resolve a label-or-hash string to a valid run_hash.
+
+        Args:
+            label_or_hash: Label or run_hash.
+
+        Returns:
+            Resolved run_hash.
+
+        Raises:
+            KeyError: If no matching run exists.
+        """
+        try:
+            run_hash = self.resolve_label(label_or_hash)
+        except KeyError:
+            run_hash = label_or_hash
+
+        if self.get_config_by_hash(run_hash) is None:
+            raise KeyError(f"No run found for '{label_or_hash}'")
+        return run_hash
+
+    def _resolve_run_id_for_hash(
+        self,
+        run_hash: str,
+        run_id: str | None = None,
+    ) -> str:
+        """Resolve a run_id for a run_hash, defaulting to latest execution.
+
+        Args:
+            run_hash: Resolved run hash.
+            run_id: Optional explicit run_id.
+
+        Returns:
+            A run_id associated with run_hash.
+
+        Raises:
+            KeyError: If no matching run execution exists.
+            ValueError: If run_id exists but does not match run_hash.
+        """
+        if run_id is not None:
+            row = self.conn.execute(
+                "SELECT run_hash FROM job_runs WHERE run_id = ?",
+                [run_id],
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"No run execution found for run_id '{run_id}'")
+            if row[0] != run_hash:
+                raise ValueError(
+                    f"run_id '{run_id}' belongs to run_hash '{row[0]}', "
+                    f"not '{run_hash}'"
+                )
+            return run_id
+
+        latest = self.conn.execute(
+            """
+            SELECT run_id
+            FROM job_runs
+            WHERE run_hash = ?
+            ORDER BY started_at DESC NULLS LAST, completed_at DESC NULLS LAST, run_id DESC
+            LIMIT 1
+            """,
+            [run_hash],
+        ).fetchone()
+        if latest is None:
+            raise KeyError(f"No run executions found for run_hash '{run_hash}'")
+        return latest[0]
 
     def get_configs_for_session(self, session_id: str) -> list[ConfigInfo]:
         """Get all configs for a session.
@@ -1732,6 +1795,112 @@ class RunRegistry:
             [output_id, run_id, output_type, file_path, file_size, row_count],
         )
         return output_id
+
+    def get_debug_output_files(
+        self,
+        label_or_hash: str,
+        *,
+        run_id: str | None = None,
+        entity_types: list[str] | None = None,
+        existing_only: bool = True,
+    ) -> list[Path]:
+        """Get debug output file paths for a labeled/hashed run.
+
+        Args:
+            label_or_hash: Run label or run_hash.
+            run_id: Optional explicit run execution ID. If omitted, uses the
+                latest execution for the run hash.
+            entity_types: Optional debug entity types to include (e.g.,
+                ["organism", "patch"]). If omitted, includes all.
+            existing_only: If True, return only paths that exist on disk.
+
+        Returns:
+            List of debug file paths for the selected run execution.
+
+        Raises:
+            KeyError: If the run or run execution is not found.
+            ValueError: If the explicit run_id does not belong to the run hash.
+        """
+        run_hash = self._resolve_label_or_hash(label_or_hash)
+        resolved_run_id = self._resolve_run_id_for_hash(run_hash, run_id=run_id)
+
+        params: list[Any] = [resolved_run_id]
+        where = ["run_id = ?", "output_type LIKE 'debug.%'"]
+
+        if entity_types:
+            wanted = [f"debug.{etype}" for etype in entity_types]
+            placeholders = ", ".join(["?"] * len(wanted))
+            where.append(f"output_type IN ({placeholders})")
+            params.extend(wanted)
+
+        rows = self.conn.execute(
+            f"""
+            SELECT output_type, file_path
+            FROM run_outputs
+            WHERE {' AND '.join(where)}
+            ORDER BY output_type, file_path
+            """,
+            params,
+        ).fetchall()
+
+        seen: set[Path] = set()
+        paths: list[Path] = []
+        for _, file_path in rows:
+            path = Path(file_path)
+            if existing_only and not path.exists():
+                continue
+            if path in seen:
+                continue
+            seen.add(path)
+            paths.append(path)
+
+        return paths
+
+    def load_debug(
+        self,
+        label_or_hash: str,
+        *,
+        run_id: str | None = None,
+        entity_types: list[str] | None = None,
+        existing_only: bool = True,
+    ) -> Any:
+        """Load debug messages for a run from registered debug output files.
+
+        Args:
+            label_or_hash: Run label or run_hash.
+            run_id: Optional explicit run execution ID. If omitted, uses latest.
+            entity_types: Optional debug entity types to include.
+            existing_only: If True, only load files that currently exist.
+
+        Returns:
+            DebugMessageStore with messages merged across all selected files.
+
+        Raises:
+            KeyError: If run/run execution is not found.
+            ValueError: If no matching debug files are available.
+            FileNotFoundError: If ``existing_only=False`` and any file is missing.
+        """
+        from joshpy.debug import DebugMessageStore, load_debug_file
+
+        files = self.get_debug_output_files(
+            label_or_hash,
+            run_id=run_id,
+            entity_types=entity_types,
+            existing_only=existing_only,
+        )
+        if not files:
+            raise ValueError(
+                f"No debug output files found for '{label_or_hash}'. "
+                "Ensure debugFiles are configured and outputs were registered."
+            )
+
+        store = DebugMessageStore()
+        for path in files:
+            file_store = load_debug_file(path)
+            for msg in file_store.messages:
+                store.add(msg)
+            store.parse_errors += file_store.parse_errors
+        return store
 
     # ========== Query Methods ==========
 

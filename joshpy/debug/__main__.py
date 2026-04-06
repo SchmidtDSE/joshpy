@@ -9,6 +9,7 @@ Usage::
     python -m joshpy.debug patch.txt organism.txt --find "burned" --count
     python -m joshpy.debug simulation.josh --summary
     python -m joshpy.debug simulation.josh --simulation Main --trace a1b2
+    python -m joshpy.debug --registry experiment.duckdb --label baseline --summary
 """
 
 from __future__ import annotations
@@ -36,9 +37,25 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Inspect Josh simulation debug output.",
     )
     parser.add_argument(
+        "--registry",
+        type=Path,
+        default=None,
+        help="Registry path (.duckdb) for registry-based debug loading.",
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Run label to inspect (requires --registry; use --run-hash for hashes).",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Specific run_id when multiple executions exist for a run hash.",
+    )
+    parser.add_argument(
         "files",
         type=Path,
-        nargs="+",
+        nargs="*",
         metavar="FILE",
         help=(
             "Debug output file(s) (.txt) or a single Josh script (.josh). "
@@ -358,6 +375,21 @@ def _load_files(args: argparse.Namespace) -> DebugMessageStore:
     return store
 
 
+def _load_registry(args: argparse.Namespace) -> DebugMessageStore:
+    """Load debug output from registry metadata by run label/hash."""
+    from joshpy.registry import RunRegistry
+
+    entity_types = [args.entity_type] if args.entity_type else None
+    target = args.label if args.label is not None else args.run_hash
+    with RunRegistry(args.registry) as registry:
+        return registry.load_debug(
+            target,
+            run_id=args.run_id,
+            entity_types=entity_types,
+            existing_only=True,
+        )
+
+
 def main() -> int:
     """Entry point for ``python -m joshpy.debug``."""
     parser = _build_parser()
@@ -366,6 +398,18 @@ def main() -> int:
     # Validate --before/--after only with --find
     if (args.before is not None or args.after is not None) and args.find is None:
         parser.error("--before and --after require --find")
+
+    if args.registry is not None:
+        if args.label is None and args.run_hash is None:
+            parser.error("--registry requires either --label or --run-hash")
+        if args.label is not None and args.run_hash is not None:
+            parser.error("Use only one of --label or --run-hash with --registry")
+        if args.files:
+            parser.error("Do not pass FILE arguments when using --registry")
+    elif args.label is not None or args.run_id is not None:
+        parser.error("--label/--run-id require --registry")
+    elif not args.files:
+        parser.error("Provide FILE arguments or use --registry with --label/--run-hash")
 
     # Color setup
     use_color = not args.no_color and _supports_color()
@@ -376,11 +420,11 @@ def main() -> int:
 
     # Load files
     try:
-        store = _load_files(args)
+        store = _load_registry(args) if args.registry is not None else _load_files(args)
     except FileNotFoundError as e:
         print(str(e), file=sys.stderr)
         return 1
-    except RuntimeError as e:
+    except (RuntimeError, KeyError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

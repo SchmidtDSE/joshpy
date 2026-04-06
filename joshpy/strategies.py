@@ -874,6 +874,7 @@ def run_adaptive_sweep(
     from joshpy.cli import InspectExportsConfig
     from joshpy.jobs import (
         AdaptiveSweepResult,
+        _register_job_outputs,
         to_run_config,
         to_run_remote_config,
     )
@@ -989,6 +990,15 @@ def run_adaptive_sweep(
                 run_id=run_id,
                 exit_code=result.exit_code,
                 error_message=error_msg,
+            )
+
+            _register_job_outputs(
+                cli=cli,
+                registry=registry,
+                job=job,
+                run_id=run_id,
+                export_paths=export_paths,
+                quiet=quiet,
             )
 
             if result.success:
