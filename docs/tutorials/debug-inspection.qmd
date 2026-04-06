@@ -167,6 +167,22 @@ python -m joshpy.debug examples/quickstart_debug.josh --summary
 python -m joshpy.debug examples/quickstart_debug.josh --trace a1b2c3d4
 ```
 
+### Load debug output from a registry run
+
+When runs are tracked with `RunRegistry`, joshpy records resolved debug output
+paths in `run_outputs`. You can then inspect by label or hash directly:
+
+```bash
+# By label
+python -m joshpy.debug --registry experiment.duckdb --label baseline --summary
+
+# By run hash
+python -m joshpy.debug --registry experiment.duckdb --run-hash abc123def456 --find "survives? false"
+
+# Target a specific execution when the same run_hash was executed multiple times
+python -m joshpy.debug --registry experiment.duckdb --label baseline --run-id <run_id> --trace a1b2c3d4
+```
+
 ### Message count per step
 
 ```bash

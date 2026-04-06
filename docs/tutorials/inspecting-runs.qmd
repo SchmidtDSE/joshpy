@@ -91,7 +91,12 @@ registry.label_run("fed987cba654", "high_growth")
 # Record completed runs (3 replicates each)
 for run_hash in ["abc123def456", "fed987cba654"]:
     for rep in range(3):
-        run_id = registry.start_run(run_hash, replicate=rep, output_path=f"output/{run_hash}/rep{rep}.csv")
+        run_id = registry.start_run(
+            run_hash=run_hash,
+            session_id=session_id,
+            replicate=rep,
+            output_path=f"output/{run_hash}/rep{rep}.csv",
+        )
         registry.complete_run(run_id, exit_code=0)
 registry.update_session_status(session_id, "completed")
 
@@ -173,6 +178,16 @@ python -m joshpy.inspect experiment.duckdb --summary
 ::: {.callout-tip}
 Use `--labels` first to discover what labels are available, then `--info` or
 `--diff` to dig deeper.
+:::
+
+::: {.callout-note}
+For debug logs tied to a registered run, use the debug CLI in registry mode:
+
+```bash
+python -m joshpy.debug --registry experiment.duckdb --label low_growth --summary
+```
+
+This avoids manual debug file path lookup.
 :::
 
 ## Viewing Configs
