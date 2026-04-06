@@ -639,7 +639,8 @@ class JoshCLI:
 
         # Data files
         for name, path in config.data.items():
-            args.extend(["--data", f"{name}={path.resolve()}"])
+            data_name = name if '.' in name else f"{name}{path.suffix}"
+            args.extend(["--data", f"{data_name}={path.resolve()}"])
 
         # Custom tags
         for name, value in config.custom_tags.items():
@@ -703,7 +704,8 @@ class JoshCLI:
 
         # Data files
         for name, path in config.data.items():
-            args.extend(["--data", f"{name}={path.resolve()}"])
+            data_name = name if '.' in name else f"{name}{path.suffix}"
+            args.extend(["--data", f"{data_name}={path.resolve()}"])
 
         # Custom tags
         for name, value in config.custom_tags.items():
