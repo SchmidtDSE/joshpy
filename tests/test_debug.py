@@ -1,9 +1,17 @@
 """Unit tests for the debug module."""
 
+import io
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+try:
+    import duckdb  # noqa: F401
+
+    HAS_DUCKDB = True
+except ImportError:
+    HAS_DUCKDB = False
 
 from joshpy.debug import (
     DebugMessage,
@@ -966,6 +974,67 @@ class TestEventMatchFormat(unittest.TestCase):
         with mock_patch("sys.stdout", new_callable=io.StringIO) as out:
             match.print()
         self.assertEqual(out.getvalue().strip(), match.format().strip())
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestDebugCliRegistryMode(unittest.TestCase):
+    """Tests for registry-backed CLI mode in joshpy.debug."""
+
+    def test_main_summary_with_registry_and_run(self):
+        """CLI should load debug logs from registry metadata by label."""
+        from joshpy.debug.__main__ import main
+        from joshpy.jobs import JobConfig
+        from joshpy.registry import RunRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test.duckdb"
+            debug_path = Path(tmpdir) / "organism_debug.txt"
+            debug_path.write_text("[Step 0, organism @ aaa (1.0, 2.0)] init\n")
+
+            registry = RunRegistry(db_path)
+            try:
+                session_id = registry.create_session(config=JobConfig(simulation="Main"))
+                registry.register_run(
+                    session_id=session_id,
+                    run_hash="hash_debug_01",
+                    josh_path="sim.josh",
+                    config_content="x = 1",
+                    file_mappings=None,
+                    parameters={},
+                )
+                registry.label_run("hash_debug_01", "baseline")
+                run_id = registry.start_run(
+                    run_hash="hash_debug_01", session_id=session_id
+                )
+                registry.complete_run(run_id, exit_code=0)
+                registry.register_output(
+                    run_id=run_id,
+                    output_type="debug.organism",
+                    file_path=str(debug_path),
+                )
+            finally:
+                registry.close()
+
+            with (
+                patch(
+                    "sys.argv",
+                    [
+                        "prog",
+                        "--registry",
+                        str(db_path),
+                        "--label",
+                        "baseline",
+                        "--summary",
+                    ],
+                ),
+                patch("sys.stdout", new_callable=io.StringIO) as out,
+            ):
+                code = main()
+
+            self.assertEqual(code, 0)
+            output = out.getvalue()
+            self.assertIn("Debug Output Summary", output)
+            self.assertIn("Messages:", output)
 
 
 if __name__ == "__main__":

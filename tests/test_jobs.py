@@ -4,6 +4,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+try:
+    import duckdb  # noqa: F401
+
+    HAS_DUCKDB = True
+except ImportError:
+    HAS_DUCKDB = False
+
 from joshpy.jobs import (
     ConfigSweepParameter,
     FileSweepParameter,
@@ -1232,6 +1239,122 @@ class TestRunSweep(unittest.TestCase):
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
         self.assertEqual(callback.call_count, 1)
+
+    @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+    def test_registry_registers_export_and_debug_outputs(self):
+        """run_sweep should register resolved export/debug outputs in run_outputs."""
+        from unittest.mock import MagicMock
+
+        from joshpy.cli import CLIResult, ExportFileInfo, ExportPaths
+        from joshpy.registry import RunRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_path = Path(tmpdir) / "source.josh"
+            source_path.write_text("start simulation Main\nend simulation\n")
+
+            # Create actual files so file_size is recorded
+            patch_0 = Path(tmpdir) / "patch_hashabc123_0.csv"
+            patch_1 = Path(tmpdir) / "patch_hashabc123_1.csv"
+            dbg_0 = Path(tmpdir) / "debug_hashabc123_0.txt"
+            dbg_1 = Path(tmpdir) / "debug_hashabc123_1.txt"
+            patch_0.write_text("step,replicate,value\n0,0,1\n")
+            patch_1.write_text("step,replicate,value\n0,1,1\n")
+            dbg_0.write_text("[Step 0, organism @ aaa (1.0, 2.0)] init\n")
+            dbg_1.write_text("[Step 1, organism @ aaa (1.0, 2.0)] step\n")
+
+            cli = MagicMock()
+            cli.run.return_value = CLIResult(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                command=["java", "-jar", "josh.jar", "run"],
+            )
+            cli.inspect_exports.return_value = ExportPaths(
+                simulation="Main",
+                export_files={
+                    "patch": ExportFileInfo(
+                        raw=f"file://{tmpdir}/patch_{{run_hash}}_{{replicate}}.csv",
+                        protocol="file",
+                        host="",
+                        path=f"{tmpdir}/patch_{{run_hash}}_{{replicate}}.csv",
+                        file_type="csv",
+                    ),
+                    "meta": None,
+                    "entity": None,
+                },
+                debug_files={
+                    "organism": ExportFileInfo(
+                        raw=f"file://{tmpdir}/debug_{{run_hash}}_{{replicate}}.txt",
+                        protocol="file",
+                        host="",
+                        path=f"{tmpdir}/debug_{{run_hash}}_{{replicate}}.txt",
+                        file_type="txt",
+                    ),
+                    "patch": None,
+                    "agent": None,
+                    "disturbance": None,
+                },
+            )
+
+            job = ExpandedJob(
+                config_content="test",
+                config_path=Path(tmpdir) / "test.jshc",
+                config_name="test",
+                run_hash="hashabc123",
+                parameters={},
+                simulation="Main",
+                replicates=2,
+                source_path=source_path,
+                custom_tags={"run_hash": "hashabc123"},
+            )
+            job_set = JobSet(jobs=[job])
+
+            registry = RunRegistry(":memory:")
+            try:
+                session_id = registry.create_session(config=JobConfig(simulation="Main"))
+                registry.register_run(
+                    session_id=session_id,
+                    run_hash="hashabc123",
+                    josh_path=str(source_path),
+                    config_content="test",
+                    file_mappings=None,
+                    parameters={},
+                )
+
+                result = run_sweep(
+                    cli,
+                    job_set,
+                    registry=registry,
+                    session_id=session_id,
+                    quiet=True,
+                )
+
+                self.assertEqual(result.succeeded, 1)
+                self.assertEqual(cli.inspect_exports.call_count, 1)
+
+                run_id = result.run_ids["hashabc123"]
+                rows = registry.conn.execute(
+                    """
+                    SELECT output_type, file_path
+                    FROM run_outputs
+                    WHERE run_id = ?
+                    ORDER BY output_type, file_path
+                    """,
+                    [run_id],
+                ).fetchall()
+
+                self.assertEqual(len(rows), 4)
+                self.assertEqual(
+                    rows,
+                    [
+                        ("debug.organism", str(dbg_0)),
+                        ("debug.organism", str(dbg_1)),
+                        ("export.patch", str(patch_0)),
+                        ("export.patch", str(patch_1)),
+                    ],
+                )
+            finally:
+                registry.close()
 
     def test_stop_on_failure_raises_error(self):
         """Should raise SweepExecutionError on first failure when stop_on_failure=True."""

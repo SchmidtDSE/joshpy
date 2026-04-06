@@ -1,6 +1,7 @@
 """Unit tests for the registry module."""
 
 import unittest
+import tempfile
 from pathlib import Path
 
 # Check if duckdb is available
@@ -1642,6 +1643,142 @@ class TestGetFileMappings(unittest.TestCase):
     def test_unknown_hash_raises(self):
         with self.assertRaises(KeyError):
             self.registry.get_file_mappings("nonexistent")
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestDebugOutputAccess(unittest.TestCase):
+    """Tests for registry debug output lookup and loading."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(config=_make_config())
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash_debug",
+            josh_path="sim.josh",
+            config_content="x = 1",
+            file_mappings=None,
+            parameters={},
+        )
+        self.registry.label_run("hash_debug", "baseline")
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmpdir.name)
+        self.org_1 = tmp / "org_1.txt"
+        self.patch_1 = tmp / "patch_1.txt"
+        self.org_2 = tmp / "org_2.txt"
+
+        self.org_1.write_text("[Step 0, organism @ aaa (1.0, 2.0)] init\n")
+        self.patch_1.write_text("[Step 0, patch @ fff (1.0, 2.0)] fire false\n")
+        self.org_2.write_text("[Step 1, organism @ bbb (3.0, 4.0)] grow\n")
+
+        self.run_id_1 = self.registry.start_run(
+            run_hash="hash_debug", session_id=self.session_id
+        )
+        self.registry.complete_run(self.run_id_1, exit_code=0)
+        self.registry.register_output(
+            run_id=self.run_id_1,
+            output_type="debug.organism",
+            file_path=str(self.org_1),
+        )
+        self.registry.register_output(
+            run_id=self.run_id_1,
+            output_type="debug.patch",
+            file_path=str(self.patch_1),
+        )
+
+        self.run_id_2 = self.registry.start_run(
+            run_hash="hash_debug", session_id=self.session_id
+        )
+        self.registry.complete_run(self.run_id_2, exit_code=0)
+        self.registry.register_output(
+            run_id=self.run_id_2,
+            output_type="debug.organism",
+            file_path=str(self.org_2),
+        )
+
+    def tearDown(self):
+        self.registry.close()
+        self.tmpdir.cleanup()
+
+    def test_get_debug_output_files_uses_latest_run_by_default(self):
+        paths = self.registry.get_debug_output_files("baseline")
+        self.assertEqual(paths, [self.org_2])
+
+    def test_get_debug_output_files_can_target_specific_run_id(self):
+        paths = self.registry.get_debug_output_files("baseline", run_id=self.run_id_1)
+        self.assertEqual(paths, [self.org_1, self.patch_1])
+
+    def test_get_debug_output_files_entity_type_filter(self):
+        paths = self.registry.get_debug_output_files(
+            "baseline", run_id=self.run_id_1, entity_types=["patch"]
+        )
+        self.assertEqual(paths, [self.patch_1])
+
+    def test_get_debug_output_files_existing_only_filter(self):
+        missing = Path(self.tmpdir.name) / "missing.txt"
+        self.registry.register_output(
+            run_id=self.run_id_2,
+            output_type="debug.patch",
+            file_path=str(missing),
+        )
+
+        paths_existing = self.registry.get_debug_output_files(
+            "baseline", existing_only=True
+        )
+        self.assertEqual(paths_existing, [self.org_2])
+
+        paths_all = self.registry.get_debug_output_files(
+            "baseline", existing_only=False
+        )
+        self.assertEqual(paths_all, [self.org_2, missing])
+
+    def test_get_debug_output_files_bad_run_id(self):
+        with self.assertRaises(KeyError):
+            self.registry.get_debug_output_files("baseline", run_id="unknown-run-id")
+
+    def test_get_debug_output_files_run_id_mismatch(self):
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="other_hash",
+            josh_path="sim2.josh",
+            config_content="x = 2",
+            file_mappings=None,
+            parameters={},
+        )
+        other_run = self.registry.start_run(
+            run_hash="other_hash", session_id=self.session_id
+        )
+        self.registry.complete_run(other_run, exit_code=0)
+
+        with self.assertRaises(ValueError):
+            self.registry.get_debug_output_files("baseline", run_id=other_run)
+
+    def test_load_debug_merges_messages(self):
+        store = self.registry.load_debug("baseline", run_id=self.run_id_1)
+        self.assertEqual(len(store), 2)
+        self.assertEqual(store.messages[0].entity_type, "organism")
+        self.assertEqual(store.messages[1].entity_type, "patch")
+
+    def test_load_debug_no_outputs_raises(self):
+        self.registry.register_run(
+            session_id=self.session_id,
+            run_hash="hash_no_debug",
+            josh_path="sim3.josh",
+            config_content="x = 3",
+            file_mappings=None,
+            parameters={},
+        )
+        self.registry.label_run("hash_no_debug", "no_debug")
+        run_id = self.registry.start_run(
+            run_hash="hash_no_debug", session_id=self.session_id
+        )
+        self.registry.complete_run(run_id, exit_code=0)
+
+        with self.assertRaises(ValueError):
+            self.registry.load_debug("no_debug")
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
