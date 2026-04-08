@@ -463,8 +463,15 @@ def create_bottle_from_registry(
             config_name=config_name,
             data_files=data_rel_paths,
             custom_tags={
-                k: str(v) for k, v in config.parameters.items()
-            } if config.parameters else {},
+                **(
+                    {k: str(v) for k, v in config.parameters.items()}
+                    if config.parameters
+                    else {}
+                ),
+                # SweepManager injects these at runtime; replicate here
+                "run_hash": run_hash,
+                **({"label": config.label} if config.label else {}),
+            },
             run_hash=run_hash,
             jar_version=jar_version,
             jar_sha256=jar_sha256,

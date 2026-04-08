@@ -811,6 +811,10 @@ class JobConfig:
     upload_config_path: str | None = None
     upload_data_path: str | None = None
 
+    # Human-readable label (injected as --custom-tag label=... so Josh
+    # export paths can use {label}).  Also forwarded to the registry.
+    label: str | None = None
+
     # Additional CLI options
     output_steps: str | None = None
     seed: int | None = None
@@ -979,6 +983,7 @@ class ExpandedJob:
     source_path: Path | None = None
     file_mappings: dict[str, Path] = field(default_factory=dict)
     custom_tags: dict[str, str] = field(default_factory=dict)
+    label: str | None = None
     upload_source_path: str | None = None
     upload_config_path: str | None = None
     upload_data_path: str | None = None
@@ -1188,6 +1193,10 @@ class JobExpander:
             # Add run_hash as a custom tag
             custom_tags["run_hash"] = run_hash
 
+            # Add label as a custom tag if provided
+            if config.label is not None:
+                custom_tags["label"] = config.label
+
             # Write config file
             config_subdir = output_dir / f"job_{i:04d}_{run_hash}"
             config_subdir.mkdir(parents=True, exist_ok=True)
@@ -1207,6 +1216,7 @@ class JobExpander:
                 source_path=effective_source_path,
                 file_mappings=file_mappings,
                 custom_tags=custom_tags,
+                label=config.label,
                 upload_source_path=config.upload_source_path,
                 upload_config_path=config.upload_config_path,
                 upload_data_path=config.upload_data_path,

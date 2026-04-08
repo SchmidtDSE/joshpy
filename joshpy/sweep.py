@@ -1059,8 +1059,11 @@ class SweepManagerBuilder:
                         josh_content=josh_content,
                     )
 
-                # Apply label if set
-                if self._label is not None:
+                # Apply label if set (with_label() takes precedence over
+                # JobConfig.label; both register with the registry and
+                # inject the label as a --custom-tag for export paths).
+                effective_label = self._label or self._config.label
+                if effective_label is not None:
                     if len(job_set.jobs) != 1:
                         raise ValueError(
                             f"with_label() requires a single-job config, but this "
@@ -1069,10 +1072,14 @@ class SweepManagerBuilder:
                         )
                     self._registry.label_run(
                         job_set.jobs[0].run_hash,
-                        self._label,
+                        effective_label,
                         force=self._label_force,
                         on_collision=self._label_on_collision,
                     )
+                    # Ensure the custom tag matches the effective label
+                    # (with_label() may override what JobConfig.label set
+                    # during expansion).
+                    job_set.jobs[0].custom_tags["label"] = effective_label
 
         # Register with catalog if configured
         experiment_id = None

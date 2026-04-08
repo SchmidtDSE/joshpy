@@ -1,6 +1,10 @@
 [project]
 name = "joshpy"
+<<<<<<< HEAD
 version = "0.0.8.5"
+=======
+version = "0.0.8.6"
+>>>>>>> 6502513b6c8d7b60b896e49e80f0080775736fdc
 authors = [
   { name="Nick Gondek", email="npg@berkeley.edu" },
   { name="A Samuel Pottinger", email="sam.pottinger@berkeley.edu" },
