@@ -1073,6 +1073,9 @@ class SweepManagerBuilder:
                         force=self._label_force,
                         on_collision=self._label_on_collision,
                     )
+                    # Inject label as custom tag so Josh export paths can
+                    # use {label} for human-readable directory names.
+                    job_set.jobs[0].custom_tags["label"] = self._label
 
         # Register with catalog if configured
         experiment_id = None
