@@ -73,6 +73,7 @@ config = JobConfig(
     config_path=BASELINE_CONFIG,
     simulation="Main",
     replicates=3,
+    label="baseline",
 )
 
 cli = JoshCLI(josh_jar=JarMode.DEV)
@@ -102,8 +103,10 @@ finally:
     manager.close()
 ```
 
-The label `"baseline"` is set **upfront** at build time via `.with_label()`,
-not after the run. This avoids forgetting to label.
+The `label` is registry metadata — a human-readable name stored alongside the
+run's hash for querying and comparison. It is not a simulation parameter and does
+not affect the run itself. Setting it on `JobConfig` or via `.with_label()` also
+makes it available as a `{label}` template variable in Josh export paths.
 
 ### Quick Look
 
@@ -144,6 +147,7 @@ config2 = JobConfig(
     config_path=HIGH_GROWTH_CONFIG,
     simulation="Main",
     replicates=3,
+    label="high_growth",
 )
 
 manager = (
@@ -199,10 +203,11 @@ registry.list_config_parameters()
 ```
 
 ::: {.callout-note title="Labels vs Parameters"}
-`group_by="label"` groups by user-assigned names -- organizational metadata you
-control. `group_by="maxGrowth"` groups by the actual parameter value extracted
-from the stored config content. Labels carry whatever meaning you give them;
-parameter grouping uses the run's own data.
+Labels are registry metadata — human-readable names you assign for organizing
+and querying runs (e.g., `group_by="label"`). Parameters like `maxGrowth` are
+the actual simulation inputs extracted from the stored config. A label does not
+affect the simulation; it identifies the run for downstream comparison and
+analysis.
 :::
 
 ### Compare by Label

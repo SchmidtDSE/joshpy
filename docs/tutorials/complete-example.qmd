@@ -130,6 +130,7 @@ config_gradient = JobConfig(
     file_mappings=grid.file_mappings_for(pattern="gradient"),
     simulation="Main",
     replicates=2,
+    label="gradient_low",
 )
 
 manager = (
@@ -183,6 +184,7 @@ config_stripes = JobConfig(
     file_mappings=grid.file_mappings_for(pattern="stripes"),
     simulation="Main",
     replicates=2,
+    label="stripes_high",
 )
 
 manager = (
@@ -222,6 +224,7 @@ config_gradient_v2 = JobConfig(
     file_mappings=grid.file_mappings_for(pattern="gradient"),
     simulation="Main",
     replicates=2,
+    label="gradient_low",
 )
 
 manager = (
