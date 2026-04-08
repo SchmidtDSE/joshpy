@@ -1182,6 +1182,10 @@ def _create_single_job(
     # Add run_hash as custom tag
     custom_tags["run_hash"] = run_hash
 
+    # Add label as a custom tag if provided
+    if config.label is not None:
+        custom_tags["label"] = config.label
+
     # Derive config name from template path (e.g., "adaptive_config.jshc.j2" -> "adaptive_config.jshc")
     # This ensures the config name matches what the Josh file references via "config <name>.xxx"
     if config.template_path:
@@ -1210,6 +1214,7 @@ def _create_single_job(
         source_path=config.source_path,
         file_mappings=file_mappings,
         custom_tags=custom_tags,
+        label=config.label,
         upload_source_path=config.upload_source_path,
         upload_config_path=config.upload_config_path,
         upload_data_path=config.upload_data_path,
