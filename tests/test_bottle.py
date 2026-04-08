@@ -558,7 +558,7 @@ class TestRegistryBottle(unittest.TestCase):
                 with tarfile.open(archive, "r:gz") as tar:
                     names = tar.getnames()
 
-                prefix = "bottle_hash_test"
+                prefix = "bottle_baseline_hash_test"
                 self.assertIn(f"{prefix}/simulation.josh", names)
                 self.assertIn(f"{prefix}/sweep_config.jshc", names)
                 self.assertIn(f"{prefix}/run.sh", names)

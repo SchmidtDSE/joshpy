@@ -244,7 +244,10 @@ def create_bottle(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    bottle_name = f"bottle_{job.run_hash}"
+    if job.label:
+        bottle_name = f"bottle_{job.label}_{job.run_hash}"
+    else:
+        bottle_name = f"bottle_{job.run_hash}"
     staging = Path(tempfile.mkdtemp()) / bottle_name
 
     try:
@@ -391,7 +394,10 @@ def create_bottle_from_registry(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    bottle_name = f"bottle_{run_hash}"
+    if config.label:
+        bottle_name = f"bottle_{config.label}_{run_hash}"
+    else:
+        bottle_name = f"bottle_{run_hash}"
     staging = Path(tempfile.mkdtemp()) / bottle_name
 
     try:
