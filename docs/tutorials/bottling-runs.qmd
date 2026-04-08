@@ -145,6 +145,7 @@ config = JobConfig(
     simulation="Main",
     replicates=1,
     file_mappings={"soil_quality": DATA_DIR / "soil_quality_gradient.jshd"},
+    label="demo_run",
 )
 
 manager = (
