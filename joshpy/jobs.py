@@ -1234,7 +1234,7 @@ class JobExpander:
         )
 
 
-def to_run_config(job: ExpandedJob) -> RunConfig:
+def to_run_config(job: ExpandedJob, *, enable_profiler: bool = False) -> RunConfig:
     """Convert an ExpandedJob to a RunConfig for CLI execution.
 
     This helper function bridges the job expansion system with the CLI layer,
@@ -1278,6 +1278,7 @@ def to_run_config(job: ExpandedJob) -> RunConfig:
         use_float64=job.use_float64,
         output_steps=job.output_steps,
         seed=job.seed,
+        enable_profiler=enable_profiler,
     )
 
 
@@ -1629,6 +1630,7 @@ def run_sweep(
     dry_run: bool = False,
     quiet: bool = False,
     jfr: JfrConfig | None = None,
+    enable_profiler: bool = False,
     bottle: str | None = None,
     bottle_dir: Path | None = None,
     bottle_omit_jshd: bool = False,
@@ -1663,6 +1665,7 @@ def run_sweep(
         quiet: If True, suppress progress output.
         jfr: Optional JFR profiling configuration. When provided, each job
             gets its own recording file with the run_hash in the filename.
+        enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
 
     Returns:
         SweepResult with all job outcomes.
@@ -1769,7 +1772,7 @@ def run_sweep(
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr)
             else:
-                run_config = to_run_config(job)
+                run_config = to_run_config(job, enable_profiler=enable_profiler)
                 result = cli.run(run_config, jfr=job_jfr)
 
             job_results.append((job, result))

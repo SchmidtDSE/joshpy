@@ -789,6 +789,7 @@ def run_adaptive_sweep(
     load_config: Any | None = None,  # LoadConfig
     stop_on_failure: bool = True,
     jfr: Any | None = None,  # JfrConfig
+    enable_profiler: bool = False,
 ) -> Any:  # AdaptiveSweepResult
     """Run an adaptive sweep using Optuna.
 
@@ -972,7 +973,7 @@ def run_adaptive_sweep(
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr)
             else:
-                run_config = to_run_config(job)
+                run_config = to_run_config(job, enable_profiler=enable_profiler)
                 result = cli.run(run_config, jfr=job_jfr)
 
             job_results.append((job, result))

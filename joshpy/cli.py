@@ -154,6 +154,7 @@ class RunConfig:
         upload_data: Upload data .jshd files to MinIO after completion.
         output_steps: Step range to output (e.g., "0-10,50,100").
         seed: Random seed for reproducibility.
+        enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
     """
 
     script: Path
@@ -172,6 +173,7 @@ class RunConfig:
     upload_data: bool = False
     output_steps: str | None = None
     seed: int | None = None
+    enable_profiler: bool = False
 
 
 @dataclass(frozen=True)
@@ -669,6 +671,8 @@ class JoshCLI:
             args.extend(["--output-steps", config.output_steps])
         if config.seed is not None:
             args.extend(["--seed", str(config.seed)])
+        if config.enable_profiler:
+            args.append("--enable-profiler")
 
         return self._execute(args, timeout=timeout, jfr=jfr)
 

@@ -536,6 +536,7 @@ class SweepManager:
         on_complete: Callable[[ExpandedJob, Any], None] | None = None,
         objective: Any | None = None,
         jfr: Any | None = None,  # JfrConfig
+        enable_profiler: bool = False,
         bottle: str | None = None,
         bottle_dir: Path | None = None,
         bottle_omit_jshd: bool = False,
@@ -567,6 +568,7 @@ class SweepManager:
                 uses the objective from the strategy configuration.
             jfr: Optional JFR profiling configuration. When provided, each job
                 gets its own recording file with the run_hash in the filename.
+            enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
 
         Returns:
             SweepResult for batch strategies, AdaptiveSweepResult for adaptive.
@@ -617,6 +619,7 @@ class SweepManager:
                 quiet=quiet,
                 stop_on_failure=stop_on_failure,
                 jfr=jfr,
+                enable_profiler=enable_profiler,
             )
         else:
             # Use batch runner
@@ -633,6 +636,7 @@ class SweepManager:
                 dry_run=dry_run,
                 quiet=quiet,
                 jfr=jfr,
+                enable_profiler=enable_profiler,
                 bottle=bottle,
                 bottle_dir=bottle_dir,
                 bottle_omit_jshd=bottle_omit_jshd,
