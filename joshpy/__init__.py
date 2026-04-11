@@ -39,6 +39,17 @@ from joshpy.cli import (
     ExportPaths,
 )
 
+# JFR diagnostics (always available, no external deps)
+from joshpy.jfr import (
+    ResourceProfile,
+    CpuProfile,
+    GcProfile,
+    MemoryProfile,
+    IoProfile,
+    ContentionProfile,
+    build_resource_profile,
+)
+
 # JSHD loading module (always available)
 from joshpy.jshd import (
     JshdMetadata,
@@ -171,6 +182,14 @@ __all__ = [
     "InspectExportsConfig",
     "ExportFileInfo",
     "ExportPaths",
+    # JFR diagnostics
+    "ResourceProfile",
+    "CpuProfile",
+    "GcProfile",
+    "MemoryProfile",
+    "IoProfile",
+    "ContentionProfile",
+    "build_resource_profile",
     # JSHD loading
     "JshdMetadata",
     "JshdData",
