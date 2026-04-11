@@ -1,6 +1,6 @@
 ---
-title: "Profiling"
-description: "Profile josh simulations at the model level and the JVM level"
+title: "Finding Bottlenecks"
+description: "Find and fix slow attributes in josh simulations"
 jupyter: python3
 execute:
   warning: false
@@ -132,7 +132,7 @@ results = manager.run(enable_profiler=True)
 - `.evalDuration` is a **reserved suffix** -- you cannot define your own
   attributes named `evalDuration`.
 - The profiler adds ~4% overhead when enabled, negligible when disabled.
-- Timing is wall-clock milliseconds via `System.currentTimeMillis()`.
+- Timing is wall-clock milliseconds.
 - Standard aggregates (`mean`, `sum`, etc.) work on `.evalDuration` across
   entity populations.
 

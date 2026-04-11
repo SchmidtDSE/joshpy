@@ -21,7 +21,7 @@ project:
     - tutorials/adaptive-sweep.qmd
     - tutorials/bottling-runs.qmd        # Reproducibility archives
     - tutorials/debug-inspection.qmd     # Debug output inspection
-    - tutorials/jfr-profiling.qmd       # Profiling (josh + JFR)
+    - tutorials/jfr-profiling.qmd       # Finding bottlenecks (josh + JFR)
     - tutorials/switching-versions.qmd   # Josh version switching
     - tutorials/multi-session-sweeps.qmd    # ProjectCatalog for sweeps
     - tutorials/remote-execution.qmd     # Josh Cloud execution
@@ -79,7 +79,7 @@ website:
             href: tutorials/bottling-runs.qmd
           - text: "Debug Output Inspection"
             href: tutorials/debug-inspection.qmd
-          - text: "Profiling"
+          - text: "Finding Bottlenecks"
             href: tutorials/jfr-profiling.qmd
           - text: "Switching Josh Versions"
             href: tutorials/switching-versions.qmd

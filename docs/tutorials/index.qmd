@@ -147,7 +147,7 @@ Trace agent behavior with structured debug log analysis:
 
 Best for: Understanding why agents behave a certain way.
 
-### [Profiling](jfr-profiling.qmd)
+### [Finding Bottlenecks](jfr-profiling.qmd)
 
 Two profiling approaches for different needs:
 
