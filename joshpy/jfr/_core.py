@@ -310,10 +310,10 @@ def _build_io_profile(events: list[dict[str, str]]) -> IoProfile | None:
     return IoProfile(
         read_count=len(reads),
         read_total_ms=sum(_parse_duration(e.get("duration", "0 ms")) for e in reads),
-        read_total_bytes=sum(int(float(e.get("bytesRead", "0"))) for e in reads),
+        read_total_bytes=sum(int(_parse_size(e.get("bytesRead", "0"))) for e in reads),
         write_count=len(writes),
         write_total_ms=sum(_parse_duration(e.get("duration", "0 ms")) for e in writes),
-        write_total_bytes=sum(int(float(e.get("bytesWritten", "0"))) for e in writes),
+        write_total_bytes=sum(int(_parse_size(e.get("bytesWritten", "0"))) for e in writes),
     )
 
 
