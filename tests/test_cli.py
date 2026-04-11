@@ -506,6 +506,39 @@ class TestJoshCLI(unittest.TestCase):
         self.assertIn("42", cmd)
 
     @patch("subprocess.run")
+    def test_run_with_enable_profiler(self, mock_run):
+        """run() should include --enable-profiler when enabled."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            enable_profiler=True,
+        )
+
+        cli.run(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--enable-profiler", cmd)
+
+    @patch("subprocess.run")
+    def test_run_without_enable_profiler(self, mock_run):
+        """run() should not include --enable-profiler by default."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+        )
+
+        cli.run(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--enable-profiler", cmd)
+
+    @patch("subprocess.run")
     def test_run_remote(self, mock_run):
         """run_remote() should build correct command."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
