@@ -157,8 +157,8 @@ memory allocation, thread activity, and I/O.
 joshpy makes JFR easy to use:
 
 1. Pass a `JfrConfig` to any CLI method to enable recording
-2. Use `summarize_jfr()` to get a text summary (no IDE required)
-3. Attach the `.jfr` file to a GitHub issue for deeper analysis
+2. Use `diagnose_jfr()` for a resource breakdown (CPU, memory, GC, I/O)
+3. Use `summarize_jfr()` for a raw text summary to attach to GitHub issues
 
 No extra dependencies are needed -- JFR is part of the JDK that Josh already
 requires.
@@ -197,10 +197,28 @@ if jfr_path.exists():
 The simulation runs normally -- JFR records in the background with negligible
 impact on execution time.
 
-### Step 2: Get a Text Summary
+### Step 2: Diagnose Resource Usage
 
-Users without JDK Mission Control or IntelliJ can use `summarize_jfr()` to
-produce a human-readable summary using the JDK's bundled `jfr` CLI tool:
+`diagnose_jfr()` parses the recording into sections — CPU, memory, GC,
+file I/O, and thread contention — with a diagnosis of the likely bottleneck:
+
+```{python}
+#| label: diagnose-jfr
+profile = cli.diagnose_jfr(jfr_path)
+print(profile.summary())
+```
+
+The same analysis is available from the command line without writing any Python:
+
+```bash
+python -m joshpy.jfr /tmp/simulation_profile.jfr
+python -m joshpy.jfr /tmp/simulation_profile.jfr --detailed
+```
+
+### Step 3: Get a Raw Text Summary
+
+For filing GitHub issues, `summarize_jfr()` produces the raw JFR event table
+using the JDK's bundled `jfr` CLI tool:
 
 ```{python}
 #| label: summarize-jfr
@@ -219,7 +237,7 @@ else:
 
 This summary is compact enough to paste directly into a GitHub issue.
 
-### Step 3: Profile Preprocessing
+### Step 4: Profile Preprocessing
 
 JFR works on **any** CLI method, not just `run()`. If preprocessing is slow,
 profile it the same way:
@@ -245,7 +263,7 @@ result = cli.preprocess(
 The same pattern applies to `validate()`, `discover_config()`, `inspect_jshd()`,
 and all other CLI methods.
 
-### Step 4: Profile a Parameter Sweep
+### Step 5: Profile a Parameter Sweep
 
 JFR also works through `SweepManager.run()` and `run_sweep()`. Each job
 automatically gets its own recording file with the `run_hash` in the filename:
