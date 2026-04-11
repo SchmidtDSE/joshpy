@@ -917,6 +917,59 @@ class JoshCLI:
             },
         )
 
+    def diagnose_jfr(
+        self,
+        jfr_path: Path,
+        timeout: float | None = None,
+    ) -> "ResourceProfile":
+        """Parse a JFR recording into user-friendly resource diagnostics.
+
+        Runs ``jfr print`` and ``jfr summary`` to extract CPU, memory, GC,
+        I/O, and thread contention metrics, then classifies the likely
+        bottleneck.
+
+        Args:
+            jfr_path: Path to the ``.jfr`` recording file.
+            timeout: Timeout in seconds for each jfr subprocess call.
+
+        Returns:
+            :class:`~joshpy.jfr.ResourceProfile` with parsed diagnostics.
+
+        Raises:
+            RuntimeError: If jfr commands fail.
+        """
+        from joshpy.jfr import build_resource_profile
+        from joshpy.jfr.__main__ import _EVENTS
+
+        java = Path(self.java_path)
+        if java.parent.name == "bin":
+            jfr_bin = str(java.parent / "jfr")
+        else:
+            jfr_bin = "jfr"
+
+        resolved = str(jfr_path.resolve())
+
+        # Get event data
+        try:
+            print_proc = subprocess.run(
+                [jfr_bin, "print", "--events", _EVENTS, resolved],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"jfr print timed out after {timeout}s") from e
+
+        if print_proc.returncode != 0:
+            raise RuntimeError(f"jfr print failed: {print_proc.stderr}")
+
+        # Get summary for recording duration
+        summary_result = self.summarize_jfr(jfr_path, timeout=timeout)
+        if not summary_result.success:
+            raise RuntimeError(f"jfr summary failed: {summary_result.stderr}")
+
+        return build_resource_profile(print_proc.stdout, summary_result.stdout)
+
     def summarize_jfr(self, jfr_path: Path, timeout: float | None = None) -> CLIResult:
         """Get a text summary of a JFR recording.
 
