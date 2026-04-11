@@ -147,14 +147,14 @@ Trace agent behavior with structured debug log analysis:
 
 Best for: Understanding why agents behave a certain way.
 
-### [JVM Profiling with Flight Recorder](jfr-profiling.qmd)
+### [Profiling](jfr-profiling.qmd)
 
-Diagnose performance issues using Java Flight Recorder (JFR):
+Two profiling approaches for different needs:
 
-- Enable JFR on any CLI operation with `JfrConfig`
-- Text summaries with `summarize_jfr()` (no IDE needed)
+- **Josh profiling** (`enable_profiler=True`): measure attribute evaluation time with `.evalDuration` -- best for optimizing model logic
+- **JFR profiling** (`JfrConfig`): JVM-level CPU/GC/memory analysis -- best for the Josh team diagnosing runtime issues
 
-Best for: Diagnosing slow simulations or preprocessing.
+Best for: Understanding where time is spent in your simulation.
 
 ## Advanced
 

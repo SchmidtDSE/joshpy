@@ -1,6 +1,6 @@
 ---
-title: "Performance Profiling with Java Flight Recorder"
-description: "Diagnose performance issues using Java Flight Recorder"
+title: "Profiling"
+description: "Profile josh simulations at the model level and the JVM level"
 jupyter: python3
 execute:
   warning: false
@@ -8,10 +8,151 @@ execute:
 
 ## Introduction
 
-When a simulation or preprocessing step is unexpectedly slow, **Java Flight Recorder
-(JFR)** can capture detailed profiling data with minimal overhead (~1-2%). JFR is
-built into OpenJDK 11+ and records CPU hotspots, GC pauses, memory allocation,
-thread activity, and I/O -- everything needed to diagnose performance issues.
+Josh offers two complementary profiling approaches depending on what you need
+to understand:
+
+| Approach | What it measures | Who it's for |
+|----------|-----------------|--------------|
+| **Josh profiling** (`--enable-profiler`) | Wall-clock time per attribute evaluation in the josh language | Model developers optimizing simulation logic |
+| **JFR profiling** (Java Flight Recorder) | CPU hotspots, GC pauses, memory, I/O inside the JVM | Josh team diagnosing runtime performance |
+
+Most users will want **josh profiling** -- it tells you which attributes in your
+model are expensive to evaluate, using the same units and export pipeline you
+already work with. JFR is a lower-level tool that exposes the Java stack trace
+and is primarily useful for the Josh development team.
+
+## Josh Profiling
+
+Josh has a built-in evaluation profiler that measures how long each attribute
+takes to resolve. It works through a synthetic `.evalDuration` suffix that you
+can append to any attribute in your josh script. This tells you which parts of
+your model are expensive -- useful when optimizing a simulation that takes hours.
+
+### How it works
+
+Append `.evalDuration` to any attribute to get its resolution time in
+milliseconds. Use `sum()` across an entity population to get total time spent
+evaluating that attribute, or use it directly on a patch-level attribute.
+
+Without `enable_profiler=True`, all `.evalDuration` values are guaranteed 0 ms
+with zero overhead. `.evalDuration` is a **reserved suffix** -- you cannot
+define your own attributes with that name.
+
+### Example: finding what to optimize
+
+Imagine a meadow model where shrub cover is tracked as 5000 individual `Shrub`
+organisms. Each has a `cover` attribute, and the patch computes
+`shrubPctCover = count(Shrub) / 10000` -- the fraction of a 10,000-shrub
+carrying capacity. Profiling reveals that resolving cover for all those entities
+dominates runtime:
+
+```{python}
+#| label: show-profiler-before
+from pathlib import Path
+
+print(Path("../../examples/profiler_before.josh").read_text())
+```
+
+```{python}
+#| label: run-profiler-before
+from joshpy.cli import JoshCLI, RunConfig
+from joshpy.jar import JarMode
+import pandas as pd
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+result = cli.run(RunConfig(
+    script=Path("../../examples/profiler_before.josh"),
+    simulation="MeadowModel",
+    enable_profiler=True,
+))
+
+df_before = pd.read_csv("/tmp/eval_duration_before.csv")
+patch = df_before.groupby("step").first().reset_index()
+```
+
+The timing columns (`treeHeightMs`, `shrubCoverMs`) appear alongside the
+regular export columns in the CSV. Let's pull them out to see where time is
+being spent:
+
+```{python}
+#| label: profiler-before-timing
+print("=== Eval duration (ms) per step ===")
+print(patch[["step", "treeHeightMs", "shrubCoverMs"]].to_string(index=False))
+print()
+print(f"Total tree height eval:  {patch['treeHeightMs'].sum():.0f} ms")
+print(f"Total shrub cover eval:  {patch['shrubCoverMs'].sum():.0f} ms")
+```
+
+The profiler shows `shrubCoverMs` dominates -- 5000 per-entity evaluations per
+patch per step add up. But none of the shrub model logic actually requires
+individual identity; the only output is an aggregate cover fraction. The fix:
+replace the organism population with a single patch-level attribute that
+computes the same quantity directly:
+
+```{python}
+#| label: show-profiler-after
+print(Path("../../examples/profiler_after.josh").read_text())
+```
+
+```{python}
+#| label: run-profiler-after
+result = cli.run(RunConfig(
+    script=Path("../../examples/profiler_after.josh"),
+    simulation="MeadowModel",
+    enable_profiler=True,
+))
+
+df_after = pd.read_csv("/tmp/eval_duration_after.csv")
+patch = df_after.groupby("step").first().reset_index()
+
+print("=== Eval duration (ms) per step ===")
+print(patch[["step", "treeHeightMs", "shrubCoverMs"]].to_string(index=False))
+print()
+print(f"Total tree height eval:  {patch['treeHeightMs'].sum():.0f} ms")
+print(f"Total shrub cover eval:  {patch['shrubCoverMs'].sum():.0f} ms")
+```
+
+Same shrub cover fraction, same `Tree` population -- but `shrubCoverMs` drops
+to near zero because there are no per-entity evaluations to sum. The profiler
+made the bottleneck obvious.
+
+### Profiling in sweeps
+
+`enable_profiler` threads through `SweepManager.run()` and `run_sweep()`:
+
+```{python}
+#| label: josh-profiling-sweep
+#| eval: false
+results = manager.run(enable_profiler=True)
+```
+
+### Key details
+
+- `.evalDuration` is a **reserved suffix** -- you cannot define your own
+  attributes named `evalDuration`.
+- The profiler adds ~4% overhead when enabled, negligible when disabled.
+- Timing is wall-clock milliseconds via `System.currentTimeMillis()`.
+- Standard aggregates (`mean`, `sum`, etc.) work on `.evalDuration` across
+  entity populations.
+
+## JFR Profiling
+
+::: {.callout-warning}
+JFR output exposes the underlying Java stack trace, which is unlikely to help
+diagnose a scientific error in your simulation. It is most useful for the Josh
+team to identify and fix performance bottlenecks in the Java runtime. If you
+have a performance issue, please include the JFR summary and recording when
+filing a GitHub issue!
+
+For diagnosing scientific errors (e.g., "why are my results different from
+expected?"), use [debug output](debug-inspection.qmd) instead.
+:::
+
+When a simulation or preprocessing step is unexpectedly slow, **Java Flight
+Recorder (JFR)** can capture detailed JVM profiling data with minimal overhead
+(~1-2%). JFR is built into OpenJDK 11+ and records CPU hotspots, GC pauses,
+memory allocation, thread activity, and I/O.
 
 joshpy makes JFR easy to use:
 
@@ -22,14 +163,7 @@ joshpy makes JFR easy to use:
 No extra dependencies are needed -- JFR is part of the JDK that Josh already
 requires.
 
-::: {.callout-warning}
-Note: It's not likely that JFR output will be useful in diagnosing a specific scientific error in the simulation. Instead, JFR is best for identifying *performance* bottlenecks (e.g., "why is this simulation taking 10x longer than expected?") within java. This will expose the underlying Java stack trace, which will likely not be very useful to a user without Java experience. However, this information is critical for the Josh team to diagnose and fix performance issues in the Java codebase. If you have a performance issue, please include the JFR summary and recording when filing a GitHub issue!
-
-For diagnosing scientific errors (e.g., "why are my results different from expected?"), the best approach is to use the [debug output](debug-inspection.qmd) - contrary to JFR, the debug logs are designed to be human-readable and expose the internal state of the simulation in a way that is meaningful to users. The debug logs can help identify issues with the scientific logic, data handling, or configuration that may be causing incorrect results.
-:::
-
-
-## Step 1: Run a Simulation with JFR
+### Step 1: Run a Simulation with JFR
 
 Enable JFR by passing a `JfrConfig` to any CLI method. The only required field
 is `output` -- the path where the recording will be written.
@@ -63,7 +197,7 @@ if jfr_path.exists():
 The simulation runs normally -- JFR records in the background with negligible
 impact on execution time.
 
-## Step 2: Get a Text Summary
+### Step 2: Get a Text Summary
 
 Users without JDK Mission Control or IntelliJ can use `summarize_jfr()` to
 produce a human-readable summary using the JDK's bundled `jfr` CLI tool:
@@ -85,7 +219,7 @@ else:
 
 This summary is compact enough to paste directly into a GitHub issue.
 
-## Step 3: Profile Preprocessing
+### Step 3: Profile Preprocessing
 
 JFR works on **any** CLI method, not just `run()`. If preprocessing is slow,
 profile it the same way:
@@ -111,7 +245,7 @@ result = cli.preprocess(
 The same pattern applies to `validate()`, `discover_config()`, `inspect_jshd()`,
 and all other CLI methods.
 
-## Step 4: Profile a Parameter Sweep
+### Step 4: Profile a Parameter Sweep
 
 JFR also works through `SweepManager.run()` and `run_sweep()`. Each job
 automatically gets its own recording file with the `run_hash` in the filename:
@@ -154,7 +288,7 @@ for job, result in results:
         print(summary.stdout[:500])
 ```
 
-## JfrConfig Options
+### JfrConfig Options
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -175,16 +309,16 @@ JfrConfig(output=Path("recording.jfr"), settings="default")
 JfrConfig(output=Path("recording.jfr"), maxsize="500m")
 ```
 
-## Analyzing .jfr Files
+### Analyzing .jfr Files
 
-### Quick text summary (no tools needed)
+#### Quick text summary (no tools needed)
 
 ```python
 summary = cli.summarize_jfr(Path("recording.jfr"))
 print(summary.stdout)
 ```
 
-### JDK CLI tool (terminal)
+#### JDK CLI tool (terminal)
 
 The `jfr` command is bundled with the JDK:
 
@@ -200,7 +334,7 @@ jfr print --events jdk.GCPhasePause recording.jfr
 jfr print --events jdk.CPULoad recording.jfr
 ```
 
-### GUI tools (detailed analysis)
+#### GUI tools (detailed analysis)
 
 For deeper investigation:
 
@@ -208,7 +342,7 @@ For deeper investigation:
   Download from [adoptium.net](https://adoptium.net/jmc/) and open the `.jfr` file.
 - **IntelliJ IDEA**: Open the `.jfr` file directly (built-in profiler support).
 
-## Reporting Performance Issues
+### Reporting Performance Issues
 
 When filing a [GitHub issue](https://github.com/SchmidtDSE/josh/issues) for a
 performance problem:
@@ -234,7 +368,7 @@ performance problem:
 #| label: cleanup
 import os
 
-for f in ["/tmp/simulation_profile.jfr"]:
+for f in ["/tmp/simulation_profile.jfr", "/tmp/eval_duration_before.csv", "/tmp/eval_duration_after.csv"]:
     if os.path.exists(f):
         os.remove(f)
 ```

@@ -46,7 +46,7 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 - [Adaptive Optimization](tutorials/adaptive-sweep.qmd) - Bayesian parameter optimization with Optuna
 - [Low-Level Components](tutorials/low-level-components.qmd) - JobExpander, manual registry, internals
 - [Debug Output Inspection](tutorials/debug-inspection.qmd) - Trace agent behavior with structured debug log analysis
-- [JVM Profiling](tutorials/jfr-profiling.qmd) - Diagnose performance with Java Flight Recorder
+- [Profiling](tutorials/jfr-profiling.qmd) - Profile model attribute evaluation and JVM performance
 - [Switching Josh Versions](tutorials/switching-versions.qmd) - Stable vs development builds
 - [Remote Execution](tutorials/remote-execution.qmd) - Distribute simulations across Josh Cloud
 
