@@ -399,6 +399,32 @@ class InspectJshdConfig:
 
 
 @dataclass(frozen=True)
+class StageFromMinioConfig:
+    """Arguments for 'java -jar joshsim.jar stageFromMinio' command.
+
+    Downloads all objects under a MinIO prefix to a local directory.
+    MinIO credentials are optional -- joshsim falls back to environment
+    variables (MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
+    MINIO_BUCKET) via its HierarchyConfig.
+
+    Attributes:
+        output_dir: Local directory to download files into.
+        prefix: MinIO object prefix to download from.
+        minio_endpoint: MinIO endpoint URL (optional).
+        minio_access_key: MinIO access key (optional).
+        minio_secret_key: MinIO secret key (optional).
+        minio_bucket: MinIO bucket name (optional).
+    """
+
+    output_dir: Path
+    prefix: str
+    minio_endpoint: str | None = None
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str | None = None
+
+
+@dataclass(frozen=True)
 class InspectExportsConfig:
     """Arguments for 'java -jar joshsim.jar inspect-exports' command.
 
@@ -623,6 +649,37 @@ class JoshCLI:
                 stderr=str(e),
                 command=cmd,
             )
+
+    def stage_from_minio(
+        self,
+        config: StageFromMinioConfig,
+        timeout: float | None = None,
+    ) -> CLIResult:
+        """Download files from MinIO to a local directory.
+
+        Args:
+            config: Stage-from-MinIO configuration.
+            timeout: Timeout in seconds.
+
+        Returns:
+            CLIResult with execution details.
+        """
+        args = [
+            "stageFromMinio",
+            "--output-dir", str(config.output_dir.resolve()),
+            "--prefix", config.prefix,
+        ]
+
+        if config.minio_endpoint:
+            args.extend(["--minio-endpoint", config.minio_endpoint])
+        if config.minio_access_key:
+            args.extend(["--minio-access-key", config.minio_access_key])
+        if config.minio_secret_key:
+            args.extend(["--minio-secret-key", config.minio_secret_key])
+        if config.minio_bucket:
+            args.extend(["--minio-bucket", config.minio_bucket])
+
+        return self._execute(args, timeout=timeout)
 
     def _execute_streaming(
         self,

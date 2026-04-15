@@ -148,7 +148,7 @@ class CellDataLoader:
 
     def load_csv(
         self,
-        csv_path: Path,
+        csv_path: "Path | str",
         run_id: str,
         run_hash: str,
         entity_type: str = "patch",
@@ -166,10 +166,12 @@ class CellDataLoader:
         quoted identifiers (e.g., 'avg.height' stays as "avg.height"), requiring
         double quotes when referenced with direct calls to DuckDB.
 
-        Uses DuckDB's native CSV reader for optimal performance.
+        Uses DuckDB's native CSV reader for optimal performance.  Accepts both
+        local ``Path`` objects and ``s3://`` URL strings (requires httpfs to be
+        loaded on the connection -- see ``configure_s3()``).
 
         Args:
-            csv_path: Path to the CSV file.
+            csv_path: Path to the CSV file, or an ``s3://`` URL string.
             run_id: The run ID this data belongs to.
             run_hash: Run hash for this run.
             entity_type: Type of entity being exported (default: "patch").
@@ -178,14 +180,18 @@ class CellDataLoader:
             Number of rows loaded.
 
         Raises:
-            FileNotFoundError: If csv_path doesn't exist.
+            FileNotFoundError: If csv_path is a local path that doesn't exist.
             ValueError: If CSV is missing required columns or type mismatch.
         """
-        if not csv_path.exists():
-            raise FileNotFoundError(f"CSV not found: {csv_path}")
+        if isinstance(csv_path, str) and csv_path.startswith("s3://"):
+            csv_path_str = csv_path
+        else:
+            csv_path = Path(csv_path)
+            if not csv_path.exists():
+                raise FileNotFoundError(f"CSV not found: {csv_path}")
+            csv_path_str = str(csv_path.resolve())
 
         conn = self.registry.conn
-        csv_path_str = str(csv_path.resolve())
 
         # Read CSV header to identify columns using DuckDB
         header_result = conn.execute(f"SELECT * FROM read_csv_auto('{csv_path_str}') LIMIT 0")

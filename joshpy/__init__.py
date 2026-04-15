@@ -37,6 +37,7 @@ from joshpy.cli import (
     InspectExportsConfig,
     ExportFileInfo,
     ExportPaths,
+    StageFromMinioConfig,
 )
 
 # JFR diagnostics (always available, no external deps)
@@ -119,6 +120,7 @@ try:
         RunInfo,
         SessionSummary,
         DataSummary,
+        configure_s3,
     )
     from joshpy.cell_data import (
         CellDataLoader,
@@ -136,6 +138,7 @@ try:
         SweepManagerBuilder,
         recover_sweep_results,
         load_job_results,
+        ingest_results,
         LoadConfig,
         ResultLoadError,
     )
@@ -182,6 +185,7 @@ __all__ = [
     "InspectExportsConfig",
     "ExportFileInfo",
     "ExportPaths",
+    "StageFromMinioConfig",
     # JFR diagnostics
     "ResourceProfile",
     "CpuProfile",
@@ -243,6 +247,7 @@ __all__ = [
     "RunInfo",
     "SessionSummary",
     "DataSummary",
+    "configure_s3",
     "CellDataLoader",
     "DiagnosticQueries",
     "SimulationDiagnostics",
@@ -252,6 +257,7 @@ __all__ = [
     "SweepManagerBuilder",
     "recover_sweep_results",
     "load_job_results",
+    "ingest_results",
     "LoadConfig",
     "ResultLoadError",
     "HAS_SWEEP",

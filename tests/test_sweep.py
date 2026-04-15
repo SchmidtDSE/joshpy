@@ -1008,5 +1008,273 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
         registry.close()
 
 
+class TestIngestResults(unittest.TestCase):
+    """Tests for ingest_results()."""
+
+    def _make_registry_with_run(self, replicates=3):
+        """Create an in-memory registry with a labeled run for testing."""
+        registry = RunRegistry(":memory:")
+        config = JobConfig(
+            source_path=Path("/tmp/sim.josh"),
+            simulation="Main",
+            replicates=replicates,
+        )
+        session_id = registry.create_session(
+            config=config,
+            experiment_name="test",
+        )
+        # Register a config
+        registry.register_run(
+            session_id=session_id,
+            run_hash="abc123def456",
+            josh_path="/tmp/sim.josh",
+            config_content="config_here",
+            file_mappings=None,
+            parameters={"maxGrowth": 50},
+            josh_content="simulation Main { }",
+        )
+        registry.label_run("abc123def456", "test-label")
+
+        # Start runs so _resolve_run_id_for_hash works and replicate count is right
+        run_id = None
+        for _ in range(replicates):
+            run_id = registry.start_run("abc123def456", session_id=session_id)
+            registry.complete_run(run_id, exit_code=0)
+
+        return registry, session_id, run_id
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_local_file_protocol(self, mock_loader_cls):
+        """ingest_results with file:// protocol loads local CSVs."""
+        from joshpy.sweep import ingest_results
+        from joshpy.cli import ExportFileInfo, ExportPaths
+
+        registry, _, run_id = self._make_registry_with_run()
+
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 100
+        mock_loader_cls.return_value = mock_loader
+
+        mock_cli = MagicMock()
+        mock_cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="file:///tmp/output_{replicate}.csv",
+                    protocol="file",
+                    host="",
+                    path="/tmp/output_{replicate}.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={"organism": None, "patch": None, "agent": None, "disturbance": None},
+        )
+
+        # Create fake CSV files
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for rep in range(3):
+                csv_path = Path(f"/tmp/output_{rep}.csv")
+                csv_path.write_text("step,replicate,val\n0,0,1.0\n")
+
+            try:
+                rows = ingest_results(mock_cli, registry, "test-label", quiet=True)
+                # Should have called load_csv 3 times
+                self.assertEqual(mock_loader.load_csv.call_count, 3)
+            finally:
+                for rep in range(3):
+                    Path(f"/tmp/output_{rep}.csv").unlink(missing_ok=True)
+
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_missing_replicate_skipped(self, mock_loader_cls):
+        """Missing CSVs should be skipped gracefully."""
+        from joshpy.sweep import ingest_results
+        from joshpy.cli import ExportFileInfo, ExportPaths
+
+        registry, _, _ = self._make_registry_with_run()
+
+        mock_loader = MagicMock()
+        mock_loader.load_csv.side_effect = FileNotFoundError("not found")
+        mock_loader_cls.return_value = mock_loader
+
+        mock_cli = MagicMock()
+        mock_cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="file:///tmp/missing_{replicate}.csv",
+                    protocol="file",
+                    host="",
+                    path="/tmp/missing_{replicate}.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={"organism": None, "patch": None, "agent": None, "disturbance": None},
+        )
+
+        rows = ingest_results(mock_cli, registry, "test-label", quiet=True)
+        self.assertEqual(rows, 0)
+        registry.close()
+
+    def test_unknown_label_raises(self):
+        """ingest_results should raise KeyError for unknown label."""
+        from joshpy.sweep import ingest_results
+
+        registry = RunRegistry(":memory:")
+        mock_cli = MagicMock()
+
+        with self.assertRaises(KeyError):
+            ingest_results(mock_cli, registry, "nonexistent-label")
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_minio_protocol_configures_s3(self, mock_loader_cls):
+        """minio:// protocol should call configure_s3 and build s3:// URLs."""
+        from joshpy.sweep import ingest_results
+        from joshpy.cli import ExportFileInfo, ExportPaths
+
+        registry, _, _ = self._make_registry_with_run()
+
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 50
+        mock_loader_cls.return_value = mock_loader
+
+        mock_cli = MagicMock()
+        mock_cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="minio://my-bucket/results/output_{replicate}.csv",
+                    protocol="minio",
+                    host="my-bucket",
+                    path="/results/output_{replicate}.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={"organism": None, "patch": None, "agent": None, "disturbance": None},
+        )
+
+        env = {
+            "MINIO_ENDPOINT": "storage.example.com",
+            "MINIO_ACCESS_KEY": "AKID",
+            "MINIO_SECRET_KEY": "SECRET",
+        }
+        with patch("joshpy.registry.configure_s3") as mock_configure, \
+             patch.dict("os.environ", env):
+            rows = ingest_results(mock_cli, registry, "test-label", quiet=True)
+
+            # Should have configured S3
+            mock_configure.assert_called_once()
+            call_args = mock_configure.call_args
+            self.assertEqual(call_args[0][1], "storage.example.com")
+
+            # load_csv should have been called with s3:// URLs
+            for call in mock_loader.load_csv.call_args_list:
+                csv_arg = call[1].get("csv_path") or call[0][0]
+                self.assertTrue(str(csv_arg).startswith("s3://my-bucket/"))
+
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_minio_missing_creds_raises(self, mock_loader_cls):
+        """minio:// without env vars should raise RuntimeError."""
+        from joshpy.sweep import ingest_results
+        from joshpy.cli import ExportFileInfo, ExportPaths
+
+        registry, _, _ = self._make_registry_with_run()
+
+        mock_cli = MagicMock()
+        mock_cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="minio://bucket/out_{replicate}.csv",
+                    protocol="minio",
+                    host="bucket",
+                    path="/out_{replicate}.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={"organism": None, "patch": None, "agent": None, "disturbance": None},
+        )
+
+        # Clear any minio env vars
+        clean_env = {k: v for k, v in __import__("os").environ.items()
+                     if not k.startswith("MINIO_")}
+        with patch.dict("os.environ", clean_env, clear=True):
+            with self.assertRaises(RuntimeError):
+                ingest_results(mock_cli, registry, "test-label", quiet=True)
+
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_josh_content_fallback(self, mock_loader_cls):
+        """Should use josh_content from registry when josh_path doesn't exist."""
+        from joshpy.sweep import ingest_results
+        from joshpy.cli import ExportFileInfo, ExportPaths
+
+        registry, _, _ = self._make_registry_with_run()
+
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 10
+        mock_loader_cls.return_value = mock_loader
+
+        mock_cli = MagicMock()
+        mock_cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="file:///tmp/out_{replicate}.csv",
+                    protocol="file",
+                    host="",
+                    path="/tmp/out_{replicate}.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={"organism": None, "patch": None, "agent": None, "disturbance": None},
+        )
+
+        # josh_path is /tmp/sim.josh which doesn't exist — should fall back to josh_content
+        rows = ingest_results(mock_cli, registry, "test-label", quiet=True)
+
+        # inspect_exports should have been called with a temp file (not /tmp/sim.josh)
+        call_config = mock_cli.inspect_exports.call_args[0][0]
+        self.assertNotEqual(str(call_config.script), "/tmp/sim.josh")
+        # Temp file has .josh suffix
+        self.assertTrue(str(call_config.script).endswith(".josh"))
+
+        registry.close()
+
+
+class TestConfigureS3(unittest.TestCase):
+    """Tests for configure_s3()."""
+
+    def test_executes_install_and_create_secret(self):
+        """configure_s3 should call INSTALL httpfs and CREATE SECRET."""
+        from joshpy.registry import configure_s3
+
+        mock_conn = MagicMock()
+        configure_s3(mock_conn, "storage.example.com", "AKID", "SECRET")
+
+        # Should have called execute twice: INSTALL + CREATE SECRET
+        self.assertEqual(mock_conn.execute.call_count, 2)
+        first_call = mock_conn.execute.call_args_list[0]
+        self.assertIn("INSTALL httpfs", first_call[0][0])
+        second_call = mock_conn.execute.call_args_list[1]
+        self.assertIn("CREATE OR REPLACE SECRET", second_call[0][0])
+
+
 if __name__ == "__main__":
     unittest.main()

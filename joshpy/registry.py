@@ -72,6 +72,48 @@ def _check_duckdb() -> None:
         )
 
 
+def configure_s3(
+    conn: Any,
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    url_style: str = "path",
+    use_ssl: bool = True,
+) -> None:
+    """Configure a DuckDB connection for S3/MinIO access via httpfs.
+
+    Installs and loads the httpfs extension, then creates an S3 secret
+    so ``read_csv_auto('s3://bucket/key.csv')`` works transparently.
+
+    Credential resolution is the caller's responsibility -- this function
+    takes explicit values.  ``ingest_results()`` resolves credentials from
+    environment variables (``MINIO_ENDPOINT``, ``MINIO_ACCESS_KEY``,
+    ``MINIO_SECRET_KEY``) before calling here.
+
+    Args:
+        conn: DuckDB connection object.
+        endpoint: S3-compatible endpoint (e.g. ``"storage.googleapis.com"``).
+        access_key: Access key / key ID.
+        secret_key: Secret key.
+        url_style: ``"path"`` (default, MinIO) or ``"vhost"`` (AWS).
+        use_ssl: Use HTTPS (default True).
+    """
+    conn.execute("INSTALL httpfs; LOAD httpfs;")
+    conn.execute(
+        """
+        CREATE OR REPLACE SECRET (
+            TYPE s3,
+            KEY_ID ?,
+            SECRET ?,
+            ENDPOINT ?,
+            URL_STYLE ?,
+            USE_SSL ?
+        )
+        """,
+        [access_key, secret_key, endpoint, url_style, use_ssl],
+    )
+
+
 def _get_git_hash() -> str | None:
     """Get current git HEAD hash, or None if not in a git repo."""
     try:

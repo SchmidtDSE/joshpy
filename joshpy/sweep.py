@@ -421,6 +421,253 @@ def _get_export_path(export_paths: ExportPaths, export_type: str) -> str | None:
         raise ValueError(f"Unknown export_type: {export_type}. Use 'patch', 'meta', or 'entity'.")
 
 
+def ingest_results(
+    cli: JoshCLI,
+    registry: RunRegistry,
+    label_or_hash: str,
+    *,
+    export_type: str = "patch",
+    download: bool = False,
+    output_dir: Path | None = None,
+    minio_bucket: str | None = None,
+    quiet: bool = False,
+) -> int:
+    """Recover and ingest results into the registry by label or run hash.
+
+    Looks up the run in the registry, discovers export paths via
+    ``inspect_exports``, and loads CSVs into the ``cell_data`` table.
+
+    For ``minio://`` export paths the default behaviour reads CSVs directly
+    from S3 into DuckDB via ``httpfs`` (no local download).  Set
+    ``download=True`` to download via ``stageFromMinio`` first.
+
+    Missing CSVs (e.g. from an OOM'd replicate) are skipped gracefully.
+
+    Args:
+        cli: JoshCLI instance.
+        registry: RunRegistry where results will be loaded.
+        label_or_hash: Human-readable label or 12-char run hash.
+        export_type: Type of export to load (``"patch"``, ``"meta"``, ``"entity"``).
+        download: If True, download CSVs locally via ``stageFromMinio``
+            instead of reading directly from S3.
+        output_dir: Local directory for downloads (temp dir if None).
+            Only used when ``download=True``.
+        minio_bucket: Override the MinIO bucket (default: parsed from
+            the ``minio://`` export path).
+        quiet: Suppress progress output.
+
+    Returns:
+        Total number of rows loaded.
+
+    Raises:
+        KeyError: If label/hash not found in registry.
+        RuntimeError: If no export path configured for *export_type*, or
+            if ``inspect_exports`` fails.
+
+    Examples:
+        >>> # Recover results for a labeled run (reads from S3)
+        >>> rows = ingest_results(cli, registry, "my-label")
+
+        >>> # Download locally first, then load
+        >>> rows = ingest_results(cli, registry, "my-label", download=True)
+    """
+    import os
+    import tempfile
+
+    # 1. Resolve label/hash to run metadata
+    run_hash = registry._resolve_label_or_hash(label_or_hash)
+    config = registry.get_config_by_hash(run_hash)
+    if config is None:
+        raise KeyError(f"No config found for run hash: {run_hash}")
+
+    session = registry.get_session(config.session_id)
+    if session is None:
+        raise KeyError(f"No session found: {config.session_id}")
+
+    simulation = session.simulation
+
+    # Determine replicate count: session metadata > job_runs count > fallback to 1
+    total_replicates = session.total_replicates
+    if not total_replicates:
+        # Try job_config metadata from session
+        job_config = session.job_config
+        if job_config is not None:
+            total_replicates = getattr(job_config, "replicates", None)
+    if not total_replicates:
+        # Count actual job_runs entries for this hash
+        runs = registry.get_runs_for_hash(run_hash)
+        total_replicates = len(runs) if runs else 1
+
+    if not quiet:
+        label_str = f" ({config.label})" if config.label else ""
+        print(f"Ingesting results for {run_hash}{label_str}")
+        print(f"  Simulation: {simulation}, Replicates: {total_replicates}")
+
+    # 2. Get josh source on disk for inspect_exports
+    josh_path: Path | None = None
+    _temp_josh: str | None = None
+
+    if config.josh_path and Path(config.josh_path).exists():
+        josh_path = Path(config.josh_path)
+    elif config.josh_content:
+        fd, _temp_josh = tempfile.mkstemp(suffix=".josh")
+        os.close(fd)
+        Path(_temp_josh).write_text(config.josh_content)
+        josh_path = Path(_temp_josh)
+    else:
+        raise RuntimeError(
+            f"Cannot inspect exports: no josh source available for {run_hash}. "
+            "Neither josh_path exists on disk nor josh_content stored in registry."
+        )
+
+    try:
+        # 3. Discover export paths
+        export_paths = cli.inspect_exports(
+            InspectExportsConfig(script=josh_path, simulation=simulation)
+        )
+
+        export_info = export_paths.export_files.get(export_type)
+        if export_info is None:
+            raise RuntimeError(
+                f"No {export_type} export configured in {josh_path}. "
+                f"Check that exportFiles.{export_type} is set in your simulation."
+            )
+
+        path_template = export_info.path
+        is_minio = export_info.protocol == "minio"
+
+        if not quiet:
+            proto = f"minio://{export_info.host}" if is_minio else "local"
+            print(f"  Export path: {proto}{path_template}")
+
+        # 4. Configure S3 or download
+        dl_dir: Path | None = None
+
+        if is_minio and not download:
+            # Direct S3 read -- configure httpfs on the DuckDB connection
+            from joshpy.registry import configure_s3
+
+            endpoint = os.environ.get("MINIO_ENDPOINT", "")
+            access_key = os.environ.get("MINIO_ACCESS_KEY", "")
+            secret_key = os.environ.get("MINIO_SECRET_KEY", "")
+
+            if not endpoint or not access_key or not secret_key:
+                raise RuntimeError(
+                    "MINIO_ENDPOINT, MINIO_ACCESS_KEY, and MINIO_SECRET_KEY "
+                    "environment variables are required for S3 reads."
+                )
+
+            configure_s3(registry.conn, endpoint, access_key, secret_key)
+            bucket = minio_bucket or export_info.host
+
+            if not quiet:
+                print(f"  Reading directly from S3 (bucket: {bucket})")
+
+        elif is_minio and download:
+            from joshpy.cli import StageFromMinioConfig
+
+            bucket = minio_bucket or export_info.host
+            # Derive prefix from path template directory
+            prefix = str(Path(path_template).parent).lstrip("/")
+            if prefix and not prefix.endswith("/"):
+                prefix += "/"
+
+            dl_dir = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="joshpy-ingest-"))
+            dl_dir.mkdir(parents=True, exist_ok=True)
+
+            if not quiet:
+                print(f"  Downloading from minio://{bucket}/{prefix} to {dl_dir}")
+
+            stage_result = cli.stage_from_minio(
+                StageFromMinioConfig(
+                    output_dir=dl_dir,
+                    prefix=prefix,
+                    minio_bucket=bucket,
+                )
+            )
+            if not stage_result.success:
+                raise RuntimeError(
+                    f"stageFromMinio failed (exit {stage_result.exit_code}): "
+                    f"{stage_result.stderr}"
+                )
+
+        # 5. Resolve run_id
+        run_id = registry._resolve_run_id_for_hash(run_hash)
+
+        # 6. Load CSVs for each replicate
+        loader = CellDataLoader(registry)
+        total_rows = 0
+        loaded = 0
+        skipped = 0
+
+        # Build template vars from config metadata
+        template_vars_base: dict[str, Any] = {
+            "simulation": simulation,
+        }
+        if config.parameters:
+            template_vars_base.update(config.parameters)
+        if config.label:
+            template_vars_base["label"] = config.label
+
+        for rep in range(total_replicates):
+            template_vars = {**template_vars_base, "replicate": rep}
+
+            try:
+                resolved = export_paths.resolve_path(path_template, **template_vars)
+            except KeyError:
+                if not quiet:
+                    print(f"  Replicate {rep}: template variable missing, skipping")
+                skipped += 1
+                continue
+
+            # Determine the actual path/URL to load
+            if is_minio and not download:
+                # Direct S3 read
+                resolved_path = resolved.as_posix().lstrip("/")
+                csv_target: Path | str = f"s3://{bucket}/{resolved_path}"
+            elif is_minio and download:
+                # Load from downloaded file
+                csv_target = dl_dir / resolved.name
+            else:
+                # Local file
+                csv_target = resolved
+
+            # Try loading -- skip gracefully if missing
+            try:
+                rows = loader.load_csv(
+                    csv_path=csv_target,
+                    run_id=run_id,
+                    run_hash=run_hash,
+                    entity_type=export_type,
+                )
+                total_rows += rows
+                loaded += 1
+                if not quiet:
+                    print(f"  Replicate {rep}: {rows:,} rows loaded")
+            except FileNotFoundError:
+                skipped += 1
+                if not quiet:
+                    print(f"  Replicate {rep}: not found, skipping")
+            except Exception as e:
+                skipped += 1
+                if not quiet:
+                    err_str = str(e)
+                    # DuckDB raises IOException for missing S3 objects
+                    if "HTTP 404" in err_str or "NoSuchKey" in err_str:
+                        print(f"  Replicate {rep}: not found in S3, skipping")
+                    else:
+                        print(f"  Replicate {rep}: error loading: {e}")
+
+        if not quiet:
+            print(f"\nDone: {total_rows:,} rows loaded ({loaded} replicates, {skipped} skipped)")
+
+        return total_rows
+
+    finally:
+        if _temp_josh:
+            Path(_temp_josh).unlink(missing_ok=True)
+
+
 @dataclass
 class SweepManager:
     """Convenience orchestrator for parameter sweeps.
@@ -695,6 +942,49 @@ class SweepManager:
             registry=self.registry,
             run_ids=self._last_run_ids,
             export_type=export_type,
+            quiet=quiet,
+        )
+
+    def ingest(
+        self,
+        *,
+        export_type: str = "patch",
+        download: bool = False,
+        output_dir: Path | None = None,
+        minio_bucket: str | None = None,
+        quiet: bool = False,
+    ) -> int:
+        """Recover and ingest results from MinIO (or local) by label.
+
+        Uses ``ingest_results()`` to look up the run by label, discover
+        export paths, and load CSVs into the registry.  Unlike
+        ``load_results()`` this does not require a prior ``run()`` call --
+        it works from the registry alone.
+
+        Args:
+            export_type: Type of export to load ("patch", "meta", "entity").
+            download: If True, download CSVs locally instead of S3 direct read.
+            output_dir: Download destination (only used with download=True).
+            minio_bucket: Override MinIO bucket name.
+            quiet: Suppress progress output.
+
+        Returns:
+            Total number of rows loaded.
+
+        Examples:
+            >>> manager.ingest()  # reads directly from S3
+            >>> manager.ingest(download=True, output_dir=Path("./local"))
+        """
+        label = self._label if hasattr(self, "_label") and self._label else None
+        identifier = label or self.job_set.jobs[0].run_hash
+        return ingest_results(
+            cli=self.cli,
+            registry=self.registry,
+            label_or_hash=identifier,
+            export_type=export_type,
+            download=download,
+            output_dir=output_dir,
+            minio_bucket=minio_bucket,
             quiet=quiet,
         )
 

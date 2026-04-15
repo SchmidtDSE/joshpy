@@ -446,9 +446,9 @@ class TestJoshCLI(unittest.TestCase):
 
         cmd = mock_run.call_args[0][0]
         self.assertIn("--data", cmd)
-        # Find the data value
+        # Find the data value — name gets extension appended when missing
         data_idx = cmd.index("--data")
-        self.assertIn("editor=", cmd[data_idx + 1])
+        self.assertIn("editor.jshc=", cmd[data_idx + 1])
 
     @patch("subprocess.run")
     def test_run_with_custom_tags(self, mock_run):
@@ -1444,6 +1444,98 @@ class TestStreamOutput(unittest.TestCase):
         mock_popen.assert_called_once()
         self.assertTrue(result.success)
         self.assertIn("remote step", result.stdout)
+
+
+class TestStageFromMinioConfig(unittest.TestCase):
+    """Tests for StageFromMinioConfig."""
+
+    def test_defaults(self):
+        from joshpy.cli import StageFromMinioConfig
+
+        config = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"),
+            prefix="batch-jobs/abc/inputs/",
+        )
+        self.assertEqual(config.output_dir, Path("/tmp/out"))
+        self.assertEqual(config.prefix, "batch-jobs/abc/inputs/")
+        self.assertIsNone(config.minio_endpoint)
+        self.assertIsNone(config.minio_access_key)
+        self.assertIsNone(config.minio_secret_key)
+        self.assertIsNone(config.minio_bucket)
+
+    def test_frozen(self):
+        from joshpy.cli import StageFromMinioConfig
+
+        config = StageFromMinioConfig(output_dir=Path("/tmp"), prefix="p/")
+        with self.assertRaises(AttributeError):
+            config.prefix = "other/"
+
+
+class TestStageFromMinio(unittest.TestCase):
+    """Tests for JoshCLI.stage_from_minio()."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run):
+        """stage_from_minio() should build correct CLI args."""
+        from joshpy.cli import StageFromMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"),
+            prefix="batch-jobs/abc/inputs/",
+        )
+        cli.stage_from_minio(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("stageFromMinio", cmd)
+        self.assertIn("--output-dir", cmd)
+        self.assertIn("--prefix", cmd)
+        prefix_idx = cmd.index("--prefix")
+        self.assertEqual(cmd[prefix_idx + 1], "batch-jobs/abc/inputs/")
+
+    @patch("subprocess.run")
+    def test_minio_flags_only_when_set(self, mock_run):
+        """Only non-None minio flags should be passed."""
+        from joshpy.cli import StageFromMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        # With no minio flags
+        config_no_minio = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"), prefix="p/"
+        )
+        cli.stage_from_minio(config_no_minio)
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--minio-endpoint", cmd)
+        self.assertNotIn("--minio-access-key", cmd)
+        self.assertNotIn("--minio-secret-key", cmd)
+        self.assertNotIn("--minio-bucket", cmd)
+
+        # With all minio flags
+        config_with_minio = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"),
+            prefix="p/",
+            minio_endpoint="https://storage.example.com",
+            minio_access_key="AKID",
+            minio_secret_key="SECRET",
+            minio_bucket="my-bucket",
+        )
+        cli.stage_from_minio(config_with_minio)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--minio-endpoint", cmd)
+        self.assertIn("--minio-access-key", cmd)
+        self.assertIn("--minio-secret-key", cmd)
+        self.assertIn("--minio-bucket", cmd)
+        ep_idx = cmd.index("--minio-endpoint")
+        self.assertEqual(cmd[ep_idx + 1], "https://storage.example.com")
+        bucket_idx = cmd.index("--minio-bucket")
+        self.assertEqual(cmd[bucket_idx + 1], "my-bucket")
 
 
 if __name__ == "__main__":
