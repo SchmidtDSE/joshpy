@@ -1,0 +1,44 @@
+start simulation MeadowModel
+
+  grid.size = 1 count
+  grid.low = 0 count latitude, 0 count longitude
+  grid.high = 3 count latitude, 3 count longitude
+
+  steps.low = 0 count
+  steps.high = 10 count
+
+  exportFiles.patch = "file:///tmp/eval_duration_before.csv"
+
+end simulation
+
+
+start patch Default
+
+  Tree.init = create 200 count of Tree
+  Shrub.init = create 5000 count of Shrub
+
+  # Shrub cover as fraction of max capacity (10000)
+  shrubPctCover.step = count(Shrub) / 10000
+
+  export.avgTreeHeight.step = mean(Tree.height)
+  export.shrubPctCover.step = shrubPctCover
+  export.treeHeightMs.step = sum(Tree.height.evalDuration)
+  export.shrubCoverMs.step = sum(Shrub.cover.evalDuration)
+
+end patch
+
+
+start organism Tree
+
+  height.init = sample uniform from 1 m to 5 m
+  height.step = prior.height + sample uniform from 0 m to 0.5 m
+
+end organism
+
+
+start organism Shrub
+
+  cover.init = sample uniform from 0% to 5%
+  cover.step = limit prior.cover + sample uniform from 0% to 0.5% to [0%, 100%]
+
+end organism
