@@ -537,6 +537,7 @@ class SweepManager:
         objective: Any | None = None,
         jfr: Any | None = None,  # JfrConfig
         enable_profiler: bool = False,
+        stream_output: bool = False,
         bottle: str | None = None,
         bottle_dir: Path | None = None,
         bottle_omit_jshd: bool = False,
@@ -569,6 +570,8 @@ class SweepManager:
             jfr: Optional JFR profiling configuration. When provided, each job
                 gets its own recording file with the run_hash in the filename.
             enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
+            stream_output: If True, stream JAR stdout/stderr to the terminal
+                in real time while still capturing them in CLIResult.
 
         Returns:
             SweepResult for batch strategies, AdaptiveSweepResult for adaptive.
@@ -620,6 +623,7 @@ class SweepManager:
                 stop_on_failure=stop_on_failure,
                 jfr=jfr,
                 enable_profiler=enable_profiler,
+                stream_output=stream_output,
             )
         else:
             # Use batch runner
@@ -637,6 +641,7 @@ class SweepManager:
                 quiet=quiet,
                 jfr=jfr,
                 enable_profiler=enable_profiler,
+                stream_output=stream_output,
                 bottle=bottle,
                 bottle_dir=bottle_dir,
                 bottle_omit_jshd=bottle_omit_jshd,

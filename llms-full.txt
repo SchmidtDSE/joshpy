@@ -210,7 +210,7 @@ result = cli.run(RunConfig(
     use_float64=True,  # Faster but less precise
     parallel=True,     # Parallel patch processing
     verbose=True,
-))
+), stream_output=True)  # Stream JAR progress to terminal in real time
 
 if result.success:
     print(f"Simulation completed successfully")
@@ -240,6 +240,18 @@ else:
 | `upload_data` | bool | Upload data to MinIO |
 | `output_steps` | str | Step range to output (e.g., "0-10,50") |
 | `seed` | int | Random seed for reproducibility |
+
+#### stream_output (cli.run / cli.run_remote keyword argument)
+
+Pass `stream_output=True` to `cli.run()` or `cli.run_remote()` to stream JAR
+stdout/stderr to the terminal in real time while still capturing them in
+`CLIResult`. By default (`stream_output=False`), output is captured silently.
+
+```python
+# See step-by-step progress from the JAR as it runs
+result = cli.run(config, stream_output=True)
+# stdout is still available in result.stdout after the run completes
+```
 
 ### Preprocessing Geospatial Data
 
@@ -926,6 +938,7 @@ for job, result in results:
 | `stop_on_failure` | bool | If True, stop on first failure (default: True) |
 | `dry_run` | bool | If True, print plan without executing (default: False) |
 | `quiet` | bool | If True, suppress progress output (default: False) |
+| `stream_output` | bool | If True, stream JAR stdout/stderr to terminal in real time (default: False) |
 
 #### SweepResult
 
@@ -1176,6 +1189,7 @@ results = manager.run(dry_run=True)
 | `quiet` | bool | Suppress progress output (default: False) |
 | `on_complete` | Callable | Callback after each job |
 | `objective` | ObjectiveFn | Objective function for adaptive strategies |
+| `stream_output` | bool | Stream JAR stdout/stderr to terminal in real time (default: False) |
 
 ### Loading Results
 
