@@ -1323,5 +1323,128 @@ class TestInspectExportsIntegration(unittest.TestCase):
             cli.inspect_exports(config)
 
 
+class TestStreamOutput(unittest.TestCase):
+    """Tests for stream_output parameter in JoshCLI."""
+
+    JAR_MODE = JarMode.DEV
+
+    @patch("subprocess.run")
+    def test_default_uses_subprocess_run(self, mock_run):
+        """stream_output=False (default) should use subprocess.run."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="out", stderr="")
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(script=Path("/path/sim.josh"), simulation="Main")
+
+        result = cli.run(config)
+
+        mock_run.assert_called_once()
+        self.assertTrue(result.success)
+        self.assertEqual(result.stdout, "out")
+
+    @patch("subprocess.Popen")
+    def test_stream_output_uses_popen(self, mock_popen):
+        """stream_output=True should use Popen, not subprocess.run."""
+        # Set up a mock process whose stdout/stderr are iterable
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["Step 1 done\n", "Step 2 done\n"])
+        mock_proc.stderr = iter([""])
+        mock_proc.wait.return_value = None
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(script=Path("/path/sim.josh"), simulation="Main")
+
+        result = cli.run(config, stream_output=True)
+
+        mock_popen.assert_called_once()
+        self.assertTrue(result.success)
+        self.assertIn("Step 1 done", result.stdout)
+        self.assertIn("Step 2 done", result.stdout)
+
+    @patch("subprocess.Popen")
+    def test_stream_output_captures_stderr(self, mock_popen):
+        """stream_output=True should capture stderr in CLIResult."""
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["ok\n"])
+        mock_proc.stderr = iter(["warning: something\n"])
+        mock_proc.wait.return_value = None
+        mock_proc.returncode = 1
+        mock_popen.return_value = mock_proc
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(script=Path("/path/sim.josh"), simulation="Main")
+
+        result = cli.run(config, stream_output=True)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("warning: something", result.stderr)
+
+    @patch("subprocess.Popen")
+    def test_stream_output_writes_to_sys_stdout(self, mock_popen):
+        """stream_output=True should write lines to sys.stdout."""
+        import io
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["hello\n"])
+        mock_proc.stderr = iter([])
+        mock_proc.wait.return_value = None
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(script=Path("/path/sim.josh"), simulation="Main")
+
+        captured = io.StringIO()
+        with patch("sys.stdout", captured):
+            cli.run(config, stream_output=True)
+
+        self.assertIn("hello", captured.getvalue())
+
+    @patch("subprocess.Popen")
+    def test_stream_output_timeout(self, mock_popen):
+        """stream_output=True with timeout should report timeout."""
+        import subprocess as sp
+
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["partial\n"])
+        mock_proc.stderr = iter([])
+        mock_proc.wait.side_effect = sp.TimeoutExpired(cmd=["java"], timeout=5)
+        mock_proc.kill.return_value = None
+        mock_popen.return_value = mock_proc
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(script=Path("/path/sim.josh"), simulation="Main")
+
+        result = cli.run(config, stream_output=True, timeout=5)
+
+        self.assertEqual(result.exit_code, -1)
+        self.assertIn("timed out", result.stderr)
+
+    @patch("subprocess.Popen")
+    def test_stream_output_run_remote(self, mock_popen):
+        """stream_output should also work with run_remote()."""
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter(["remote step\n"])
+        mock_proc.stderr = iter([])
+        mock_proc.wait.return_value = None
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunRemoteConfig(
+            script=Path("/path/sim.josh"),
+            simulation="Main",
+            api_key="key",
+        )
+
+        result = cli.run_remote(config, stream_output=True)
+
+        mock_popen.assert_called_once()
+        self.assertTrue(result.success)
+        self.assertIn("remote step", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

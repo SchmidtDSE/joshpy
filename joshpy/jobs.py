@@ -1631,6 +1631,7 @@ def run_sweep(
     quiet: bool = False,
     jfr: JfrConfig | None = None,
     enable_profiler: bool = False,
+    stream_output: bool = False,
     bottle: str | None = None,
     bottle_dir: Path | None = None,
     bottle_omit_jshd: bool = False,
@@ -1666,6 +1667,8 @@ def run_sweep(
         jfr: Optional JFR profiling configuration. When provided, each job
             gets its own recording file with the run_hash in the filename.
         enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
+        stream_output: If True, stream JAR stdout/stderr to the terminal
+            in real time while still capturing them in CLIResult.
 
     Returns:
         SweepResult with all job outcomes.
@@ -1770,10 +1773,10 @@ def run_sweep(
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-                result = cli.run_remote(run_config, jfr=job_jfr)
+                result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
             else:
                 run_config = to_run_config(job, enable_profiler=enable_profiler)
-                result = cli.run(run_config, jfr=job_jfr)
+                result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
 
             job_results.append((job, result))
 

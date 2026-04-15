@@ -790,6 +790,7 @@ def run_adaptive_sweep(
     stop_on_failure: bool = True,
     jfr: Any | None = None,  # JfrConfig
     enable_profiler: bool = False,
+    stream_output: bool = False,
 ) -> Any:  # AdaptiveSweepResult
     """Run an adaptive sweep using Optuna.
 
@@ -971,10 +972,10 @@ def run_adaptive_sweep(
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-                result = cli.run_remote(run_config, jfr=job_jfr)
+                result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
             else:
                 run_config = to_run_config(job, enable_profiler=enable_profiler)
-                result = cli.run(run_config, jfr=job_jfr)
+                result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
 
             job_results.append((job, result))
 

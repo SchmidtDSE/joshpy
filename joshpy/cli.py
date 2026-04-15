@@ -562,6 +562,7 @@ class JoshCLI:
         timeout: float | None = None,
         capture_output: bool = True,
         jfr: JfrConfig | None = None,
+        stream_output: bool = False,
     ) -> CLIResult:
         """Execute a CLI command.
 
@@ -571,6 +572,9 @@ class JoshCLI:
             capture_output: Whether to capture stdout/stderr.
             jfr: Optional JFR configuration for profiling. When provided,
                 adds ``-XX:StartFlightRecording`` JVM flag before ``-jar``.
+            stream_output: If True, stream stdout/stderr to the terminal
+                in real time while still capturing them in CLIResult.
+                Overrides capture_output when True.
 
         Returns:
             CLIResult with execution details.
@@ -587,6 +591,9 @@ class JoshCLI:
             jvm_flags.append(f"-XX:StartFlightRecording={jfr_opts}")
 
         cmd = [self.java_path] + jvm_flags + ["-jar", str(self._resolved_jar)] + args
+
+        if stream_output:
+            return self._execute_streaming(cmd, timeout=timeout)
 
         try:
             proc = subprocess.run(
@@ -617,11 +624,91 @@ class JoshCLI:
                 command=cmd,
             )
 
+    def _execute_streaming(
+        self,
+        cmd: list[str],
+        timeout: float | None = None,
+    ) -> CLIResult:
+        """Execute a command, streaming stdout/stderr while capturing both.
+
+        Uses Popen with reader threads to tee output to the terminal
+        in real time while accumulating it for CLIResult.
+
+        Args:
+            cmd: Full command list to execute.
+            timeout: Timeout in seconds (None for no timeout).
+
+        Returns:
+            CLIResult with captured output.
+        """
+        import sys
+        import threading
+
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+
+        def _reader(stream, sink: list[str], dest):
+            """Read lines from *stream*, write to *dest*, accumulate in *sink*."""
+            for line in stream:
+                dest.write(line)
+                dest.flush()
+                sink.append(line)
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=self.working_dir,
+            )
+
+            out_thread = threading.Thread(
+                target=_reader, args=(proc.stdout, stdout_lines, sys.stdout),
+            )
+            err_thread = threading.Thread(
+                target=_reader, args=(proc.stderr, stderr_lines, sys.stderr),
+            )
+            out_thread.start()
+            err_thread.start()
+
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                out_thread.join()
+                err_thread.join()
+                return CLIResult(
+                    exit_code=-1,
+                    stdout="".join(stdout_lines),
+                    stderr=f"Command timed out after {timeout} seconds",
+                    command=cmd,
+                )
+
+            out_thread.join()
+            err_thread.join()
+
+            return CLIResult(
+                exit_code=proc.returncode,
+                stdout="".join(stdout_lines),
+                stderr="".join(stderr_lines),
+                command=cmd,
+            )
+        except Exception as e:
+            return CLIResult(
+                exit_code=-1,
+                stdout="".join(stdout_lines),
+                stderr=str(e),
+                command=cmd,
+            )
+
     def run(
         self,
         config: RunConfig,
         timeout: float | None = None,
         jfr: JfrConfig | None = None,
+        stream_output: bool = False,
     ) -> CLIResult:
         """Execute a simulation.
 
@@ -629,6 +716,8 @@ class JoshCLI:
             config: Run configuration.
             timeout: Timeout in seconds.
             jfr: Optional JFR profiling configuration.
+            stream_output: If True, stream JAR stdout/stderr to the
+                terminal in real time while still capturing them.
 
         Returns:
             CLIResult with execution details.
@@ -674,13 +763,14 @@ class JoshCLI:
         if config.enable_profiler:
             args.append("--enable-profiler")
 
-        return self._execute(args, timeout=timeout, jfr=jfr)
+        return self._execute(args, timeout=timeout, jfr=jfr, stream_output=stream_output)
 
     def run_remote(
         self,
         config: RunRemoteConfig,
         timeout: float | None = None,
         jfr: JfrConfig | None = None,
+        stream_output: bool = False,
     ) -> CLIResult:
         """Execute a simulation on Josh Cloud.
 
@@ -688,6 +778,8 @@ class JoshCLI:
             config: Run remote configuration.
             timeout: Timeout in seconds.
             jfr: Optional JFR profiling configuration.
+            stream_output: If True, stream JAR stdout/stderr to the
+                terminal in real time while still capturing them.
 
         Returns:
             CLIResult with execution details.
@@ -715,7 +807,7 @@ class JoshCLI:
         for name, value in config.custom_tags.items():
             args.extend(["--custom-tag", f"{name}={value}"])
 
-        return self._execute(args, timeout=timeout, jfr=jfr)
+        return self._execute(args, timeout=timeout, jfr=jfr, stream_output=stream_output)
 
     def preprocess(
         self,
