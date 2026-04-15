@@ -1167,7 +1167,7 @@ class TestIngestResults(unittest.TestCase):
             "MINIO_ACCESS_KEY": "AKID",
             "MINIO_SECRET_KEY": "SECRET",
         }
-        with patch("joshpy.registry.configure_s3") as mock_configure, \
+        with patch("joshpy.sweep.configure_s3") as mock_configure, \
              patch.dict("os.environ", env):
             rows = ingest_results(mock_cli, registry, "test-label", quiet=True)
 
