@@ -1476,8 +1476,9 @@ class TestStageFromMinio(unittest.TestCase):
 
     JAR_MODE = JarMode.LOCAL
 
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
     @patch("subprocess.run")
-    def test_basic_args(self, mock_run):
+    def test_basic_args(self, mock_run, _mock_jar):
         """stage_from_minio() should build correct CLI args."""
         from joshpy.cli import StageFromMinioConfig
 
@@ -1497,8 +1498,9 @@ class TestStageFromMinio(unittest.TestCase):
         prefix_idx = cmd.index("--prefix")
         self.assertEqual(cmd[prefix_idx + 1], "batch-jobs/abc/inputs/")
 
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
     @patch("subprocess.run")
-    def test_minio_flags_only_when_set(self, mock_run):
+    def test_minio_flags_only_when_set(self, mock_run, _mock_jar):
         """Only non-None minio flags should be passed."""
         from joshpy.cli import StageFromMinioConfig
 

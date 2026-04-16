@@ -319,7 +319,8 @@ class TestDiffCLI(unittest.TestCase):
             file_registry.label_run("h1", "run_a")
             file_registry.close()
 
-            with patch("sys.argv", ["prog", str(db_path), "--view", "run_a"]):
+            with patch("sys.argv", ["prog", str(db_path), "--view", "run_a"]), \
+                 patch("joshpy.inspect._core._launch_ide"):
                 result = main()
 
             self.assertEqual(result, 0)
