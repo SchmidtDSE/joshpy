@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  unit-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -20,5 +20,40 @@ jobs:
           pixi-version: latest
           environments: dev
 
-      - name: Run tests
+      - name: Run unit tests
         run: pixi run -e dev test
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    services:
+      minio:
+        image: bitnamilegacy/minio:latest
+        ports:
+          - 9000:9000
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          MINIO_DEFAULT_BUCKETS: josh-test-bucket:public
+          MINIO_SCHEME: http
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/ready || curl -f http://localhost:9000/minio/health/live"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: prefix-dev/setup-pixi@a0af7a228712d6121d37aba47adf55c1332c9c2e # v0.9.4
+        with:
+          pixi-version: latest
+          environments: dev
+
+      - name: Verify MinIO is ready
+        run: curl -f http://localhost:9000/minio/health/ready
+
+      - name: Download Josh JAR
+        run: pixi run get-jars
+
+      - name: Run integration tests
+        run: pixi run -e dev test-integration

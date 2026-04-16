@@ -49,7 +49,8 @@ dev = { features = ["dev"], solve-group = "default" }
 [tasks]
 install = "pip install -e '.[full]' --quiet"
 install-dev = "pip install -e '.[dev]' --quiet"
-test = { cmd = "pytest tests/ -v", depends-on = ["install-dev"] }
+test = { cmd = "pytest tests/ -v -m 'not integration'", depends-on = ["install-dev"] }
+test-integration = { cmd = "pytest tests/ -v -m integration", depends-on = ["install-dev"] }
 lint = "ruff check joshpy/"
 typecheck = "mypy joshpy/"
 format = "ruff format joshpy/"
