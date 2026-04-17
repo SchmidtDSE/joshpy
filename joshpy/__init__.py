@@ -38,6 +38,9 @@ from joshpy.cli import (
     ExportFileInfo,
     ExportPaths,
     StageFromMinioConfig,
+    StageToMinioConfig,
+    BatchRemoteConfig,
+    PreprocessBatchConfig,
 )
 
 # JFR diagnostics (always available, no external deps)
@@ -199,6 +202,9 @@ __all__ = [
     "ExportFileInfo",
     "ExportPaths",
     "StageFromMinioConfig",
+    "StageToMinioConfig",
+    "BatchRemoteConfig",
+    "PreprocessBatchConfig",
     # JFR diagnostics
     "ResourceProfile",
     "CpuProfile",
