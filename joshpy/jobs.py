@@ -1336,6 +1336,52 @@ def to_run_remote_config(
     )
 
 
+def to_batch_remote_config(
+    job: ExpandedJob,
+    target: str,
+    *,
+    no_wait: bool = False,
+    poll_interval: int | None = None,
+    timeout: int | None = None,
+) -> BatchRemoteConfig:
+    """Convert an ExpandedJob to a BatchRemoteConfig for batch remote execution.
+
+    Unlike ``to_run_config``, batch remote takes a ``.josh`` file (not a
+    directory) and uses ``--custom-tag`` to pass config/data file metadata.
+    The target profile controls MinIO staging.
+
+    Args:
+        job: The expanded job to convert.
+        target: Target profile name (e.g. ``"gke-test"``).
+        no_wait: If True, dispatch and return immediately.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Job timeout in seconds (optional).
+
+    Returns:
+        BatchRemoteConfig ready for use with JoshCLI.batch_remote().
+
+    Raises:
+        ValueError: If job.source_path is None.
+    """
+    from joshpy.cli import BatchRemoteConfig
+
+    if job.source_path is None:
+        raise ValueError(
+            "ExpandedJob.source_path is required for to_batch_remote_config()"
+        )
+
+    return BatchRemoteConfig(
+        script_or_dir=job.source_path,
+        simulation=job.simulation,
+        target=target,
+        replicates=job.replicates,
+        no_wait=no_wait,
+        poll_interval=poll_interval,
+        timeout=timeout,
+        custom_tags=job.custom_tags,
+    )
+
+
 @dataclass
 class SweepResult:
     """Results from running a parameter sweep.
@@ -1625,6 +1671,12 @@ def run_sweep(
     remote: bool = False,
     api_key: str | None = None,
     endpoint: str | None = None,
+    batch_remote: bool = False,
+    target: str | None = None,
+    batch_no_wait: bool = False,
+    poll_interval: int = 10,
+    batch_timeout: int | None = None,
+    auto_ingest: bool = True,
     on_complete: Callable[[ExpandedJob, Any], None] | None = None,
     stop_on_failure: bool = True,
     dry_run: bool = False,
@@ -1656,6 +1708,16 @@ def run_sweep(
         remote: If True, use run_remote() for cloud execution.
         api_key: Josh Cloud API key (required if remote=True).
         endpoint: Custom Josh Cloud endpoint URL.
+        batch_remote: If True, use batch_remote() for MinIO-staged execution.
+            Mutually exclusive with ``remote``.
+        target: Target profile name (required if batch_remote=True).
+        batch_no_wait: If True, dispatch all jobs with ``--no-wait`` then poll
+            for completion (async mode).  If False (default), each job blocks
+            until the JAR finishes polling internally (blocking mode).
+        poll_interval: Seconds between poll attempts in async mode (default: 10).
+        batch_timeout: Overall timeout in seconds per job for async polling.
+        auto_ingest: If True (default), call ``ingest_results()`` after each
+            successful batch job to load CSVs from S3 into the registry.
         on_complete: Optional callback invoked after each job completes.
             Signature: callback(job, result) -> None. Called after registry
             recording (if enabled). Use for progress reporting, logging, etc.
@@ -1722,6 +1784,10 @@ def run_sweep(
 
     if registry is not None and session_id is None:
         raise ValueError("session_id is required when registry is provided")
+    if batch_remote and remote:
+        raise ValueError("batch_remote and remote are mutually exclusive")
+    if batch_remote and target is None:
+        raise ValueError("target is required when batch_remote=True")
 
     # Setup registry callback if registry provided
     registry_callback: RegistryCallback | None = None
@@ -1764,19 +1830,53 @@ def run_sweep(
     _bottled_success = False
     _bottle_collect: list[tuple[ExpandedJob, Any]] = []
 
+    # Async batch remote tracking: job_id -> (job, dispatch_result)
+    _async_dispatched: dict[str, tuple[ExpandedJob, Any]] = {}
+
     try:
         for i, job in enumerate(job_set):
             if not quiet:
-                mode = "remote" if remote else "local"
+                mode = "batch-remote" if batch_remote else ("remote" if remote else "local")
                 print(f"[{i + 1}/{total_jobs}] Running ({mode}): {job.parameters}")
 
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
-            if remote:
+            if batch_remote:
+                assert target is not None  # validated above
+                br_config = to_batch_remote_config(
+                    job, target,
+                    no_wait=batch_no_wait,
+                    poll_interval=poll_interval if batch_no_wait else None,
+                    timeout=batch_timeout,
+                )
+                result = cli.batch_remote(
+                    br_config, jfr=job_jfr, stream_output=stream_output,
+                )
+            elif remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
             else:
                 run_config = to_run_config(job, enable_profiler=enable_profiler)
                 result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
+
+            # Async batch dispatch: parse job_id, defer result tracking
+            if batch_no_wait and batch_remote and result.success:
+                import json as _json
+
+                try:
+                    dispatch_data = _json.loads(result.stdout.strip())
+                    job_id = dispatch_data["jobId"]
+                    _async_dispatched[job_id] = (job, result)
+                    if not quiet:
+                        print(f"  [DISPATCHED] job_id={job_id}")
+                    # Store batch metadata in registry
+                    if registry_callback is not None:
+                        run_id = registry_callback.record(job, result)
+                        run_ids[job.run_hash] = run_id
+                    continue  # skip normal result handling
+                except (ValueError, KeyError) as e:
+                    if not quiet:
+                        print(f"  [WARN] Could not parse --no-wait output: {e}")
+                    # Fall through to normal result handling
 
             job_results.append((job, result))
 
@@ -1863,6 +1963,75 @@ def run_sweep(
                     trial_num=i,
                     succeeded_before=succeeded,
                 )
+
+        # -----------------------------------------------------------
+        # Async batch polling: wait for all dispatched jobs
+        # -----------------------------------------------------------
+        if _async_dispatched:
+            import time
+
+            from joshpy.cli import CLIResult, PollBatchConfig
+
+            assert target is not None  # validated above
+            remaining = set(_async_dispatched.keys())
+
+            if not quiet:
+                print(f"Polling {len(remaining)} dispatched jobs...")
+
+            poll_start = time.monotonic()
+            while remaining:
+                if batch_timeout is not None:
+                    elapsed = time.monotonic() - poll_start
+                    if elapsed > batch_timeout:
+                        for job_id in list(remaining):
+                            job, _ = _async_dispatched[job_id]
+                            timeout_result = CLIResult(
+                                success=False,
+                                exit_code=-1,
+                                stdout="",
+                                stderr=f"Batch job {job_id} timed out after {batch_timeout}s",
+                                command=[],
+                            )
+                            job_results.append((job, timeout_result))
+                            failed += 1
+                            remaining.discard(job_id)
+                        break
+
+                for job_id in list(remaining):
+                    job, dispatch_result = _async_dispatched[job_id]
+                    poll_result = cli.poll_batch(
+                        PollBatchConfig(job_id=job_id, target=target),
+                    )
+
+                    if poll_result.exit_code == 0:
+                        # Complete
+                        remaining.discard(job_id)
+                        job_results.append((job, poll_result))
+                        succeeded += 1
+                        if not quiet:
+                            print(f"  [COMPLETE] {job_id}")
+                    elif poll_result.exit_code == 1:
+                        # Error
+                        remaining.discard(job_id)
+                        job_results.append((job, poll_result))
+                        failed += 1
+                        if not quiet:
+                            print(f"  [ERROR] {job_id}")
+                        if stop_on_failure:
+                            if manage_status and registry is not None and session_id is not None:
+                                registry.update_session_status(session_id, "failed")
+                            raise SweepExecutionError(
+                                job=job,
+                                result=poll_result,
+                                trial_num=0,
+                                succeeded_before=succeeded,
+                            )
+                    elif poll_result.exit_code in (2, 100):
+                        # Running/pending or transient poll failure — keep waiting
+                        pass
+
+                if remaining:
+                    time.sleep(poll_interval)
 
         if not quiet:
             print(f"Completed: {succeeded} succeeded, {failed} failed")

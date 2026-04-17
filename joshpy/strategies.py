@@ -785,6 +785,12 @@ def run_adaptive_sweep(
     remote: bool = False,
     api_key: str | None = None,
     endpoint: str | None = None,
+    batch_remote: bool = False,
+    target: str | None = None,
+    batch_no_wait: bool = False,
+    poll_interval: int = 10,
+    batch_timeout: int | None = None,
+    auto_ingest: bool = True,
     quiet: bool = False,
     load_config: Any | None = None,  # LoadConfig
     stop_on_failure: bool = True,
@@ -970,7 +976,18 @@ def run_adaptive_sweep(
 
             # 5. Execute CLI
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
-            if remote:
+            if batch_remote:
+                from joshpy.jobs import to_batch_remote_config
+
+                br_config = to_batch_remote_config(
+                    job, target,
+                    no_wait=False,  # adaptive sweeps always block
+                    timeout=batch_timeout,
+                )
+                result = cli.batch_remote(
+                    br_config, jfr=job_jfr, stream_output=stream_output,
+                )
+            elif remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
             else:

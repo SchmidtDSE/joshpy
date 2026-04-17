@@ -505,6 +505,27 @@ class PreprocessBatchConfig:
 
 
 @dataclass(frozen=True)
+class PollBatchConfig:
+    """Arguments for 'java -jar joshsim.jar pollBatch' command.
+
+    Single-shot status check for a dispatched batch job.
+
+    Exit codes from the JAR:
+        0 — complete (job succeeded)
+        1 — error (job failed)
+        2 — running / pending
+        100 — poll failure (transient, retry)
+
+    Attributes:
+        job_id: Job ID returned by ``batchRemote --no-wait``.
+        target: Target profile name (loads ``~/.josh/targets/<name>.json``).
+    """
+
+    job_id: str
+    target: str
+
+
+@dataclass(frozen=True)
 class InspectExportsConfig:
     """Arguments for 'java -jar joshsim.jar inspect-exports' command.
 
@@ -860,6 +881,34 @@ class JoshCLI:
         ]
 
         return self._execute(args, timeout=timeout, jfr=jfr)
+
+    def poll_batch(
+        self,
+        config: PollBatchConfig,
+        timeout: float | None = None,
+    ) -> CLIResult:
+        """Check the status of a dispatched batch job.
+
+        Exit codes:
+            0 — complete (job succeeded, stdout has JSON status)
+            1 — error (job failed, stdout has JSON with error details)
+            2 — running / pending
+            100 — poll failure (transient error, caller should retry)
+
+        Args:
+            config: Poll-batch configuration with job_id and target.
+            timeout: Timeout in seconds.
+
+        Returns:
+            CLIResult with exit_code indicating job state.
+        """
+        args = [
+            "pollBatch",
+            config.job_id,
+            f"--target={config.target}",
+        ]
+
+        return self._execute(args, timeout=timeout)
 
     def _execute_streaming(
         self,

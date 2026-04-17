@@ -41,6 +41,7 @@ from joshpy.cli import (
     StageToMinioConfig,
     BatchRemoteConfig,
     PreprocessBatchConfig,
+    PollBatchConfig,
 )
 
 # JFR diagnostics (always available, no external deps)
@@ -104,6 +105,7 @@ try:
         AdaptiveSweepResult,
         to_run_config,
         to_run_remote_config,
+        to_batch_remote_config,
         run_sweep,
         discover_jshd_files,
     )
@@ -205,6 +207,7 @@ __all__ = [
     "StageToMinioConfig",
     "BatchRemoteConfig",
     "PreprocessBatchConfig",
+    "PollBatchConfig",
     # JFR diagnostics
     "ResourceProfile",
     "CpuProfile",
@@ -252,6 +255,7 @@ __all__ = [
     "AdaptiveSweepResult",
     "to_run_config",
     "to_run_remote_config",
+    "to_batch_remote_config",
     "run_sweep",
     "discover_jshd_files",
     "GridSpec",

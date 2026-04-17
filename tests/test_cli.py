@@ -1879,6 +1879,73 @@ class TestPreprocessBatch(unittest.TestCase):
         self.assertGreater(target_idx, pb_idx + 6)
 
 
+class TestPollBatch(unittest.TestCase):
+    """Tests for JoshCLI.poll_batch()."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """poll_batch() should build correct CLI args."""
+        from joshpy.cli import PollBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"status":"complete"}', stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = PollBatchConfig(job_id="abc-123", target="gke-test")
+        result = cli.poll_batch(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("pollBatch", cmd)
+        self.assertIn("abc-123", cmd)
+        self.assertIn("--target=gke-test", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_exit_code_2_running(self, mock_run, _mock_jar):
+        """poll_batch() exit code 2 means job is still running."""
+        from joshpy.cli import PollBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        result = cli.poll_batch(PollBatchConfig(job_id="abc", target="t"))
+        self.assertFalse(result.success)
+        self.assertEqual(result.exit_code, 2)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_exit_code_100_poll_failure(self, mock_run, _mock_jar):
+        """poll_batch() exit code 100 means transient poll failure."""
+        from joshpy.cli import PollBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=100, stdout="", stderr="poll failed")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        result = cli.poll_batch(PollBatchConfig(job_id="abc", target="t"))
+        self.assertEqual(result.exit_code, 100)
+
+
+class TestPollBatchConfig(unittest.TestCase):
+    """Tests for PollBatchConfig dataclass."""
+
+    def test_basic_creation(self):
+        from joshpy.cli import PollBatchConfig
+
+        config = PollBatchConfig(job_id="abc-123", target="gke-test")
+        self.assertEqual(config.job_id, "abc-123")
+        self.assertEqual(config.target, "gke-test")
+
+    def test_frozen(self):
+        from joshpy.cli import PollBatchConfig
+
+        config = PollBatchConfig(job_id="abc", target="t")
+        with self.assertRaises(AttributeError):
+            config.job_id = "other"
+
+
 class TestPreprocessBatchConfig(unittest.TestCase):
     """Tests for PreprocessBatchConfig dataclass."""
 

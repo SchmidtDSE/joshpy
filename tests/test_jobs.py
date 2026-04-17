@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 try:
     import duckdb  # noqa: F401
@@ -2358,6 +2359,179 @@ class TestDiscoverJshdFiles(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             result = discover_jshd_files(tmpdir)
             self.assertEqual(result, {})
+
+
+class TestToBatchRemoteConfig(unittest.TestCase):
+    """Tests for to_batch_remote_config()."""
+
+    def test_basic_conversion(self):
+        from joshpy.jobs import to_batch_remote_config
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=3,
+            source_path=Path("/path/to/sim.josh"),
+            custom_tags={"experiment": "baseline"},
+        )
+
+        config = to_batch_remote_config(job, "gke-test")
+
+        self.assertEqual(config.script_or_dir, Path("/path/to/sim.josh"))
+        self.assertEqual(config.simulation, "Main")
+        self.assertEqual(config.target, "gke-test")
+        self.assertEqual(config.replicates, 3)
+        self.assertFalse(config.no_wait)
+        self.assertEqual(config.custom_tags, {"experiment": "baseline"})
+
+    def test_no_wait_mode(self):
+        from joshpy.jobs import to_batch_remote_config
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=Path("/path/to/sim.josh"),
+        )
+
+        config = to_batch_remote_config(job, "gke-test", no_wait=True, timeout=600)
+
+        self.assertTrue(config.no_wait)
+        self.assertEqual(config.timeout, 600)
+
+    def test_source_path_required(self):
+        from joshpy.jobs import to_batch_remote_config
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=None,
+        )
+
+        with self.assertRaises(ValueError, msg="source_path is required"):
+            to_batch_remote_config(job, "gke-test")
+
+
+class TestRunSweepBatchRemote(unittest.TestCase):
+    """Tests for run_sweep() batch_remote mode."""
+
+    def test_batch_remote_requires_target(self):
+        from joshpy.jobs import run_sweep
+
+        with self.assertRaises(ValueError, msg="target is required"):
+            run_sweep(
+                MagicMock(),
+                MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([])),
+                batch_remote=True,
+                target=None,
+            )
+
+    def test_batch_remote_exclusive_with_remote(self):
+        from joshpy.jobs import run_sweep
+
+        with self.assertRaises(ValueError, msg="mutually exclusive"):
+            run_sweep(
+                MagicMock(),
+                MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([])),
+                batch_remote=True,
+                remote=True,
+                target="gke-test",
+            )
+
+    def test_blocking_batch_remote_calls_batch_remote(self):
+        """Blocking batch_remote should call cli.batch_remote()."""
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.batch_remote.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr=""
+        )
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=Path("/path/to/sim.josh"),
+        )
+        job_set = MagicMock(
+            total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job])
+        )
+
+        result = run_sweep(
+            mock_cli, job_set,
+            batch_remote=True,
+            target="gke-test",
+            quiet=True,
+        )
+
+        mock_cli.batch_remote.assert_called_once()
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, 0)
+
+    def test_async_dispatch_parses_json(self):
+        """Async batch_remote should parse --no-wait JSON output."""
+        import json
+        from joshpy.jobs import run_sweep
+
+        dispatch_json = json.dumps({
+            "jobId": "test-job-123",
+            "target": "gke-test",
+            "statusPath": "batch-status/test-job-123/status.json",
+        })
+
+        mock_cli = MagicMock()
+        # Dispatch succeeds
+        mock_cli.batch_remote.return_value = MagicMock(
+            success=True, exit_code=0, stdout=dispatch_json, stderr=""
+        )
+        # Poll returns complete
+        mock_cli.poll_batch.return_value = MagicMock(
+            success=True, exit_code=0, stdout='{"status":"complete"}', stderr=""
+        )
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=Path("/path/to/sim.josh"),
+        )
+        job_set = MagicMock(
+            total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job])
+        )
+
+        result = run_sweep(
+            mock_cli, job_set,
+            batch_remote=True,
+            target="gke-test",
+            batch_no_wait=True,
+            quiet=True,
+        )
+
+        mock_cli.batch_remote.assert_called_once()
+        mock_cli.poll_batch.assert_called()
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, 0)
 
 
 if __name__ == '__main__':
