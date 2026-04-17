@@ -21,164 +21,117 @@ joshsim (Java) has added `batchRemote` — a parallel execution path using MinIO
 - MinIO cred resolution hierarchy (mirrors joshsim's `HierarchyConfig`): CLI flags > profile JSON > env vars (`MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`). Secrets don't need to live in profile JSON.
 - K8s targets have a separate `pod_minio_endpoint` — the in-cluster MinIO endpoint pods use, which may differ from the outer `minio_endpoint` used for host-side staging.
 - For sweeps: stage shared data (.josh, .jshd) to MinIO ONCE, then per-job stage only the unique .jshc config. joshpy orchestrates staging directly (not via `batchRemote`).
-- Dev JARs are outdated — implement against spec, test when updated.
+
+---
+
+## Validated Access Pattern (2026-04-16)
+
+Proved out end-to-end against GKE Autopilot + GCS (S3-compatible). The client (joshpy / devcontainer) never runs simulations — it orchestrates:
+
+```
+Client (joshsim CLI)                    GCS (S3-compatible)                 GKE Autopilot
+─────────────────────                   ────────────────────                ──────────────
+1. Stage local files ──────────────────→ batch-jobs/<jobId>/inputs/
+2. Create K8s Secret (MinIO creds) ────────────────────────────────────→ josh-creds-<jobId>
+3. Create K8s Job ─────────────────────────────────────────────────────→ josh-<jobId>
+4. Poll Job API ───────────────────────────────────────────────────────→ status?
+                                                                         │
+                                        Pod starts:                      │
+                                        ← stageFromMinio (inputs)        │
+                                        → run simulation                 │
+                                        → write results to GCS ─────────→ gke-test-results/smoke_3.csv
+                                                                         │
+5. Poll returns COMPLETE ←─────────────────────────────────────────────←─┘
+6. (preprocessBatch only) Download result ←── batch-jobs/<jobId>/outputs/output.jshd
+```
+
+### What the client needs
+
+- **The fat JAR** — `java -jar joshsim-fat.jar batchRemote ...`
+- **kubectl context** — `gcloud container clusters get-credentials` (Fabric8 reads `~/.kube/config`)
+- **MinIO/GCS credentials** — `MINIO_ACCESS_KEY` + `MINIO_SECRET_KEY` as env vars
+- **A target profile** — `~/.josh/targets/<name>.json` with cluster context, namespace, image, resource requests, GCS bucket
+- **A .josh simulation file** — with `minio://` export paths pointing at the GCS bucket
+
+### Commands validated
+
+```bash
+# batchRemote — run simulation on K8s, results land in GCS
+java -jar joshsim-fat.jar batchRemote sim.josh SimName \
+  --target=gke-test --replicates=5
+
+# preprocessBatch — preprocess data on K8s, download result .jshd
+java -jar joshsim-fat.jar preprocessBatch sim.josh SimName \
+  data.nc variable units output.jshd --target=gke-test
+
+# No-wait mode — dispatch and exit, check status later
+java -jar joshsim-fat.jar batchRemote sim.josh SimName \
+  --target=gke-test --replicates=10 --no-wait
+```
+
+### Implications for joshpy
+
+- **K8s targets require the Java CLI** — it uses the Fabric8 K8s client to create Jobs and Secrets directly. There is no HTTP intermediary. joshpy must shell out to `java -jar joshsim-fat.jar batchRemote ...`.
+- **HTTP targets can use direct POST** — `POST /runBatch` is the HTTP equivalent, which joshpy could call directly (PR 5 optimization).
+- **Env vars are the credential transport** — set `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` before invoking the JAR. The JAR resolves them via HierarchyConfig.
+- **GKE cluster is already running** — server-side infrastructure is deployed. joshpy just needs the client-side plumbing.
 
 ---
 
 ## PR Plan
 
 ```
-PR1 (S3-native ingest) → PR2 (target profiles) → PR3 (CLI wrappers) → PR4 (sweep integration) → PR5 (shared staging optimization) → PR6 (polish)
+PR1 (S3-native ingest) ✅ DONE → PR2 (target profiles) → PR3 (CLI wrappers) → PR4 (sweep integration) → PR5 (shared staging optimization) → PR6 (polish)
 ```
 
 ### Regression gates (every PR)
-- `pixi run pytest` passes
+- `pixi run test` passes (867 unit tests, integration tests excluded)
+- `pixi run test-integration` passes (17 MinIO integration tests, CI only)
 - Existing `runRemote` path completely untouched
 
 ---
 
-### PR 1: Result Recovery — S3-native `ingest_results()`
+### PR 1: Result Recovery — S3-native `ingest_results()` ✅ DONE
 
-**Solves the immediate need.** Enables recovering results from MinIO into the registry by label. DuckDB reads CSVs directly from S3 via httpfs — no download, no local disk needed for the CSV data. Also provides `download=True` fallback via `stageFromMinio` for users who want local copies.
+**Status:** Merged via [joshpy#32](https://github.com/SchmidtDSE/joshpy/pull/32). All code shipped, unit tests passing, MinIO integration tests added.
 
-#### New utility: `configure_s3()` in `joshpy/registry.py` (or `joshpy/s3.py`)
+#### What shipped
 
-Reusable DuckDB S3/MinIO connection setup — the foundation for all future S3 access (serverless aggregators, WASM, multi-machine):
+| Component | File | Description |
+|-----------|------|-------------|
+| `configure_s3()` | `joshpy/registry.py` | DuckDB httpfs + S3 credential setup (parameterized `use_ssl`) |
+| `CellDataLoader.load_csv()` | `joshpy/cell_data.py` | Accepts `s3://` URL strings alongside local `Path` |
+| `ingest_results()` | `joshpy/sweep.py` | Full recovery by label: metadata → exports → S3 read → load |
+| `_resolve_ingest_metadata()` | `joshpy/sweep.py` | Helper: label/hash → run metadata |
+| `_get_josh_source()` | `joshpy/sweep.py` | Helper: josh file from disk or stored content |
+| `_configure_minio_access()` | `joshpy/sweep.py` | Helper: S3 direct read or stageFromMinio download |
+| `_load_ingest_replicates()` | `joshpy/sweep.py` | Helper: per-replicate CSV loading with graceful skip |
+| `StageFromMinioConfig` | `joshpy/cli.py` | Config for `stageFromMinio` CLI command |
+| `JoshCLI.stage_from_minio()` | `joshpy/cli.py` | `download=True` fallback path |
+| `SweepManager.ingest()` | `joshpy/sweep.py` | Convenience wrapper for `ingest_results()` |
 
-```python
-def configure_s3(conn, endpoint: str, access_key: str, secret_key: str, url_style: str = "path") -> None:
-    """Configure DuckDB connection for S3/MinIO access via httpfs."""
-    conn.execute("INSTALL httpfs; LOAD httpfs;")
-    conn.execute(f"""
-        CREATE OR REPLACE SECRET (
-            TYPE s3,
-            KEY_ID '{access_key}',
-            SECRET '{secret_key}',
-            ENDPOINT '{endpoint}',
-            URL_STYLE '{url_style}',
-            USE_SSL true
-        )
-    """)
-```
+#### CI infrastructure shipped alongside PR 1
 
-S3 credentials resolve via hierarchy: explicit args > env vars (`MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`). The function takes explicit args; the caller (`ingest_results`) handles the env var fallback.
+| Component | File | Description |
+|-----------|------|-------------|
+| Unit test workflow | `.github/workflows/test.yml` | `unit-tests` job: 867 tests via pixi |
+| Integration test workflow | `.github/workflows/test.yml` | `integration-tests` job: MinIO service container + JAR |
+| MinIO test simulation | `tests/fixtures/minio_export.josh` | Minimal .josh with `minio://` exports |
+| Shared fixtures | `tests/conftest.py` | `minio_conn`, `minio_registry`, `seed_csv`, `josh_cli`, etc. |
+| Integration tests | `tests/test_minio_integration.py` | 17 tests across 6 escalating levels |
+| Pytest marker | `pyproject.toml` | `integration` marker registered |
+| Pixi tasks | `pixi.toml` | `test` (unit only), `test-integration` (MinIO only) |
 
-#### Modify `CellDataLoader.load_csv()` in `joshpy/cell_data.py`
+#### Integration test levels
 
-Accept `str` (S3 URL) in addition to `Path`:
-```python
-def load_csv(self, csv_path: Path | str, run_id: str, run_hash: str, ...) -> int:
-    if isinstance(csv_path, str) and csv_path.startswith("s3://"):
-        csv_path_str = csv_path  # S3 URL — pass directly to read_csv_auto
-    else:
-        csv_path_str = str(Path(csv_path).resolve())  # local path (existing behavior)
-    # ... rest unchanged — read_csv_auto handles both
-```
-
-The existing `read_csv_auto()` call works with S3 URLs natively once httpfs is loaded.
-
-#### New function: `ingest_results()` in `joshpy/sweep.py`
-
-The core recovery function. Works by label (not by `JobSet`):
-
-```python
-def ingest_results(
-    cli: JoshCLI,
-    registry: RunRegistry,
-    label_or_hash: str,
-    *,
-    export_type: str = "patch",
-    download: bool = False,           # if True, download via stageFromMinio instead of S3 read
-    output_dir: Path | None = None,   # download destination (only used when download=True)
-    minio_bucket: str | None = None,  # override bucket (else from ExportFileInfo.host)
-    quiet: bool = False,
-) -> int:
-```
-
-**Flow:**
-1. `registry._resolve_label_or_hash(label_or_hash)` -> `run_hash`
-2. `registry.get_config_by_hash(run_hash)` -> `ConfigInfo` (josh_path, josh_content, parameters, label)
-3. `registry.get_session(config.session_id)` -> `SessionInfo` (simulation, total_replicates)
-4. Get josh source on disk: if `config.josh_path` exists use it; otherwise write `config.josh_content` to a temp file
-5. `cli.inspect_exports(script, simulation)` -> `ExportPaths`
-6. Get `ExportFileInfo` for `export_type` -> check `info.protocol`
-7. If `protocol == "minio"` and NOT `download`:
-   - Configure S3 on registry connection: `configure_s3(registry.conn, endpoint, access_key, secret_key)`
-   - Translate `minio://bucket/path` to `s3://bucket/path` for DuckDB
-8. If `protocol == "minio"` and `download`:
-   - Call `cli.stage_from_minio(...)` to download locally (fallback path)
-9. `registry._resolve_run_id_for_hash(run_hash)` -> `run_id` for the latest execution
-10. For each replicate 0..`total_replicates-1`:
-    - Build template vars: `{simulation, replicate, **config.parameters, label: config.label}`
-    - Resolve path template -> concrete path
-    - If minio (no download): remap to `s3://bucket/resolved_path`
-    - If minio (download): remap to `output_dir / filename`
-    - Load via `CellDataLoader.load_csv(csv_path_or_url, run_id, run_hash)`
-    - If file/object doesn't exist -> skip gracefully (the OOM'd replicate), print which one
-11. Return total rows loaded
-
-#### Also in this PR: `StageFromMinioConfig` + `stage_from_minio()` for `download=True` path
-
-```python
-@dataclass(frozen=True)
-class StageFromMinioConfig:
-    output_dir: Path
-    prefix: str
-    minio_endpoint: str | None = None
-    minio_access_key: str | None = None
-    minio_secret_key: str | None = None
-    minio_bucket: str | None = None
-```
-
-Plus `JoshCLI.stage_from_minio()` method wrapping `stageFromMinio --output-dir=... --prefix=... [--minio-* options]`.
-
-#### New method: `SweepManager.ingest()` in `joshpy/sweep.py`
-
-```python
-def ingest(self, export_type="patch", download=False, output_dir=None, quiet=False) -> int:
-    label = getattr(self, '_label', None) or self.job_set.jobs[0].run_hash
-    return ingest_results(self.cli, self.registry, label, export_type=export_type,
-                          download=download, output_dir=output_dir, quiet=quiet)
-```
-
-#### Exports: `joshpy/__init__.py`
-- Add `StageFromMinioConfig`, `configure_s3` to CLI exports
-- Add `ingest_results` to sweep exports
-
-#### Tests
-- `tests/test_cli.py`: `StageFromMinioConfig` defaults, `stage_from_minio()` arg building
-- `tests/test_sweep.py`: `ingest_results` with mocked registry + mocked DuckDB (S3 URL construction, download fallback, missing replicate skip, josh_content temp file fallback)
-
-#### User-facing example (pixi task in josh-models)
-
-```toml
-recover = { cmd = "python scripts/recover.py", env = { JOSH_LABEL = "{{ LABEL }}" }, args = [{ arg = "LABEL" }], description = "Recover results from MinIO: pixi run recover <LABEL>." }
-```
-
-```python
-# scripts/recover.py
-import os
-from dotenv import load_dotenv
-load_dotenv()
-
-from joshpy.cli import JoshCLI
-from joshpy.jar import JarMode
-from joshpy.registry import RunRegistry
-from joshpy.sweep import ingest_results
-
-registry = RunRegistry(os.environ["JOSH_REGISTRY"])
-cli = JoshCLI(josh_jar=JarMode[os.environ.get("JOSH_JAR_MODE", "DEV")])
-
-rows = ingest_results(cli, registry, os.environ["JOSH_LABEL"])
-print(f"Done: {rows} rows loaded for '{os.environ['JOSH_LABEL']}'")
-registry.close()
-```
-
-**Polling:** PR 1 does NOT poll — `ingest_results()` assumes the job is already done (called after blocking `batchRemote`, or manually by user for recovery). It reads whatever CSVs exist in S3 and skips missing ones. Async polling comes in PR 4/5 via josh's `pollBatch` CLI ([josh#406](https://github.com/SchmidtDSE/josh/issues/406)).
-
-**`batch_job_id` in registry:** When batch remote jobs are dispatched, the job ID is stored in `job_runs.metadata` as `{"batch_job_id": "...", "target": "..."}`. This field is optional — absent for local runs and blocking batch runs where the ID isn't needed. `ingest_results()` does not require it; it works by label/run_hash alone.
-
-**Risk: LOW — additive. Existing load_csv() local path behavior unchanged. httpfs is opt-in (only configured when minio:// detected).**
+| Level | Class | Tests | What it proves |
+|-------|-------|-------|---------------|
+| 1 | `TestMinioWrite` | 2 | DuckDB httpfs writes/reads CSVs to MinIO |
+| 2 | `TestMinioJarWrite` | 3 | Real Josh JAR exports to MinIO, Python reads back |
+| 3 | `TestMinioCellDataLoader` | 4 | `CellDataLoader.load_csv("s3://...")` ingests into registry |
+| 4 | `TestMinioIngestResults` | 2 | Full `ingest_results()` by label, data queryable |
+| 5 | `TestMinioPartialRecovery` | 3 | Missing replicates skipped gracefully (2/3, 0/3, 1/10) |
+| Edge | `TestMinioEdgeCases` | 3 | Bad creds, missing bucket, run_hash namespace isolation |
 
 ---
 
@@ -195,7 +148,13 @@ New file `joshpy/targets.py`. joshpy reads AND writes `~/.josh/targets/<name>.js
 - `list_targets()` / `delete_target(name)` — manage profiles
 - `resolve_minio_creds(target=None)` — hierarchy: profile JSON -> env vars
 
-**K8s note:** `pod_minio_endpoint` in `KubernetesTargetConfig` — the in-cluster MinIO endpoint pods use, distinct from outer `minio_endpoint`.
+**K8s-specific fields** (from validated access pattern):
+- `pod_minio_endpoint` — in-cluster MinIO endpoint pods use, distinct from outer `minio_endpoint`
+- `cluster_context` — kubectl context name (Fabric8 reads `~/.kube/config`)
+- `namespace` — K8s namespace for jobs
+- `image` — container image for simulation pods
+- `resource_requests` — CPU/memory for job pods
+- `gcs_bucket` — GCS bucket for results
 
 **Tests:** `tests/test_targets.py` — round-trip, hierarchy, validation, auto-create dirs.
 
@@ -203,9 +162,9 @@ New file `joshpy/targets.py`. joshpy reads AND writes `~/.josh/targets/<name>.js
 
 ---
 
-### PR 3: Remaining CLI Wrappers — `batch_remote()`, `stage_to_minio()`
+### PR 3: CLI Wrappers — `batch_remote()`, `preprocess_batch()`, `stage_to_minio()`
 
-`stage_from_minio()` already shipped in PR 1. This adds the remaining two.
+`stage_from_minio()` already shipped in PR 1. This adds the remaining commands validated against GKE.
 
 **`BatchRemoteConfig`:**
 ```python
@@ -218,15 +177,31 @@ class BatchRemoteConfig:
     no_wait: bool = False
     poll_interval: int | None = None
     timeout: int | None = None
+    custom_tags: dict[str, str] = field(default_factory=dict)
+```
+
+**`PreprocessBatchConfig`:**
+```python
+@dataclass(frozen=True)
+class PreprocessBatchConfig:
+    script: Path           # .josh file
+    simulation: str
+    data_file: Path        # input .nc file
+    variable: str
+    units: str
+    output: Path           # output .jshd file
+    target: str            # required — profile name
 ```
 
 **`StageToMinioConfig`:** `input_dir`, `prefix`, optional `minio_*` creds.
 
-**Methods:** `JoshCLI.batch_remote()`, `JoshCLI.stage_to_minio()`.
+**Methods:** `JoshCLI.batch_remote()`, `JoshCLI.preprocess_batch()`, `JoshCLI.stage_to_minio()`.
 
-**Tests:** `tests/test_cli.py` — mock subprocess, verify arg building.
+**Note:** For K8s targets, the Java CLI is required — it uses Fabric8 to create K8s Jobs and Secrets directly. There is no HTTP intermediary. joshpy shells out to the JAR.
 
-**Risk: LOW — additive, follows existing `run_remote()` pattern exactly.**
+**Tests:** `tests/test_cli.py` — mock subprocess, verify arg building for all three commands.
+
+**Risk: LOW — additive, follows existing `run_remote()` / `stage_from_minio()` patterns exactly.**
 
 ---
 
@@ -275,7 +250,7 @@ New file `joshpy/batch_orchestrator.py` with `BatchOrchestrator`:
 - `dispatch_job(job, shared_prefix)` — stage per-job config + dispatch via HTTP POST to `/runBatch`
 - `poll(job_id)` / `pull_results(job_id, output_dir)`
 
-**Dispatch approach:** HTTP POST to `/runBatch` directly from Python (~20 lines with `urllib.request`). Self-contained, no joshsim changes needed, `/runBatch` endpoint already exists.
+**Dispatch approach:** HTTP POST to `/runBatch` directly from Python (~20 lines with `urllib.request`). Self-contained, no joshsim changes needed, `/runBatch` endpoint already exists. This path is for HTTP targets only — K8s targets still require the JAR.
 
 **Risk: MEDIUM — introduces direct HTTP dispatch from joshpy. Well-isolated in new file.**
 
@@ -295,18 +270,20 @@ New file `joshpy/batch_orchestrator.py` with `BatchOrchestrator`:
 
 | File | PRs | Changes |
 |------|-----|---------|
-| `joshpy/cli.py` | 1, 3, 4 | `StageFromMinioConfig` + `stage_from_minio()` (PR 1); `BatchRemoteConfig` + `batch_remote()`, `StageToMinioConfig` + `stage_to_minio()` (PR 3); `PollBatchConfig` + `poll_batch()` (PR 4) |
-| `joshpy/cell_data.py` | 1 | `load_csv()` accepts `str` (S3 URL) in addition to `Path` |
-| `joshpy/registry.py` | 1 | `configure_s3()` utility for DuckDB httpfs + S3 credential setup |
-| `joshpy/sweep.py` | 1, 4, 6 | `ingest_results()` + `SweepManager.ingest()` (PR 1); extend `.run()` (PR 4); builder (PR 6) |
+| `joshpy/cli.py` | ✅1, 3, 4 | `StageFromMinioConfig` + `stage_from_minio()` (✅PR 1); `BatchRemoteConfig` + `batch_remote()`, `PreprocessBatchConfig` + `preprocess_batch()`, `StageToMinioConfig` + `stage_to_minio()` (PR 3); `PollBatchConfig` + `poll_batch()` (PR 4) |
+| `joshpy/cell_data.py` | ✅1 | `load_csv()` accepts `str` (S3 URL) in addition to `Path` |
+| `joshpy/registry.py` | ✅1 | `configure_s3()` utility for DuckDB httpfs + S3 credential setup |
+| `joshpy/sweep.py` | ✅1, 4, 6 | `ingest_results()` + helpers + `SweepManager.ingest()` (✅PR 1); extend `.run()` (PR 4); builder (PR 6) |
 | **NEW** `joshpy/targets.py` | 2 | Target profile system (read/write/list/creds hierarchy) |
 | `joshpy/jobs.py` | 4 | `assemble_batch_workdir`, `to_batch_remote_config`, extend `run_sweep()` |
 | `joshpy/strategies.py` | 4 | Extend `run_adaptive_sweep()` |
 | **NEW** `joshpy/batch_orchestrator.py` | 5 | Shared staging orchestration |
 | `joshpy/bottle.py` | 6 | MinIO metadata in manifest |
 | `joshpy/__init__.py` | 1-3 | Export new symbols |
-| `tests/test_cli.py` | 1, 3 | `StageFromMinio` tests (PR 1); remaining CLI tests (PR 3) |
-| `tests/test_sweep.py` | 1, 4 | `ingest_results` tests (PR 1); SweepManager batch_remote tests (PR 4) |
+| `tests/test_cli.py` | ✅1, 3 | `StageFromMinio` tests (✅PR 1); remaining CLI tests (PR 3) |
+| `tests/test_sweep.py` | ✅1, 4 | `ingest_results` tests (✅PR 1); SweepManager batch_remote tests (PR 4) |
+| `tests/conftest.py` | ✅1 | Shared fixtures, marker registration |
+| `tests/test_minio_integration.py` | ✅1 | 17 MinIO integration tests (5 levels + edge cases) |
 | **NEW** `tests/test_targets.py` | 2 | Target profile tests |
 | `tests/test_jobs.py` | 4 | Workdir, converter, sweep tests |
 | `tests/test_strategies.py` | 4 | Adaptive batch remote tests |
@@ -315,7 +292,7 @@ New file `joshpy/batch_orchestrator.py` with `BatchOrchestrator`:
 
 ## Verification
 
-PR 1 end-to-end (immediate need):
+PR 1 end-to-end (immediate need — ✅ validated):
 ```bash
 # In josh-models repo:
 pixi run recover my-label
@@ -327,15 +304,33 @@ pixi run recover my-label
 # -> Prints: "Done: 1234567 rows loaded for 'my-label'"
 ```
 
-Full integration (when dev JARs update):
+CI verification (✅ in place):
+```bash
+# Unit tests (no MinIO needed):
+pixi run test              # 867 passed, 17 deselected
+
+# Integration tests (MinIO service container + JAR):
+pixi run test-integration  # 17 tests across 5 levels + edge cases
+
+# Local integration test:
+docker run -d --name minio-test -p 9000:9000 \
+  -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
+  -e MINIO_DEFAULT_BUCKETS=josh-test-bucket:public \
+  bitnamilegacy/minio:latest
+pixi run get-jars
+pixi run -e dev test-integration
+docker rm -f minio-test
+```
+
+Full batch remote integration (target: PR 4):
 ```python
-# Sweep with batch remote
+# Sweep with batch remote on GKE
 manager = SweepManager.from_config(config, registry="exp.duckdb")
-results = manager.run(batch_remote=True, target="my-server")
+results = manager.run(batch_remote=True, target="gke-test")
 manager.load_results()
 
 # Fire-and-forget -> recover later
-results = manager.run(batch_remote=True, target="my-server", batch_no_wait=True)
+results = manager.run(batch_remote=True, target="gke-test", batch_no_wait=True)
 # ... later ...
 manager.ingest()
 

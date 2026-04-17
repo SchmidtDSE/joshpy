@@ -73,6 +73,19 @@ from joshpy.debug import (
     format_message,
 )
 
+# Target profile system (always available, no external deps)
+from joshpy.targets import (
+    TargetProfile,
+    HttpTargetConfig,
+    KubernetesTargetConfig,
+    ResolvedMinioCreds,
+    load_target,
+    save_target,
+    list_targets,
+    delete_target,
+    resolve_minio_creds,
+)
+
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
@@ -210,6 +223,16 @@ __all__ = [
     "load_debug_file",
     "load_debug_from_script",
     "format_message",
+    # Target profiles
+    "TargetProfile",
+    "HttpTargetConfig",
+    "KubernetesTargetConfig",
+    "ResolvedMinioCreds",
+    "load_target",
+    "save_target",
+    "list_targets",
+    "delete_target",
+    "resolve_minio_creds",
     # Jobs (optional)
     "ConfigSweepParameter",
     "FileSweepParameter",
