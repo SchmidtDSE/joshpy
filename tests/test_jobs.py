@@ -2362,7 +2362,7 @@ class TestDiscoverJshdFiles(unittest.TestCase):
 
 
 class TestToBatchRemoteConfig(unittest.TestCase):
-    """Tests for to_batch_remote_config()."""
+    """Tests for to_batch_remote_config() (post-josh#423)."""
 
     def test_basic_conversion(self):
         from joshpy.jobs import to_batch_remote_config
@@ -2376,17 +2376,21 @@ class TestToBatchRemoteConfig(unittest.TestCase):
             simulation="Main",
             replicates=3,
             source_path=Path("/path/to/sim.josh"),
-            custom_tags={"experiment": "baseline"},
         )
 
-        config = to_batch_remote_config(job, "gke-test")
+        config = to_batch_remote_config(job, "gke-test", "sweeps/s1/jobs/abc123/")
 
-        self.assertEqual(config.script_or_dir, Path("/path/to/sim.josh"))
         self.assertEqual(config.simulation, "Main")
         self.assertEqual(config.target, "gke-test")
+        self.assertEqual(config.minio_prefix, "sweeps/s1/jobs/abc123/")
         self.assertEqual(config.replicates, 3)
         self.assertFalse(config.no_wait)
-        self.assertEqual(config.custom_tags, {"experiment": "baseline"})
+        # require_prestaged defaults to True (safe default for sweeps)
+        self.assertTrue(config.require_prestaged)
+        # No stage_from_local_dir on the sweep path
+        self.assertIsNone(config.stage_from_local_dir)
+        # BatchRemoteConfig should no longer carry custom_tags (removed)
+        self.assertFalse(hasattr(config, "custom_tags"))
 
     def test_no_wait_mode(self):
         from joshpy.jobs import to_batch_remote_config
@@ -2402,7 +2406,10 @@ class TestToBatchRemoteConfig(unittest.TestCase):
             source_path=Path("/path/to/sim.josh"),
         )
 
-        config = to_batch_remote_config(job, "gke-test", no_wait=True, timeout=600)
+        config = to_batch_remote_config(
+            job, "gke-test", "sweeps/s1/jobs/abc123/",
+            no_wait=True, timeout=600,
+        )
 
         self.assertTrue(config.no_wait)
         self.assertEqual(config.timeout, 600)
@@ -2422,11 +2429,26 @@ class TestToBatchRemoteConfig(unittest.TestCase):
         )
 
         with self.assertRaises(ValueError, msg="source_path is required"):
-            to_batch_remote_config(job, "gke-test")
+            to_batch_remote_config(job, "gke-test", "sweeps/s1/jobs/abc123/")
 
 
 class TestRunSweepBatchRemote(unittest.TestCase):
-    """Tests for run_sweep() batch_remote mode."""
+    """Tests for run_sweep() batch_remote mode (post-josh#423 stage + dispatch)."""
+
+    def _make_real_job(self, tmp: Path, run_hash: str = "abc123") -> ExpandedJob:
+        """Build an ExpandedJob backed by a real on-disk .josh file."""
+        src = tmp / "sim.josh"
+        src.write_text("start simulation Main\nend simulation\n")
+        return ExpandedJob(
+            config_content="x = 1 count",
+            config_path=tmp / "config.jshc",
+            config_name="config.jshc",
+            run_hash=run_hash,
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=src,
+        )
 
     def test_batch_remote_requires_target(self):
         from joshpy.jobs import run_sweep
@@ -2451,42 +2473,83 @@ class TestRunSweepBatchRemote(unittest.TestCase):
                 target="gke-test",
             )
 
-    def test_blocking_batch_remote_calls_batch_remote(self):
-        """Blocking batch_remote should call cli.batch_remote()."""
+    def test_stage_then_batch_remote_with_require_prestaged(self):
+        """Blocking batch_remote path stages first, then dispatches with
+        require_prestaged=True."""
         from joshpy.jobs import run_sweep
 
         mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
         mock_cli.batch_remote.return_value = MagicMock(
-            success=True, exit_code=0, stdout="", stderr=""
+            success=True, exit_code=0, stdout="", stderr="",
         )
 
-        job = ExpandedJob(
-            config_content="x = 1 count",
-            config_path=Path("/tmp/config.jshc"),
-            config_name="config.jshc",
-            run_hash="abc123",
-            parameters={"x": 1},
-            simulation="Main",
-            replicates=1,
-            source_path=Path("/path/to/sim.josh"),
-        )
-        job_set = MagicMock(
-            total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job])
-        )
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            job = self._make_real_job(tmp)
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=1,
+                __iter__=lambda s: iter([job]),
+            )
 
-        result = run_sweep(
-            mock_cli, job_set,
-            batch_remote=True,
-            target="gke-test",
-            quiet=True,
-        )
+            result = run_sweep(
+                mock_cli, job_set,
+                batch_remote=True,
+                target="gke-test",
+                session_id="s1",
+                quiet=True,
+            )
 
+        # stage happened before dispatch
+        mock_cli.stage_to_minio.assert_called_once()
         mock_cli.batch_remote.assert_called_once()
+
+        # dispatch config uses the same prefix staged to, with require_prestaged=True
+        stage_cfg = mock_cli.stage_to_minio.call_args[0][0]
+        dispatch_cfg = mock_cli.batch_remote.call_args[0][0]
+        self.assertEqual(stage_cfg.prefix, dispatch_cfg.minio_prefix)
+        self.assertTrue(dispatch_cfg.require_prestaged)
+        # Per-job prefix is keyed on run_hash
+        self.assertIn(job.run_hash, dispatch_cfg.minio_prefix)
+        self.assertIn("sweeps/s1/", dispatch_cfg.minio_prefix)
+
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
 
+    def test_stage_failure_short_circuits_dispatch(self):
+        """If stage_to_minio fails, batch_remote should not be called."""
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=False, exit_code=1, stdout="", stderr="bucket denied",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            job = self._make_real_job(tmp)
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=1,
+                __iter__=lambda s: iter([job]),
+            )
+
+            result = run_sweep(
+                mock_cli, job_set,
+                batch_remote=True,
+                target="gke-test",
+                session_id="s1",
+                quiet=True,
+                stop_on_failure=False,
+            )
+
+        mock_cli.stage_to_minio.assert_called_once()
+        mock_cli.batch_remote.assert_not_called()
+        self.assertEqual(result.failed, 1)
+
     def test_async_dispatch_parses_json(self):
-        """Async batch_remote should parse --no-wait JSON output."""
+        """Async batch_remote should still stage first, then parse --no-wait JSON."""
         import json
         from joshpy.jobs import run_sweep
 
@@ -2497,37 +2560,35 @@ class TestRunSweepBatchRemote(unittest.TestCase):
         })
 
         mock_cli = MagicMock()
-        # Dispatch succeeds
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
         mock_cli.batch_remote.return_value = MagicMock(
-            success=True, exit_code=0, stdout=dispatch_json, stderr=""
+            success=True, exit_code=0, stdout=dispatch_json, stderr="",
         )
-        # Poll returns complete
         mock_cli.poll_batch.return_value = MagicMock(
-            success=True, exit_code=0, stdout='{"status":"complete"}', stderr=""
+            success=True, exit_code=0,
+            stdout='{"status":"complete"}', stderr="",
         )
 
-        job = ExpandedJob(
-            config_content="x = 1 count",
-            config_path=Path("/tmp/config.jshc"),
-            config_name="config.jshc",
-            run_hash="abc123",
-            parameters={"x": 1},
-            simulation="Main",
-            replicates=1,
-            source_path=Path("/path/to/sim.josh"),
-        )
-        job_set = MagicMock(
-            total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job])
-        )
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            job = self._make_real_job(tmp)
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=1,
+                __iter__=lambda s: iter([job]),
+            )
 
-        result = run_sweep(
-            mock_cli, job_set,
-            batch_remote=True,
-            target="gke-test",
-            batch_no_wait=True,
-            quiet=True,
-        )
+            result = run_sweep(
+                mock_cli, job_set,
+                batch_remote=True,
+                target="gke-test",
+                batch_no_wait=True,
+                session_id="s1",
+                quiet=True,
+            )
 
+        mock_cli.stage_to_minio.assert_called_once()
         mock_cli.batch_remote.assert_called_once()
         mock_cli.poll_batch.assert_called()
         self.assertEqual(result.succeeded, 1)

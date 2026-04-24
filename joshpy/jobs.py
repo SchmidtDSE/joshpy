@@ -1339,23 +1339,28 @@ def to_run_remote_config(
 def to_batch_remote_config(
     job: ExpandedJob,
     target: str,
+    minio_prefix: str,
     *,
     no_wait: bool = False,
     poll_interval: int | None = None,
     timeout: int | None = None,
+    require_prestaged: bool = True,
 ) -> BatchRemoteConfig:
     """Convert an ExpandedJob to a BatchRemoteConfig for batch remote execution.
 
-    Unlike ``to_run_config``, batch remote takes a ``.josh`` file (not a
-    directory) and uses ``--custom-tag`` to pass config/data file metadata.
-    The target profile controls MinIO staging.
+    Inputs must already be staged at ``minio_prefix`` (guarded by a
+    ``.josh-staged.json`` sentinel). Use :func:`assemble_batch_workdir` +
+    :func:`cli.stage_to_minio` before dispatching.
 
     Args:
         job: The expanded job to convert.
         target: Target profile name (e.g. ``"gke-test"``).
+        minio_prefix: Pre-staged MinIO prefix (e.g. ``sweeps/<id>/jobs/<hash>/``).
         no_wait: If True, dispatch and return immediately.
         poll_interval: Polling interval in seconds (optional).
         timeout: Job timeout in seconds (optional).
+        require_prestaged: If True (default), JAR will fail fast unless the
+            prefix sentinel reports ``complete``.
 
     Returns:
         BatchRemoteConfig ready for use with JoshCLI.batch_remote().
@@ -1371,14 +1376,14 @@ def to_batch_remote_config(
         )
 
     return BatchRemoteConfig(
-        script_or_dir=job.source_path,
         simulation=job.simulation,
         target=target,
+        minio_prefix=minio_prefix,
         replicates=job.replicates,
         no_wait=no_wait,
         poll_interval=poll_interval,
         timeout=timeout,
-        custom_tags=job.custom_tags,
+        require_prestaged=require_prestaged,
     )
 
 
@@ -1833,6 +1838,16 @@ def run_sweep(
     # Async batch remote tracking: job_id -> (job, dispatch_result)
     _async_dispatched: dict[str, tuple[ExpandedJob, Any]] = {}
 
+    # Per-sweep staging root for batch remote mode. One tempdir per sweep, one
+    # subdir per ExpandedJob. Cleaned up in the finally below.
+    sweep_workdir: Path | None = None
+    if batch_remote:
+        import tempfile
+
+        sweep_workdir = Path(
+            tempfile.mkdtemp(prefix=f"joshpy-sweep-{session_id or 'adhoc'}-")
+        )
+
     try:
         for i, job in enumerate(job_set):
             if not quiet:
@@ -1841,16 +1856,32 @@ def run_sweep(
 
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if batch_remote:
+                from joshpy.batch_orchestrator import assemble_batch_workdir
+                from joshpy.cli import StageToMinioConfig
+
                 assert target is not None  # validated above
-                br_config = to_batch_remote_config(
-                    job, target,
-                    no_wait=batch_no_wait,
-                    poll_interval=poll_interval if batch_no_wait else None,
-                    timeout=batch_timeout,
+                assert sweep_workdir is not None  # allocated when batch_remote=True
+
+                job_dir = assemble_batch_workdir(job, sweep_workdir)
+                per_job_prefix = (
+                    f"sweeps/{session_id or 'adhoc'}/jobs/{job.run_hash}/"
                 )
-                result = cli.batch_remote(
-                    br_config, jfr=job_jfr, stream_output=stream_output,
+                stage_result = cli.stage_to_minio(
+                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
                 )
+                if not stage_result.success:
+                    result = stage_result
+                else:
+                    br_config = to_batch_remote_config(
+                        job, target, per_job_prefix,
+                        no_wait=batch_no_wait,
+                        poll_interval=poll_interval if batch_no_wait else None,
+                        timeout=batch_timeout,
+                        require_prestaged=True,
+                    )
+                    result = cli.batch_remote(
+                        br_config, jfr=job_jfr, stream_output=stream_output,
+                    )
             elif remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
@@ -2069,3 +2100,8 @@ def run_sweep(
         if manage_status and registry is not None and session_id is not None:
             registry.update_session_status(session_id, "failed")
         raise
+    finally:
+        if sweep_workdir is not None:
+            import shutil
+
+            shutil.rmtree(sweep_workdir, ignore_errors=True)

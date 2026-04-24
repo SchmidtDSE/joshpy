@@ -414,6 +414,9 @@ class StageFromMinioConfig:
         minio_access_key: MinIO access key (optional).
         minio_secret_key: MinIO secret key (optional).
         minio_bucket: MinIO bucket name (optional).
+        config_file: Path to JSON configuration file (optional).
+        ensure_bucket_exists: Ensure the bucket exists before downloading.
+        minio_path: Base object name/path within bucket (optional).
     """
 
     output_dir: Path
@@ -422,6 +425,9 @@ class StageFromMinioConfig:
     minio_access_key: str | None = None
     minio_secret_key: str | None = None
     minio_bucket: str | None = None
+    config_file: Path | None = None
+    ensure_bucket_exists: bool = False
+    minio_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -439,6 +445,9 @@ class StageToMinioConfig:
         minio_access_key: MinIO access key (optional).
         minio_secret_key: MinIO secret key (optional).
         minio_bucket: MinIO bucket name (optional).
+        config_file: Path to JSON configuration file (optional).
+        ensure_bucket_exists: Ensure the bucket exists before uploading.
+        minio_path: Base object name/path within bucket (optional).
     """
 
     input_dir: Path
@@ -447,35 +456,52 @@ class StageToMinioConfig:
     minio_access_key: str | None = None
     minio_secret_key: str | None = None
     minio_bucket: str | None = None
+    config_file: Path | None = None
+    ensure_bucket_exists: bool = False
+    minio_path: str | None = None
 
 
 @dataclass(frozen=True)
 class BatchRemoteConfig:
-    """Arguments for 'java -jar joshsim.jar batchRemote' command.
+    """Arguments for 'java -jar joshsim.jar batchRemote' command (post-josh#423).
 
-    Dispatches a simulation to a remote target (HTTP or Kubernetes) via
-    MinIO staging.  The first positional arg can be a ``.josh`` file or
-    a directory containing staged inputs.
+    Staging is a separate concern from dispatch: the simulation and data files
+    must already live in MinIO under ``minio_prefix`` (guarded by a
+    ``.josh-staged.json`` sentinel), OR be provided via ``stage_from_local_dir``
+    which invokes ``stageToMinio`` as a convenience before dispatch. These two
+    staging modes are mutually exclusive.
 
     Attributes:
-        script_or_dir: Path to .josh file or staged input directory.
         simulation: Name of simulation to run.
         target: Target profile name (required).
+        minio_prefix: MinIO object prefix where inputs live (e.g.
+            ``batch-jobs/my-run/inputs/``).
         replicates: Number of replicates (default: 1).
         no_wait: If True, dispatch and exit without polling (default: False).
         poll_interval: Polling interval in seconds (optional).
         timeout: Job timeout in seconds (optional).
-        custom_tags: Custom tags passed to the simulation.
+        stage_from_local_dir: If set, upload this local directory to
+            ``minio_prefix`` before dispatching. Mutex with ``require_prestaged``.
+        require_prestaged: Fail fast unless ``.josh-staged.json`` at
+            ``minio_prefix`` reports ``complete``. Recommended for sweeps.
+            Mutex with ``stage_from_local_dir``.
     """
 
-    script_or_dir: Path
     simulation: str
     target: str
+    minio_prefix: str
     replicates: int = 1
     no_wait: bool = False
     poll_interval: int | None = None
     timeout: int | None = None
-    custom_tags: dict[str, str] = field(default_factory=dict)
+    stage_from_local_dir: Path | None = None
+    require_prestaged: bool = False
+
+    def __post_init__(self) -> None:
+        if self.stage_from_local_dir is not None and self.require_prestaged:
+            raise ValueError(
+                "stage_from_local_dir and require_prestaged are mutually exclusive"
+            )
 
 
 @dataclass(frozen=True)
@@ -493,6 +519,14 @@ class PreprocessBatchConfig:
         units: Units of the data.
         output: Output .jshd file path.
         target: Target profile name (required).
+        crs: CRS to use when reading the file.
+        x_coord: Name of X coordinate dimension.
+        y_coord: Name of Y coordinate dimension.
+        time_dim: Name of time dimension.
+        timestep: Single timestep to process.
+        default_value: Default value to fill grid spaces before copying data.
+        parallel: Enable parallel processing of patches within each timestep.
+        amend: Amend existing output file rather than overwriting.
     """
 
     script: Path
@@ -502,6 +536,14 @@ class PreprocessBatchConfig:
     units: str
     output: Path
     target: str
+    crs: str | None = None
+    x_coord: str | None = None
+    y_coord: str | None = None
+    time_dim: str | None = None
+    timestep: int | None = None
+    default_value: float | None = None
+    parallel: bool = False
+    amend: bool = False
 
 
 @dataclass(frozen=True)
@@ -779,6 +821,12 @@ class JoshCLI:
             args.extend(["--minio-secret-key", config.minio_secret_key])
         if config.minio_bucket:
             args.extend(["--minio-bucket", config.minio_bucket])
+        if config.config_file is not None:
+            args.append(f"--config-file={config.config_file.resolve()}")
+        if config.ensure_bucket_exists:
+            args.append("--ensure-bucket-exists")
+        if config.minio_path is not None:
+            args.append(f"--minio-path={config.minio_path}")
 
         return self._execute(args, timeout=timeout)
 
@@ -810,6 +858,12 @@ class JoshCLI:
             args.extend(["--minio-secret-key", config.minio_secret_key])
         if config.minio_bucket:
             args.extend(["--minio-bucket", config.minio_bucket])
+        if config.config_file is not None:
+            args.append(f"--config-file={config.config_file.resolve()}")
+        if config.ensure_bucket_exists:
+            args.append("--ensure-bucket-exists")
+        if config.minio_path is not None:
+            args.append(f"--minio-path={config.minio_path}")
 
         return self._execute(args, timeout=timeout)
 
@@ -833,9 +887,8 @@ class JoshCLI:
         """
         args = [
             "batchRemote",
-            str(config.script_or_dir.resolve()),
-            config.simulation,
             f"--target={config.target}",
+            f"--minio-prefix={config.minio_prefix}",
         ]
 
         if config.replicates > 1:
@@ -846,8 +899,14 @@ class JoshCLI:
             args.append(f"--poll-interval={config.poll_interval}")
         if config.timeout is not None:
             args.append(f"--timeout={config.timeout}")
-        for name, value in config.custom_tags.items():
-            args.extend(["--custom-tag", f"{name}={value}"])
+        if config.stage_from_local_dir is not None:
+            args.append(
+                f"--stage-from-local-dir={config.stage_from_local_dir.resolve()}"
+            )
+        if config.require_prestaged:
+            args.append("--require-prestaged")
+
+        args.append(config.simulation)
 
         return self._execute(
             args, timeout=timeout, jfr=jfr, stream_output=stream_output,
@@ -879,6 +938,23 @@ class JoshCLI:
             str(config.output.resolve()),
             f"--target={config.target}",
         ]
+
+        if config.crs is not None:
+            args.append(f"--crs={config.crs}")
+        if config.x_coord is not None:
+            args.append(f"--x-coord={config.x_coord}")
+        if config.y_coord is not None:
+            args.append(f"--y-coord={config.y_coord}")
+        if config.time_dim is not None:
+            args.append(f"--time-dim={config.time_dim}")
+        if config.timestep is not None:
+            args.append(f"--timestep={config.timestep}")
+        if config.default_value is not None:
+            args.append(f"--default-value={config.default_value}")
+        if config.parallel:
+            args.append("--parallel")
+        if config.amend:
+            args.append("--amend")
 
         return self._execute(args, timeout=timeout, jfr=jfr)
 

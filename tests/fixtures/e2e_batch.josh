@@ -1,0 +1,42 @@
+# E2E batch remote test simulation.
+# Tiny grid, 5 timesteps — completes in seconds on GKE.
+# Writes CSV results to GCS via minio:// protocol.
+
+start simulation Main
+
+  grid.size = 1000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 count
+  steps.high = 5 count
+
+  exportFiles.patch = "minio://josh-batch-storage/e2e-test/pr5_output_{replicate}.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create 5 count of ForeverTree
+
+  export.treeCount.step = count(ForeverTree)
+  export.averageHeight.step = mean(ForeverTree.height)
+
+end patch
+
+start organism ForeverTree
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 meters
+  height.step = prior.height + sample uniform from 0 meters to 1 meters
+
+end organism
+
+start unit year
+
+  alias years
+
+end unit
