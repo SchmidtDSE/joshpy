@@ -39,6 +39,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -935,6 +936,15 @@ def run_adaptive_sweep(
     # Set session status to running
     registry.update_session_status(session_id, "running")
 
+    # Per-sweep staging root for batch remote mode. Cleaned up in finally.
+    sweep_workdir: Path | None = None
+    if batch_remote:
+        import tempfile
+
+        sweep_workdir = Path(
+            tempfile.mkdtemp(prefix=f"joshpy-adaptive-{session_id}-")
+        )
+
     try:
         for trial_num in range(n_trials):
             # 1. Ask Optuna for next params
@@ -977,16 +987,32 @@ def run_adaptive_sweep(
             # 5. Execute CLI
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if batch_remote:
+                from joshpy.batch_orchestrator import assemble_batch_workdir
+                from joshpy.cli import StageToMinioConfig
                 from joshpy.jobs import to_batch_remote_config
 
-                br_config = to_batch_remote_config(
-                    job, target,
-                    no_wait=False,  # adaptive sweeps always block
-                    timeout=batch_timeout,
+                assert target is not None
+                assert sweep_workdir is not None
+
+                job_dir = assemble_batch_workdir(job, sweep_workdir)
+                per_job_prefix = (
+                    f"sweeps/{session_id}/jobs/{job.run_hash}/"
                 )
-                result = cli.batch_remote(
-                    br_config, jfr=job_jfr, stream_output=stream_output,
+                stage_result = cli.stage_to_minio(
+                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
                 )
+                if not stage_result.success:
+                    result = stage_result
+                else:
+                    br_config = to_batch_remote_config(
+                        job, target, per_job_prefix,
+                        no_wait=False,  # adaptive sweeps always block
+                        timeout=batch_timeout,
+                        require_prestaged=True,
+                    )
+                    result = cli.batch_remote(
+                        br_config, jfr=job_jfr, stream_output=stream_output,
+                    )
             elif remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
@@ -1122,6 +1148,11 @@ def run_adaptive_sweep(
         # Set status to failed on exception
         registry.update_session_status(session_id, "failed")
         raise
+    finally:
+        if sweep_workdir is not None:
+            import shutil
+
+            shutil.rmtree(sweep_workdir, ignore_errors=True)
 
 
 def _create_single_job(
