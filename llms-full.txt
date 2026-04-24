@@ -1251,6 +1251,481 @@ rows_loaded = recover_sweep_results(
 
 ---
 
+## Target Profiles
+
+Target profiles are shared configuration between joshsim (Java) and joshpy (Python). Stored as JSON under `~/.josh/targets/<name>.json`, they define remote execution targets (HTTP Cloud Run or Kubernetes/GKE) with connection info, MinIO/S3 credentials, and resource settings. Batch-remote dispatch loads a target profile by name; joshpy also exposes Python helpers to read, write, list, and delete them.
+
+### Dataclasses
+
+```python
+from joshpy import (
+    TargetProfile,
+    HttpTargetConfig,
+    KubernetesTargetConfig,
+    ResolvedMinioCreds,
+    load_target, save_target, list_targets, delete_target,
+    resolve_minio_creds,
+)
+
+# HTTP (Cloud Run) target
+http_profile = TargetProfile(
+    target_type="http",
+    http=HttpTargetConfig(
+        endpoint="https://josh-executor-dev-xxxx.run.app",
+        api_key="...",
+    ),
+    minio_endpoint="https://storage.googleapis.com",
+    minio_bucket="josh-batch-storage",
+)
+
+# Kubernetes (GKE) target
+k8s_profile = TargetProfile(
+    target_type="kubernetes",
+    kubernetes=KubernetesTargetConfig(
+        namespace="joshsim",
+        image="ghcr.io/schmidtdse/josh/joshsim-batch:latest",
+        context="gke_dse-nps_us-west1_josh-k8s-gke",   # kubectl context
+        pod_minio_endpoint="https://storage.googleapis.com",
+        resources={
+            "requests": {"cpu": "1", "memory": "2Gi"},
+            "limits": {"memory": "4Gi"},
+        },
+        parallelism=5,
+        timeout_seconds=600,
+        ttl_seconds_after_finished=3600,
+        spot=True,
+    ),
+    minio_endpoint="https://storage.googleapis.com",
+    minio_bucket="josh-batch-storage",
+)
+```
+
+### CRUD
+
+```python
+save_target("gke-test", k8s_profile)         # writes ~/.josh/targets/gke-test.json
+profile = load_target("gke-test")            # reads; raises FileNotFoundError if missing
+names = list_targets()                       # sorted list of profile names
+delete_target("gke-test")                    # removes the file
+```
+
+### JSON schema (mixed snake/camel case)
+
+JSON keys are mostly `snake_case`, with three exceptions: `apiKey`, `timeoutSeconds`, `ttlSecondsAfterFinished`. joshpy's serializer handles the renames automatically. The JSON file looks like:
+
+```json
+{
+  "type": "kubernetes",
+  "kubernetes": {
+    "namespace": "joshsim",
+    "image": "ghcr.io/schmidtdse/josh/joshsim-batch:latest",
+    "context": "gke_dse-nps_us-west1_josh-k8s-gke",
+    "pod_minio_endpoint": "https://storage.googleapis.com",
+    "resources": {"requests": {"cpu": "1", "memory": "2Gi"}, "limits": {"memory": "4Gi"}},
+    "parallelism": 5,
+    "timeoutSeconds": 600,
+    "ttlSecondsAfterFinished": 3600,
+    "spot": true
+  },
+  "minio_endpoint": "https://storage.googleapis.com",
+  "minio_bucket": "josh-batch-storage"
+}
+```
+
+### MinIO credential resolution
+
+Credentials are resolved in hierarchy: **profile > env vars**. Profiles usually omit secrets; env vars (`MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET`) supply them.
+
+```python
+creds = resolve_minio_creds(profile)
+# -> ResolvedMinioCreds(endpoint=..., access_key=..., secret_key=..., bucket=...)
+```
+
+`resolve_minio_creds(None)` returns env-only credentials.
+
+---
+
+## Batch Remote Execution
+
+Batch remote dispatches simulations to a K8s or HTTP target via MinIO-staged inputs. joshsim#423 separated staging from dispatch: `stageToMinio` uploads inputs to a MinIO prefix (writing a `.josh-staged.json` sentinel), then `batchRemote --require-prestaged --minio-prefix=<prefix>` verifies the sentinel and runs. For parameter sweeps, each `ExpandedJob` stages its own per-job prefix (fixing the directory-contamination bug from pre-#423).
+
+### High-level: one-liner sweep
+
+```python
+from joshpy import SweepManager
+
+# Loads ~/.josh/targets/gke-test.json, stages each ExpandedJob, dispatches
+# via batchRemote --require-prestaged, auto-ingests results.
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiment.duckdb")
+    .with_batch_remote("gke-test")
+    .build()
+)
+results = manager.run()
+```
+
+### Low-level: explicit stage + dispatch
+
+```python
+from pathlib import Path
+from joshpy import JoshCLI, StageToMinioConfig, BatchRemoteConfig
+
+cli = JoshCLI()
+
+# 1. Stage inputs (writes .josh-staged.json sentinel at the prefix)
+cli.stage_to_minio(StageToMinioConfig(
+    input_dir=Path("/tmp/work/abc123/"),
+    prefix="sweeps/s1/jobs/abc123/",
+))
+
+# 2. Dispatch (verifies sentinel reports status=complete, else fails fast)
+cli.batch_remote(BatchRemoteConfig(
+    simulation="Main",
+    target="gke-test",
+    minio_prefix="sweeps/s1/jobs/abc123/",
+    replicates=5,
+    require_prestaged=True,      # mutex with stage_from_local_dir
+))
+```
+
+### BatchRemoteConfig options
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `simulation` | `str` | **required** — simulation name |
+| `target` | `str` | **required** — profile name (loads `~/.josh/targets/<name>.json`) |
+| `minio_prefix` | `str` | **required** — MinIO prefix where inputs live |
+| `replicates` | `int` | Number of replicates (default 1; each becomes a K8s indexed-Job pod) |
+| `no_wait` | `bool` | Dispatch + exit without polling (fire-and-forget) |
+| `poll_interval` | `int \| None` | Seconds between polls when JAR polls internally |
+| `timeout` | `int \| None` | Overall job timeout |
+| `stage_from_local_dir` | `Path \| None` | Convenience: upload before dispatch; mutex with `require_prestaged` |
+| `require_prestaged` | `bool` | Fail fast unless `.josh-staged.json` reports `status=complete` |
+
+### The `.josh-staged.json` sentinel
+
+`stageToMinio` writes a small JSON object at `<prefix>/.josh-staged.json`. Contents:
+
+```json
+{"status": "complete", "completedAt": "2026-04-24T01:49:32Z"}
+```
+
+Statuses: `staging` (in progress) → `complete` (inputs uploaded) or `error`. `batchRemote --require-prestaged` blocks dispatch unless `status=complete`.
+
+### Polling dispatched jobs (fire-and-forget)
+
+```python
+from joshpy import PollBatchConfig
+
+# Dispatch with no_wait; JAR writes dispatch JSON to stdout
+result = cli.batch_remote(BatchRemoteConfig(
+    simulation="Main",
+    target="gke-test",
+    minio_prefix="sweeps/s1/jobs/abc123/",
+    require_prestaged=True,
+    no_wait=True,
+))
+import json
+job_id = json.loads(result.stdout)["jobId"]
+
+# Poll later (same or different machine)
+poll = cli.poll_batch(PollBatchConfig(job_id=job_id, target="gke-test"))
+# Exit codes:
+#   0   complete (stdout has final status JSON)
+#   1   error
+#   2   still running / pending
+#   100 transient poll failure — caller should retry
+```
+
+### Stage configs
+
+```python
+from joshpy import StageFromMinioConfig, StageToMinioConfig
+
+# Upload: writes .josh-staged.json sentinel at the prefix
+cli.stage_to_minio(StageToMinioConfig(
+    input_dir=Path("/tmp/work"),
+    prefix="sweeps/s1/jobs/abc/",
+    ensure_bucket_exists=True,      # create bucket if missing
+    config_file=Path("minio.json"), # alt: read MinIO creds from JSON
+    minio_path="base/models/v1/",   # base path within bucket
+))
+
+# Download: pulls all objects under the prefix to a local dir
+cli.stage_from_minio(StageFromMinioConfig(
+    output_dir=Path("/tmp/out"),
+    prefix="e2e-test/",
+))
+```
+
+Both configs share: `minio_endpoint`, `minio_access_key`, `minio_secret_key`, `minio_bucket`, `config_file`, `ensure_bucket_exists`, `minio_path`. Unset fields fall back to joshsim's `HierarchyConfig` (env vars first, then profile JSON).
+
+### Per-job workdir assembly (internal)
+
+`SweepManager.run(batch_remote=True, ...)` allocates a per-sweep tempdir, then for each `ExpandedJob` calls `assemble_batch_workdir(job, workdir)` to build a staging subdir via symlinks:
+
+```
+workdir/<run_hash>/
+  sim.josh            # symlink to job.source_path
+  config.jshc         # unique rendered config for this job
+  <name>.jshd         # symlink per entry in job.file_mappings
+```
+
+Each subdir is uploaded under `sweeps/<session_id>/jobs/<run_hash>/`, then dispatched with `require_prestaged=True`. Per-job duplication is the accepted design — compression is the pressure-release (tracked in josh#425).
+
+---
+
+## Preprocess Batch
+
+`preprocess_batch()` offloads heavy geospatial preprocessing (NetCDF → `.jshd`) to a remote target, producing a local `.jshd` that's then referenced in `file_mappings` for sweep jobs.
+
+### Basic (blocking)
+
+```python
+from pathlib import Path
+from joshpy import JoshCLI, PreprocessBatchConfig
+
+cli = JoshCLI()
+cli.preprocess_batch(PreprocessBatchConfig(
+    script=Path("sim.josh"),
+    simulation="Main",
+    data_file=Path("temperature.nc"),
+    variable="tas",
+    units="K",
+    output=Path("temperature.jshd"),
+    target="gke-test",
+    # Optional:
+    crs="EPSG:4326",
+    x_coord="lon", y_coord="lat", time_dim="time",
+    timestep=0,
+    default_value=-999.0,
+    parallel=True,
+))
+# Blocks until the JAR reports complete; downloads temperature.jshd locally.
+```
+
+### Async (fire-and-forget, then poll)
+
+For large NetCDFs that take many minutes:
+
+```python
+import json
+from joshpy import PollBatchConfig
+
+result = cli.preprocess_batch(PreprocessBatchConfig(
+    script=Path("sim.josh"),
+    simulation="Main",
+    data_file=Path("climate.nc"),
+    variable="pr",
+    units="mm/day",
+    output=Path("precip.jshd"),
+    target="gke-test",
+    no_wait=True,
+    poll_interval=30,
+    timeout=1800,
+))
+job_id = json.loads(result.stdout)["jobId"]
+
+# Poll later
+poll = cli.poll_batch(PollBatchConfig(job_id=job_id, target="gke-test"))
+if poll.exit_code == 0:
+    # Result .jshd has been downloaded to output path
+    pass
+```
+
+### Flags mapped
+
+| Field | Flag |
+|-------|------|
+| `crs` | `--crs` |
+| `x_coord` | `--x-coord` |
+| `y_coord` | `--y-coord` |
+| `time_dim` | `--time-dim` |
+| `timestep` | `--timestep` |
+| `default_value` | `--default-value` |
+| `parallel` | `--parallel` |
+| `amend` | `--amend` |
+| `no_wait` | `--no-wait` |
+| `poll_interval` | `--poll-interval` |
+| `timeout` | `--timeout` |
+
+---
+
+## Result Recovery from S3/MinIO
+
+When simulations export CSVs to `minio://bucket/path/output_{replicate}.csv`, joshpy reads them directly from S3-compatible storage into DuckDB — no local download, no intermediate files. Same code path serves fresh sweeps (auto-ingest after batch dispatch) and recovery (re-ingest a prior run by label or hash).
+
+### Prerequisites
+
+DuckDB's `httpfs` extension handles S3 reads. joshpy installs + configures it on demand:
+
+```python
+from joshpy.registry import configure_s3
+
+conn = duckdb.connect()
+configure_s3(
+    conn,
+    endpoint="storage.googleapis.com",   # plain host OR full URL with scheme
+    access_key=os.environ["MINIO_ACCESS_KEY"],
+    secret_key=os.environ["MINIO_SECRET_KEY"],
+    region="auto",
+)
+```
+
+`configure_s3` accepts either `"host"` or `"https://host"` — the scheme is stripped and `use_ssl` is inferred accordingly.
+
+### Auto-ingest during sweep
+
+```python
+# Default: auto_ingest=True. After each successful batch job, joshpy
+# reads CSVs from the minio:// export path directly into the registry.
+manager = (
+    SweepManager.builder(config)
+    .with_registry("experiment.duckdb")
+    .with_batch_remote("gke-test")
+    .build()
+)
+results = manager.run()
+# DuckDB registry now contains cell_data from all replicates.
+```
+
+### Recover a prior run by label
+
+```python
+from joshpy import JoshCLI, RunRegistry, ingest_results
+
+cli = JoshCLI()
+registry = RunRegistry("experiment.duckdb")
+
+# Look up by label (set earlier via .with_label("my-run") or registry.label_run())
+rows = ingest_results(cli, registry, "my-run")
+# -> discovers minio:// paths via inspect-exports, skips OOM'd replicates,
+#    loads remaining CSVs into cell_data. Returns total rows loaded.
+
+# Or by run_hash directly
+rows = ingest_results(cli, registry, "abc123def456")
+```
+
+### Download locally instead of S3-native
+
+If you need the CSVs on disk (e.g., for offline analysis):
+
+```python
+rows = ingest_results(
+    cli, registry, "my-run",
+    download=True,
+    output_dir=Path("./local_results"),
+)
+```
+
+### SweepManager.ingest()
+
+Fire-and-forget workflow — dispatch all jobs, exit, then ingest later:
+
+```python
+manager.run(batch_no_wait=True)   # dispatches; exits without waiting
+# ... later, possibly a different machine:
+manager.ingest()                  # polls status, loads completed CSVs
+```
+
+---
+
+## Bottle Mode
+
+Bottles are self-contained `.tar.gz` archives that capture everything needed to reproduce a failed (or successful) sweep job: source `.josh`, rendered `.jshc`, data `.jshd` files, and a manifest with exit code / stderr / env. For batch-remote failures, the manifest also records the target and MinIO prefix.
+
+### Trigger modes (`bottle` kwarg on `run_sweep` / `SweepManager.run`)
+
+| Mode | Behavior |
+|------|----------|
+| `None` (default) | no bottling |
+| `"first_failure"` | bottle the first failing job, continue sweep |
+| `"first_success"` | bottle the first succeeding job, continue sweep |
+| `"all"` | bottle every job into one sweep bottle at end |
+| `"all_failures"` | bottle every failing job into one sweep bottle at end |
+
+Bottled failures go to `./bottles/` by default; override via `bottle_dir`.
+
+```python
+results = manager.run(
+    bottle="first_failure",
+    bottle_dir=Path("./bottles"),
+    bottle_omit_jshd=False,   # include .jshd files (default). Set True for smaller archives.
+)
+```
+
+### Archive structure
+
+```
+bottle_<run_hash>_<timestamp>.tar.gz
+└── bottle_<run_hash>/
+    ├── simulation.josh           # copied from job.source_path
+    ├── sweep_config.jshc         # rendered config (not a template)
+    ├── data/
+    │   └── climate.jshd          # each file_mapping entry (omitted if bottle_omit_jshd=True)
+    ├── run.sh                    # java -jar ... run with correct --data flags
+    └── manifest.json
+```
+
+### Manifest fields
+
+```json
+{
+  "joshpy_version": "0.6.0",
+  "jar_version": "0.5.0-dev",
+  "jar_sha256": "...",
+  "run_hash": "abc123def456",
+  "simulation": "Main",
+  "replicates": 5,
+  "parameters": {"maxGrowth": 50},
+  "python_version": "3.14.3 ...",
+  "platform": "Linux-6.6-x86_64",
+  "git_hash": "a9fa048...",
+  "bottled_at": "2026-04-24T01:49:32Z",
+  "exit_code": 1,
+  "stderr": "java.lang.RuntimeException: ...",
+  "batch": {
+    "target": "gke-test",
+    "minio_prefix": "sweeps/s1/jobs/abc123/",
+    "stage_prefix_root": "sweeps/s1/"
+  }
+}
+```
+
+The `batch` key is present only for jobs dispatched via batch-remote. Use it to re-stage inputs for a local repro or to inspect the failing K8s job directly on the cluster.
+
+### Unbottle for local reproduction
+
+```python
+from joshpy.bottle import unbottle
+
+config = unbottle(Path("bottles/bottle_abc123_20260424_014932.tar.gz"))
+# Returns a JobConfig pointing at the extracted dir; run locally:
+from joshpy import JoshCLI, run_sweep, JobExpander
+cli = JoshCLI()
+job_set = JobExpander().expand(config)
+run_sweep(cli, job_set)
+```
+
+### Sweep-wide bottle (`bottle="all"` / `"all_failures"`)
+
+Produces a single archive with a top-level `manifest.json` listing all jobs:
+
+```
+bottle_sweep_20260424_014932.tar.gz
+└── bottle_sweep_20260424_014932/
+    ├── data/                     # shared .jshd files (copied once)
+    ├── jobs/
+    │   ├── abc123/ { simulation.josh, sweep_config.jshc, run.sh }
+    │   └── def456/ { ... }
+    └── manifest.json             # { jobs: [...], batch: {target, stage_prefix_root}, ... }
+```
+
+Per-job batch metadata (MinIO prefix) is recorded under each `jobs[].batch` entry.
+
+---
+
 ## Config Parser
 
 The `config_parser` module parses Josh configuration files (`.jshc` format) into Python dicts.

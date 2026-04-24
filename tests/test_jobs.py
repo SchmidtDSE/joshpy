@@ -2362,7 +2362,7 @@ class TestDiscoverJshdFiles(unittest.TestCase):
 
 
 class TestToBatchRemoteConfig(unittest.TestCase):
-    """Tests for to_batch_remote_config() (post-josh#423)."""
+    """Tests for to_batch_remote_config()."""
 
     def test_basic_conversion(self):
         from joshpy.jobs import to_batch_remote_config
@@ -2387,8 +2387,8 @@ class TestToBatchRemoteConfig(unittest.TestCase):
         self.assertFalse(config.no_wait)
         # require_prestaged defaults to True (safe default for sweeps)
         self.assertTrue(config.require_prestaged)
-        # No stage_from_local_dir on the sweep path
-        self.assertIsNone(config.stage_from_local_dir)
+        # stage_from_local_dir intentionally not exposed in joshpy
+        self.assertFalse(hasattr(config, "stage_from_local_dir"))
         # BatchRemoteConfig should no longer carry custom_tags (removed)
         self.assertFalse(hasattr(config, "custom_tags"))
 
@@ -2433,7 +2433,7 @@ class TestToBatchRemoteConfig(unittest.TestCase):
 
 
 class TestRunSweepBatchRemote(unittest.TestCase):
-    """Tests for run_sweep() batch_remote mode (post-josh#423 stage + dispatch)."""
+    """Tests for run_sweep() batch_remote mode (stage + dispatch)."""
 
     def _make_real_job(self, tmp: Path, run_hash: str = "abc123") -> ExpandedJob:
         """Build an ExpandedJob backed by a real on-disk .josh file."""
@@ -2593,6 +2593,64 @@ class TestRunSweepBatchRemote(unittest.TestCase):
         mock_cli.poll_batch.assert_called()
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
+
+    def test_bottle_records_batch_metadata(self):
+        """bottle=first_failure should embed target + minio_prefix in manifest."""
+        import json as _json
+        import tarfile
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli._resolved_jar = Path("/fake/joshsim-fat.jar")
+        mock_cli.java_path = "java"
+        # Force a stage failure so the bottle records the failing job
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=False, exit_code=1, stdout="",
+            stderr="bucket denied", command=["stageToMinio"],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            job = self._make_real_job(tmp, run_hash="metaabc12345")
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=1,
+                __iter__=lambda s: iter([job]),
+            )
+            bottle_dir = tmp / "bottles"
+
+            with self.assertRaises(Exception):
+                run_sweep(
+                    mock_cli, job_set,
+                    batch_remote=True,
+                    target="gke-test",
+                    session_id="s-meta",
+                    quiet=True,
+                    stop_on_failure=True,
+                    bottle="first_failure",
+                    bottle_dir=bottle_dir,
+                    bottle_omit_jshd=True,
+                )
+
+            # Locate the bottle archive and parse its manifest
+            archives = list(bottle_dir.glob("bottle_*.tar.gz"))
+            self.assertEqual(len(archives), 1, f"got {archives}")
+            with tarfile.open(archives[0], "r:gz") as tar:
+                manifest_member = next(
+                    m for m in tar.getmembers()
+                    if m.name.endswith("/manifest.json")
+                )
+                f = tar.extractfile(manifest_member)
+                assert f is not None
+                manifest = _json.loads(f.read().decode("utf-8"))
+
+            self.assertIn("batch", manifest)
+            self.assertEqual(manifest["batch"]["target"], "gke-test")
+            self.assertIn(
+                "metaabc12345", manifest["batch"]["minio_prefix"],
+            )
+            self.assertEqual(
+                manifest["batch"]["stage_prefix_root"], "sweeps/s-meta/",
+            )
 
 
 if __name__ == '__main__':
