@@ -12,7 +12,7 @@ start simulation Main
   steps.low = 0 count
   steps.high = 5 count
 
-  exportFiles.patch = "minio://josh-batch-storage/e2e-test/output_{replicate}_{run_hash}.csv"
+  exportFiles.patch = "minio://josh-batch-storage/e2e-test/pr5_output_{replicate}.csv"
 
 end simulation
 
