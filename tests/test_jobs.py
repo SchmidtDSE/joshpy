@@ -2362,7 +2362,7 @@ class TestDiscoverJshdFiles(unittest.TestCase):
 
 
 class TestToBatchRemoteConfig(unittest.TestCase):
-    """Tests for to_batch_remote_config() (post-josh#423)."""
+    """Tests for to_batch_remote_config()."""
 
     def test_basic_conversion(self):
         from joshpy.jobs import to_batch_remote_config
@@ -2433,7 +2433,7 @@ class TestToBatchRemoteConfig(unittest.TestCase):
 
 
 class TestRunSweepBatchRemote(unittest.TestCase):
-    """Tests for run_sweep() batch_remote mode (post-josh#423 stage + dispatch)."""
+    """Tests for run_sweep() batch_remote mode (stage + dispatch)."""
 
     def _make_real_job(self, tmp: Path, run_hash: str = "abc123") -> ExpandedJob:
         """Build an ExpandedJob backed by a real on-disk .josh file."""

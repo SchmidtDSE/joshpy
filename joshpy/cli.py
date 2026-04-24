@@ -463,36 +463,24 @@ class StageToMinioConfig:
 
 @dataclass(frozen=True)
 class BatchRemoteConfig:
-    """Arguments for 'java -jar joshsim.jar batchRemote' command (post-josh#423).
+    """Arguments for 'java -jar joshsim.jar batchRemote' command.
 
-    joshpy's staging model is **always** explicit two-step:
-
-    1. Caller uploads inputs via :meth:`JoshCLI.stage_to_minio`, which writes a
-       ``.josh-staged.json`` sentinel at ``minio_prefix`` on completion.
-    2. Caller dispatches via :meth:`JoshCLI.batch_remote` with
-       ``require_prestaged=True``, which short-circuits if the sentinel isn't
-       ``status=complete``.
-
-    This matches josh#426's direction of keeping ``stageToMinio`` /
-    ``stageFromMinio`` as user-controlled primitives for targets with
-    persistent local storage (e.g., a future ssh target). The JAR also
-    supports a ``--stage-from-local-dir`` flag that bundles both steps into
-    one subprocess; joshpy intentionally does not expose it because it adds
-    no capability over the two-step path and gives us worse error
-    granularity (the host stages + dispatches in one call, so we can't
-    record the per-job MinIO prefix in the bottle before the JAR runs).
+    Mirrors josh's CLI surface. joshpy's staging model is always explicit
+    two-step: caller uploads inputs via :meth:`JoshCLI.stage_to_minio`, then
+    dispatches via :meth:`JoshCLI.batch_remote` with ``require_prestaged=True``
+    to verify the sentinel before the remote target starts.
 
     Attributes:
         simulation: Name of simulation to run.
         target: Target profile name (required).
         minio_prefix: MinIO object prefix where inputs already live (e.g.
-            ``batch-jobs/my-run/inputs/``). Must have ``.josh-staged.json``
-            sentinel present if ``require_prestaged=True``.
+            ``batch-jobs/my-run/inputs/``). Must have the staging sentinel
+            present if ``require_prestaged=True``.
         replicates: Number of replicates (default: 1).
         no_wait: If True, dispatch and exit without polling (default: False).
         poll_interval: Polling interval in seconds (optional).
         timeout: Job timeout in seconds (optional).
-        require_prestaged: Fail fast unless ``.josh-staged.json`` at
+        require_prestaged: Fail fast unless the staging sentinel at
             ``minio_prefix`` reports ``complete``. Recommended for sweeps;
             ``run_sweep`` sets this to True by default via
             :func:`joshpy.jobs.to_batch_remote_config`.

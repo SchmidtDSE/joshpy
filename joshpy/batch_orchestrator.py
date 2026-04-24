@@ -1,9 +1,9 @@
 """Per-job staging directory assembly for batch remote execution.
 
 The sweep loop assembles one directory per ``ExpandedJob`` so each job stages
-only its own ``.josh``/``.jshc``/``.jshd`` files into its MinIO prefix. This
-avoids the directory-contamination bug where sibling fixture files were swept
-in when the pre-#423 JAR staged a whole parent directory.
+only its own ``.josh``/``.jshc``/``.jshd`` files into its MinIO prefix,
+ensuring unrelated files in the caller's working directory don't leak into
+the remote target.
 """
 
 from __future__ import annotations
@@ -54,10 +54,11 @@ def assemble_batch_workdir(job: ExpandedJob, workdir: Path) -> Path:
     (target / "config.jshc").write_text(job.config_content)
 
     for name, path in job.file_mappings.items():
-        # Preserve whichever suffix the source file actually has so pods pick
-        # the right getter (JshdExternalGetter vs JshdZExternalGetter post
-        # josh#427). If the key already carries a recognized suffix, use it
-        # as-is; otherwise append the source file's suffix (default .jshd).
+        # Preserve whichever suffix the source file actually has (.jshd
+        # uncompressed vs .jshdz XZ-compressed) so the remote target's
+        # multi-format getter routes reads correctly. If the file_mappings
+        # key already carries a recognized suffix, use it as-is; otherwise
+        # append the source file's suffix (default .jshd).
         name_lower = name.lower()
         if name_lower.endswith(".jshd") or name_lower.endswith(".jshdz"):
             dest_name = name

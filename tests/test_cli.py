@@ -1685,7 +1685,7 @@ class TestStageToMinioConfig(unittest.TestCase):
 
 
 class TestBatchRemote(unittest.TestCase):
-    """Tests for JoshCLI.batch_remote() (post-josh#423 flag-based CLI)."""
+    """Tests for JoshCLI.batch_remote()."""
 
     JAR_MODE = JarMode.LOCAL
 
@@ -1838,7 +1838,7 @@ class TestBatchRemote(unittest.TestCase):
 
 
 class TestBatchRemoteConfig(unittest.TestCase):
-    """Tests for BatchRemoteConfig dataclass (post-josh#423)."""
+    """Tests for BatchRemoteConfig dataclass."""
 
     def test_basic_creation(self):
         from joshpy.cli import BatchRemoteConfig

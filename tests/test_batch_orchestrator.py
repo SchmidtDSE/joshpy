@@ -122,8 +122,8 @@ class TestAssembleBatchWorkdir(unittest.TestCase):
             self.assertFalse((target / "temp.jshd.jshd").exists())
 
     def test_jshdz_source_preserves_suffix_when_key_has_none(self):
-        """Compressed .jshdz sources (josh#427) should symlink as .jshdz so
-        the pod's MultiFormatExternalGetter routes them correctly."""
+        """Compressed .jshdz sources should symlink as .jshdz so the remote
+        target's multi-format getter routes reads to the right strategy."""
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp = Path(tmp_str)
             workdir = tmp / "work"
