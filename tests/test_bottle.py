@@ -736,5 +736,106 @@ class TestUnbottle(unittest.TestCase):
             unbottle(Path("/nonexistent/bottle.tar.gz"))
 
 
+class TestBottleBatchMetadata(unittest.TestCase):
+    """Tests for batch_metadata embedding in bottle manifests (PR6)."""
+
+    def _extract_manifest(self, archive_path: Path) -> dict:
+        """Open a bottle tarball and return the parsed manifest.json."""
+        with tarfile.open(archive_path, "r:gz") as tar:
+            manifest_member = next(
+                m for m in tar.getmembers()
+                if m.name.endswith("/manifest.json")
+            )
+            f = tar.extractfile(manifest_member)
+            assert f is not None
+            return json.loads(f.read().decode("utf-8"))
+
+    @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
+    @patch("joshpy.jar.get_jar_hash", return_value="sha256abc")
+    def test_create_bottle_embeds_batch_metadata(self, _h, _v):
+        from joshpy.bottle import create_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job = _make_job(tmpdir)
+            cli_result = _make_cli_result(success=False)
+            cli = _make_mock_cli()
+
+            archive = create_bottle(
+                job=job,
+                cli_result=cli_result,
+                cli=cli,
+                output_dir=Path(tmpdir) / "bottles",
+                batch_metadata={
+                    "target": "gke-test",
+                    "minio_prefix": "sweeps/s1/jobs/abc123/",
+                    "stage_prefix_root": "sweeps/s1/",
+                },
+            )
+            manifest = self._extract_manifest(archive)
+            self.assertIn("batch", manifest)
+            self.assertEqual(manifest["batch"]["target"], "gke-test")
+            self.assertEqual(
+                manifest["batch"]["minio_prefix"], "sweeps/s1/jobs/abc123/"
+            )
+
+    @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
+    @patch("joshpy.jar.get_jar_hash", return_value="sha256abc")
+    def test_create_bottle_omits_batch_key_when_unset(self, _h, _v):
+        from joshpy.bottle import create_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job = _make_job(tmpdir)
+            archive = create_bottle(
+                job=job,
+                cli_result=_make_cli_result(),
+                cli=_make_mock_cli(),
+                output_dir=Path(tmpdir) / "bottles",
+            )
+            manifest = self._extract_manifest(archive)
+            self.assertNotIn("batch", manifest)
+
+    @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
+    @patch("joshpy.jar.get_jar_hash", return_value="sha256abc")
+    def test_create_sweep_bottle_embeds_top_and_per_job_batch(self, _h, _v):
+        from joshpy.bottle import create_sweep_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job1 = _make_job(tmpdir, run_hash="hash111aaaaa")
+            job2 = _make_job(tmpdir, run_hash="hash222bbbbb")
+            results = [
+                (job1, _make_cli_result(success=False)),
+                (job2, _make_cli_result(success=False)),
+            ]
+
+            archive = create_sweep_bottle(
+                job_results=results,
+                cli=_make_mock_cli(),
+                output_dir=Path(tmpdir) / "bottles",
+                batch_metadata={
+                    "target": "gke-test",
+                    "stage_prefix_root": "sweeps/s2/",
+                },
+                per_job_batch_metadata={
+                    "hash111aaaaa": {"minio_prefix": "sweeps/s2/jobs/hash111aaaaa/"},
+                    "hash222bbbbb": {"minio_prefix": "sweeps/s2/jobs/hash222bbbbb/"},
+                },
+            )
+            manifest = self._extract_manifest(archive)
+            # Top-level batch block
+            self.assertIn("batch", manifest)
+            self.assertEqual(manifest["batch"]["target"], "gke-test")
+            # Per-job entries carry their own batch block
+            jobs = {j["run_hash"]: j for j in manifest["jobs"]}
+            self.assertIn("batch", jobs["hash111aaaaa"])
+            self.assertEqual(
+                jobs["hash111aaaaa"]["batch"]["minio_prefix"],
+                "sweeps/s2/jobs/hash111aaaaa/",
+            )
+            self.assertEqual(
+                jobs["hash222bbbbb"]["batch"]["minio_prefix"],
+                "sweeps/s2/jobs/hash222bbbbb/",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

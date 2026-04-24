@@ -175,6 +175,7 @@ def _build_manifest(
     parameters: dict[str, Any],
     original_josh_path: str | None = None,
     original_data_paths: dict[str, str] | None = None,
+    batch_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the manifest.json content."""
     from joshpy.jar import get_jar_hash, get_jar_version
@@ -211,6 +212,9 @@ def _build_manifest(
         manifest["stderr"] = cli_result.stderr
         manifest["stdout"] = cli_result.stdout
 
+    if batch_metadata:
+        manifest["batch"] = batch_metadata
+
     return manifest
 
 
@@ -220,6 +224,7 @@ def create_bottle(
     cli: JoshCLI | None = None,
     output_dir: str | Path = Path("bottles"),
     omit_jshd: bool = False,
+    batch_metadata: dict[str, Any] | None = None,
 ) -> Path:
     """Create a self-contained bottle archive from an ExpandedJob.
 
@@ -232,6 +237,10 @@ def create_bottle(
             The ``run.sh`` still lists ``--data`` flags so the recipient knows
             what files to provide. Default False — missing data files raise
             ``FileNotFoundError``.
+        batch_metadata: Optional dict embedded under the manifest's ``batch``
+            key. Use this when bottling a batch-remote job so reviewers can
+            see the target and MinIO prefix used (e.g.
+            ``{"target": "gke-test", "minio_prefix": "sweeps/.../jobs/abc/"}``).
 
     Returns:
         Path to the created ``.tar.gz`` archive.
@@ -328,6 +337,7 @@ def create_bottle(
             parameters=job.parameters,
             original_josh_path=str(job.source_path) if job.source_path else None,
             original_data_paths=original_data_paths,
+            batch_metadata=batch_metadata,
         )
         manifest["omit_jshd"] = omit_jshd
         (staging / "manifest.json").write_text(
@@ -527,6 +537,8 @@ def create_sweep_bottle(
     cli: JoshCLI | None = None,
     output_dir: str | Path = Path("bottles"),
     omit_jshd: bool = False,
+    batch_metadata: dict[str, Any] | None = None,
+    per_job_batch_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> Path:
     """Create a single bottle archive containing multiple sweep jobs.
 
@@ -552,6 +564,12 @@ def create_sweep_bottle(
         cli: Optional JoshCLI instance for JAR metadata.
         output_dir: Directory for the archive. Default: ``./bottles/``.
         omit_jshd: If True, skip copying .jshd data files.
+        batch_metadata: Optional dict embedded under the top-level manifest's
+            ``batch`` key. Use for sweep-wide context (e.g.
+            ``{"target": "gke-test", "stage_prefix_root": "sweeps/s1/"}``).
+        per_job_batch_metadata: Optional dict mapping ``run_hash`` to a
+            per-job batch dict. When set, each job manifest entry gets a
+            ``batch`` sub-key (useful for recording per-job MinIO prefixes).
 
     Returns:
         Path to the created ``.tar.gz`` archive.
@@ -664,6 +682,8 @@ def create_sweep_bottle(
             }
             if not cli_result.success:
                 entry["stderr"] = cli_result.stderr
+            if per_job_batch_metadata and job.run_hash in per_job_batch_metadata:
+                entry["batch"] = per_job_batch_metadata[job.run_hash]
             job_manifests.append(entry)
 
         # Top-level manifest
@@ -686,6 +706,8 @@ def create_sweep_bottle(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
         }
+        if batch_metadata:
+            manifest["batch"] = batch_metadata
         (staging / "manifest.json").write_text(
             json.dumps(manifest, indent=2, default=str) + "\n"
         )

@@ -463,28 +463,27 @@ class StageToMinioConfig:
 
 @dataclass(frozen=True)
 class BatchRemoteConfig:
-    """Arguments for 'java -jar joshsim.jar batchRemote' command (post-josh#423).
+    """Arguments for 'java -jar joshsim.jar batchRemote' command.
 
-    Staging is a separate concern from dispatch: the simulation and data files
-    must already live in MinIO under ``minio_prefix`` (guarded by a
-    ``.josh-staged.json`` sentinel), OR be provided via ``stage_from_local_dir``
-    which invokes ``stageToMinio`` as a convenience before dispatch. These two
-    staging modes are mutually exclusive.
+    Mirrors josh's CLI surface. joshpy's staging model is always explicit
+    two-step: caller uploads inputs via :meth:`JoshCLI.stage_to_minio`, then
+    dispatches via :meth:`JoshCLI.batch_remote` with ``require_prestaged=True``
+    to verify the sentinel before the remote target starts.
 
     Attributes:
         simulation: Name of simulation to run.
         target: Target profile name (required).
-        minio_prefix: MinIO object prefix where inputs live (e.g.
-            ``batch-jobs/my-run/inputs/``).
+        minio_prefix: MinIO object prefix where inputs already live (e.g.
+            ``batch-jobs/my-run/inputs/``). Must have the staging sentinel
+            present if ``require_prestaged=True``.
         replicates: Number of replicates (default: 1).
         no_wait: If True, dispatch and exit without polling (default: False).
         poll_interval: Polling interval in seconds (optional).
         timeout: Job timeout in seconds (optional).
-        stage_from_local_dir: If set, upload this local directory to
-            ``minio_prefix`` before dispatching. Mutex with ``require_prestaged``.
-        require_prestaged: Fail fast unless ``.josh-staged.json`` at
-            ``minio_prefix`` reports ``complete``. Recommended for sweeps.
-            Mutex with ``stage_from_local_dir``.
+        require_prestaged: Fail fast unless the staging sentinel at
+            ``minio_prefix`` reports ``complete``. Recommended for sweeps;
+            ``run_sweep`` sets this to True by default via
+            :func:`joshpy.jobs.to_batch_remote_config`.
     """
 
     simulation: str
@@ -494,14 +493,7 @@ class BatchRemoteConfig:
     no_wait: bool = False
     poll_interval: int | None = None
     timeout: int | None = None
-    stage_from_local_dir: Path | None = None
     require_prestaged: bool = False
-
-    def __post_init__(self) -> None:
-        if self.stage_from_local_dir is not None and self.require_prestaged:
-            raise ValueError(
-                "stage_from_local_dir and require_prestaged are mutually exclusive"
-            )
 
 
 @dataclass(frozen=True)
@@ -527,6 +519,9 @@ class PreprocessBatchConfig:
         default_value: Default value to fill grid spaces before copying data.
         parallel: Enable parallel processing of patches within each timestep.
         amend: Amend existing output file rather than overwriting.
+        no_wait: If True, dispatch and exit without polling for completion.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Maximum seconds to wait for completion (optional).
     """
 
     script: Path
@@ -544,6 +539,9 @@ class PreprocessBatchConfig:
     default_value: float | None = None
     parallel: bool = False
     amend: bool = False
+    no_wait: bool = False
+    poll_interval: int | None = None
+    timeout: int | None = None
 
 
 @dataclass(frozen=True)
@@ -899,10 +897,6 @@ class JoshCLI:
             args.append(f"--poll-interval={config.poll_interval}")
         if config.timeout is not None:
             args.append(f"--timeout={config.timeout}")
-        if config.stage_from_local_dir is not None:
-            args.append(
-                f"--stage-from-local-dir={config.stage_from_local_dir.resolve()}"
-            )
         if config.require_prestaged:
             args.append("--require-prestaged")
 
@@ -955,6 +949,12 @@ class JoshCLI:
             args.append("--parallel")
         if config.amend:
             args.append("--amend")
+        if config.no_wait:
+            args.append("--no-wait")
+        if config.poll_interval is not None:
+            args.append(f"--poll-interval={config.poll_interval}")
+        if config.timeout is not None:
+            args.append(f"--timeout={config.timeout}")
 
         return self._execute(args, timeout=timeout, jfr=jfr)
 
