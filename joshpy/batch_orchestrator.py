@@ -54,7 +54,19 @@ def assemble_batch_workdir(job: ExpandedJob, workdir: Path) -> Path:
     (target / "config.jshc").write_text(job.config_content)
 
     for name, path in job.file_mappings.items():
-        dest_name = name if name.endswith(".jshd") else f"{name}.jshd"
+        # Preserve whichever suffix the source file actually has so pods pick
+        # the right getter (JshdExternalGetter vs JshdZExternalGetter post
+        # josh#427). If the key already carries a recognized suffix, use it
+        # as-is; otherwise append the source file's suffix (default .jshd).
+        name_lower = name.lower()
+        if name_lower.endswith(".jshd") or name_lower.endswith(".jshdz"):
+            dest_name = name
+        else:
+            src_suffix = path.suffix.lower()
+            if src_suffix not in (".jshd", ".jshdz"):
+                src_suffix = ".jshd"
+            dest_name = f"{name}{src_suffix}"
+
         dest = target / dest_name
         if dest.exists() or dest.is_symlink():
             dest.unlink()

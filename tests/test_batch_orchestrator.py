@@ -121,6 +121,40 @@ class TestAssembleBatchWorkdir(unittest.TestCase):
             self.assertTrue((target / "temp.jshd").is_symlink())
             self.assertFalse((target / "temp.jshd.jshd").exists())
 
+    def test_jshdz_source_preserves_suffix_when_key_has_none(self):
+        """Compressed .jshdz sources (josh#427) should symlink as .jshdz so
+        the pod's MultiFormatExternalGetter routes them correctly."""
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            workdir = tmp / "work"
+            workdir.mkdir()
+
+            compressed = tmp / "climate.jshdz"
+            compressed.write_bytes(b"CLIMATE_XZ")
+
+            job = _make_job(tmp, file_mappings={"climate": compressed})
+            target = assemble_batch_workdir(job, workdir)
+
+            self.assertTrue((target / "climate.jshdz").is_symlink())
+            self.assertFalse((target / "climate.jshd").exists())
+            self.assertFalse((target / "climate.jshdz.jshd").exists())
+
+    def test_jshdz_key_suffix_is_not_doubled(self):
+        """Key ending in .jshdz should be used as-is (no .jshdz.jshd)."""
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            workdir = tmp / "work"
+            workdir.mkdir()
+
+            compressed = tmp / "cover.jshdz"
+            compressed.write_bytes(b"COVER_XZ")
+
+            job = _make_job(tmp, file_mappings={"cover.jshdz": compressed})
+            target = assemble_batch_workdir(job, workdir)
+
+            self.assertTrue((target / "cover.jshdz").is_symlink())
+            self.assertFalse((target / "cover.jshdz.jshd").exists())
+
     def test_raises_when_source_path_none(self):
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp = Path(tmp_str)

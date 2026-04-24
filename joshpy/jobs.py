@@ -1348,9 +1348,16 @@ def to_batch_remote_config(
 ) -> BatchRemoteConfig:
     """Convert an ExpandedJob to a BatchRemoteConfig for batch remote execution.
 
-    Inputs must already be staged at ``minio_prefix`` (guarded by a
-    ``.josh-staged.json`` sentinel). Use :func:`assemble_batch_workdir` +
-    :func:`cli.stage_to_minio` before dispatching.
+    joshpy's staging model is always explicit stage-then-dispatch. Callers
+    (typically ``run_sweep``) first assemble a per-job workdir via
+    :func:`joshpy.batch_orchestrator.assemble_batch_workdir` and upload it
+    with :meth:`JoshCLI.stage_to_minio`, then pass the resulting prefix here.
+    The default ``require_prestaged=True`` makes the JAR fail fast if the
+    ``.josh-staged.json`` sentinel isn't ``status=complete``.
+
+    Power users dispatching against a pre-existing prefix (e.g., CI-staged
+    inputs, a persistent-storage target, or a re-run of a prior sweep) can
+    pass ``require_prestaged=False`` to skip the sentinel check entirely.
 
     Args:
         job: The expanded job to convert.
@@ -1360,7 +1367,8 @@ def to_batch_remote_config(
         poll_interval: Polling interval in seconds (optional).
         timeout: Job timeout in seconds (optional).
         require_prestaged: If True (default), JAR will fail fast unless the
-            prefix sentinel reports ``complete``.
+            prefix sentinel reports ``complete``. Set to False only when
+            intentionally dispatching against an unverified prefix.
 
     Returns:
         BatchRemoteConfig ready for use with JoshCLI.batch_remote().

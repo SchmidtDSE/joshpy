@@ -2387,8 +2387,8 @@ class TestToBatchRemoteConfig(unittest.TestCase):
         self.assertFalse(config.no_wait)
         # require_prestaged defaults to True (safe default for sweeps)
         self.assertTrue(config.require_prestaged)
-        # No stage_from_local_dir on the sweep path
-        self.assertIsNone(config.stage_from_local_dir)
+        # stage_from_local_dir intentionally not exposed in joshpy
+        self.assertFalse(hasattr(config, "stage_from_local_dir"))
         # BatchRemoteConfig should no longer carry custom_tags (removed)
         self.assertFalse(hasattr(config, "custom_tags"))
 

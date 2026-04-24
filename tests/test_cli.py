@@ -1818,29 +1818,6 @@ class TestBatchRemote(unittest.TestCase):
 
     @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
     @patch("subprocess.run")
-    def test_stage_from_local_dir(self, mock_run, _mock_jar):
-        """batch_remote() should include --stage-from-local-dir when set."""
-        from joshpy.cli import BatchRemoteConfig
-
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        cli = JoshCLI(josh_jar=self.JAR_MODE)
-        config = BatchRemoteConfig(
-            simulation="Main",
-            target="gke-test",
-            minio_prefix="sweeps/test/",
-            stage_from_local_dir=Path("/tmp/inputs"),
-        )
-        cli.batch_remote(config)
-
-        cmd = mock_run.call_args[0][0]
-        # Resolved path is absolute; just check prefix + suffix
-        stage_args = [c for c in cmd if c.startswith("--stage-from-local-dir=")]
-        self.assertEqual(len(stage_args), 1)
-        self.assertTrue(stage_args[0].endswith("/inputs"))
-
-    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
-    @patch("subprocess.run")
     def test_require_prestaged(self, mock_run, _mock_jar):
         """batch_remote() should include --require-prestaged when set."""
         from joshpy.cli import BatchRemoteConfig
@@ -1878,8 +1855,10 @@ class TestBatchRemoteConfig(unittest.TestCase):
         self.assertFalse(config.no_wait)
         self.assertIsNone(config.poll_interval)
         self.assertIsNone(config.timeout)
-        self.assertIsNone(config.stage_from_local_dir)
         self.assertFalse(config.require_prestaged)
+        # stage_from_local_dir is intentionally not exposed — joshpy's
+        # staging model is always explicit stage_to_minio + require_prestaged.
+        self.assertFalse(hasattr(config, "stage_from_local_dir"))
 
     def test_frozen(self):
         from joshpy.cli import BatchRemoteConfig
@@ -1891,20 +1870,6 @@ class TestBatchRemoteConfig(unittest.TestCase):
         )
         with self.assertRaises(AttributeError):
             config.target = "other"
-
-    def test_mutex_stage_and_prestaged(self):
-        """stage_from_local_dir and require_prestaged are mutually exclusive."""
-        from joshpy.cli import BatchRemoteConfig
-
-        with self.assertRaises(ValueError) as ctx:
-            BatchRemoteConfig(
-                simulation="Main",
-                target="gke-test",
-                minio_prefix="sweeps/test/",
-                stage_from_local_dir=Path("/tmp/x"),
-                require_prestaged=True,
-            )
-        self.assertIn("mutually exclusive", str(ctx.exception))
 
 
 class TestPreprocessBatch(unittest.TestCase):
