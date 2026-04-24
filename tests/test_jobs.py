@@ -2652,6 +2652,140 @@ class TestRunSweepBatchRemote(unittest.TestCase):
                 manifest["batch"]["stage_prefix_root"], "sweeps/s-meta/",
             )
 
+    def _make_auto_ingest_mocks(self):
+        """Build the mock surface run_sweep needs to reach the auto_ingest hook.
+
+        Uses MagicMock for registry + a MagicMock export_paths whose resolve_path
+        returns a fake non-existent Path (so _register_job_outputs's file-stat
+        checks fall through cleanly).
+        """
+        from joshpy.cli import CLIResult
+
+        mock_cli = MagicMock()
+        mock_cli._resolved_jar = Path("/fake/joshsim-fat.jar")
+        mock_cli.java_path = "java"
+        mock_cli.stage_to_minio.return_value = CLIResult(
+            exit_code=0, stdout="", stderr="", command=["stageToMinio"],
+        )
+        mock_cli.batch_remote.return_value = CLIResult(
+            exit_code=0, stdout="", stderr="", command=["batchRemote"],
+        )
+
+        export_info = MagicMock()
+        export_info.protocol = "minio"
+        export_info.path = "minio://bucket/e2e/output_{replicate}.csv"
+        export_info.host = "bucket"
+        mock_export_paths = MagicMock()
+        mock_export_paths.export_files = {"patch": export_info}
+        mock_export_paths.debug_files = {}
+        # resolve_path returns a definitely-nonexistent local Path so the
+        # _register_job_outputs file_size branch falls through.
+        mock_export_paths.resolve_path.side_effect = (
+            lambda t, **kw: Path("/tmp/_pr7_test_nonexistent_output.csv")
+        )
+        mock_cli.inspect_exports.return_value = mock_export_paths
+
+        registry = MagicMock()
+        registry.start_run.return_value = "run-id"
+        # RegistryCallback calls registry methods; MagicMock absorbs them
+        return mock_cli, mock_export_paths, registry
+
+    def test_auto_ingest_calls_ingest_results(self):
+        """Successful batch_remote jobs with auto_ingest=True should invoke
+        ingest_results for each, passing the cached ExportPaths."""
+        from unittest.mock import patch as _patch
+        from joshpy.jobs import run_sweep
+
+        mock_cli, mock_export_paths, registry = self._make_auto_ingest_mocks()
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            job = self._make_real_job(tmp, run_hash="ai0000000001")
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=1,
+                __iter__=lambda s: iter([job]),
+            )
+
+            with _patch("joshpy.sweep.ingest_results", return_value=100) as mock_ingest:
+                run_sweep(
+                    mock_cli, job_set,
+                    registry=registry,
+                    session_id="s-ai",
+                    batch_remote=True,
+                    target="gke-test",
+                    auto_ingest=True,
+                    quiet=True,
+                    manage_status=False,
+                )
+
+            mock_ingest.assert_called_once()
+            kwargs = mock_ingest.call_args.kwargs
+            # Verify the cached ExportPaths was forwarded (avoids N+1 subprocess)
+            self.assertIs(kwargs.get("export_paths"), mock_export_paths)
+
+    def test_auto_ingest_false_skips_ingest(self):
+        """auto_ingest=False should not invoke ingest_results."""
+        from unittest.mock import patch as _patch
+        from joshpy.jobs import run_sweep
+
+        mock_cli, _mock_export_paths, registry = self._make_auto_ingest_mocks()
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            job = self._make_real_job(tmp, run_hash="ai0000000002")
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=1,
+                __iter__=lambda s: iter([job]),
+            )
+
+            with _patch("joshpy.sweep.ingest_results") as mock_ingest:
+                run_sweep(
+                    mock_cli, job_set,
+                    registry=registry,
+                    session_id="s-ai",
+                    batch_remote=True,
+                    target="gke-test",
+                    auto_ingest=False,
+                    quiet=True,
+                    manage_status=False,
+                )
+
+            mock_ingest.assert_not_called()
+
+    def test_auto_ingest_exception_doesnt_abort_sweep(self):
+        """If ingest_results raises, the sweep still returns cleanly."""
+        from unittest.mock import patch as _patch
+        from joshpy.jobs import run_sweep
+
+        mock_cli, _mock_export_paths, registry = self._make_auto_ingest_mocks()
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            job = self._make_real_job(tmp, run_hash="ai0000000003")
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=1,
+                __iter__=lambda s: iter([job]),
+            )
+
+            with _patch(
+                "joshpy.sweep.ingest_results",
+                side_effect=RuntimeError("simulated ingest failure"),
+            ):
+                result = run_sweep(
+                    mock_cli, job_set,
+                    registry=registry,
+                    session_id="s-ai",
+                    batch_remote=True,
+                    target="gke-test",
+                    auto_ingest=True,
+                    quiet=True,
+                    manage_status=False,
+                )
+
+            # Sweep should report success despite the ingest failure
+            self.assertEqual(result.succeeded, 1)
+            self.assertEqual(result.failed, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

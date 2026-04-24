@@ -1968,6 +1968,27 @@ def run_sweep(
                 ):
                     export_paths_cache[cache_key] = resolved_paths
 
+                # Auto-ingest MinIO CSVs for successful batch-remote jobs.
+                # Passes the cached export_paths so ingest_results skips
+                # its own inspect_exports subprocess.
+                if (
+                    batch_remote
+                    and auto_ingest
+                    and result.success
+                    and resolved_paths is not None
+                ):
+                    from joshpy.sweep import ingest_results
+
+                    try:
+                        ingest_results(
+                            cli, registry_callback.registry, job.run_hash,
+                            export_paths=resolved_paths,
+                            quiet=quiet,
+                        )
+                    except Exception as e:
+                        if not quiet:
+                            print(f"  [INGEST] Warning: ingest failed: {e}")
+
             # Call user's callback if provided
             if on_complete is not None:
                 on_complete(job, result)

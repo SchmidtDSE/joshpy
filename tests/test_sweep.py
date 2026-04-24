@@ -1529,5 +1529,154 @@ class TestConfigureS3(unittest.TestCase):
         self.assertEqual(params[2], "storage.example.com")
 
 
+class TestIngestResultsExportPathsKwarg(unittest.TestCase):
+    """Tests for ingest_results(export_paths=...) optimization."""
+
+    def _setup_mocks(self, protocol: str = "minio"):
+        """Build the minimum mock surface ingest_results needs."""
+        mock_cli = MagicMock()
+        mock_registry = MagicMock()
+
+        # _resolve_ingest_metadata reads run hash + config + session
+        mock_registry._resolve_label_or_hash.return_value = "abc123def456"
+        config = MagicMock()
+        config.session_id = "s1"
+        config.label = None
+        config.parameters = {}
+        mock_registry.get_config_by_hash.return_value = config
+        session = MagicMock()
+        session.simulation = "Main"
+        session.total_replicates = 1
+        session.job_config = None
+        mock_registry.get_session.return_value = session
+        mock_registry.get_runs_for_hash.return_value = [MagicMock()]
+        mock_registry._resolve_run_id_for_hash.return_value = "run-1"
+
+        # ExportPaths fixture — .export_files with requested protocol
+        export_info = MagicMock()
+        export_info.protocol = protocol
+        export_info.host = "bucket"
+        export_info.path = "/prefix/output_{replicate}.csv"
+        mock_export_paths = MagicMock()
+        mock_export_paths.export_files = {"patch": export_info}
+        return mock_cli, mock_registry, mock_export_paths
+
+    @patch("joshpy.sweep._get_josh_source")
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    @patch("joshpy.sweep._load_ingest_replicates", return_value=42)
+    def test_inspect_exports_called_when_not_passed(
+        self, _mock_load, _mock_cfg, mock_get_josh,
+    ):
+        """Default: ingest_results should call cli.inspect_exports once."""
+        from joshpy.sweep import ingest_results
+
+        mock_cli, mock_registry, mock_export_paths = self._setup_mocks()
+        mock_cli.inspect_exports.return_value = mock_export_paths
+        mock_get_josh.return_value = (Path("/tmp/sim.josh"), None)
+
+        ingest_results(mock_cli, mock_registry, "abc123def456", quiet=True)
+        mock_cli.inspect_exports.assert_called_once()
+
+    @patch("joshpy.sweep._get_josh_source")
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    @patch("joshpy.sweep._load_ingest_replicates", return_value=42)
+    def test_inspect_exports_skipped_when_passed(
+        self, _mock_load, _mock_cfg, mock_get_josh,
+    ):
+        """When export_paths= is provided, skip the inspect_exports subprocess."""
+        from joshpy.sweep import ingest_results
+
+        mock_cli, mock_registry, mock_export_paths = self._setup_mocks()
+        mock_get_josh.return_value = (Path("/tmp/sim.josh"), None)
+
+        ingest_results(
+            mock_cli, mock_registry, "abc123def456",
+            export_paths=mock_export_paths,
+            quiet=True,
+        )
+        mock_cli.inspect_exports.assert_not_called()
+
+
+class TestLoadJobResultsMinioRouting(unittest.TestCase):
+    """Tests for load_job_results protocol dispatch (PR7)."""
+
+    def _make_job(self, source_path: Path) -> "ExpandedJob":
+        from joshpy.jobs import ExpandedJob
+
+        return ExpandedJob(
+            config_content="",
+            config_path=source_path.parent / "c.jshc",
+            config_name="c",
+            run_hash="abcdef012345",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=2,
+            source_path=source_path,
+            file_mappings={},
+        )
+
+    @patch("joshpy.sweep._load_job_results_minio", return_value=99)
+    def test_minio_protocol_routes_to_helper(self, mock_minio):
+        """export_info.protocol == 'minio' delegates to _load_job_results_minio."""
+        from joshpy.sweep import load_job_results
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = self._make_job(src)
+            export_info = MagicMock()
+            export_info.protocol = "minio"
+            export_paths = MagicMock()
+            export_paths.export_files = {"patch": export_info}
+
+            rows = load_job_results(
+                cli=MagicMock(),
+                job=job,
+                registry=MagicMock(),
+                export_paths=export_paths,
+                run_id="run-1",
+            )
+
+            self.assertEqual(rows, 99)
+            mock_minio.assert_called_once()
+
+    @patch("joshpy.sweep._load_job_results_minio")
+    def test_file_protocol_uses_local_path(self, mock_minio):
+        """export_info.protocol == 'file' does NOT call the minio helper."""
+        from joshpy.sweep import load_job_results
+
+        registry = RunRegistry(":memory:")
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                src = Path(tmp) / "sim.josh"
+                src.write_text("x")
+                job = self._make_job(src)
+                export_info = MagicMock()
+                export_info.protocol = "file"
+                export_info.path = str(Path(tmp) / "missing_{replicate}.csv")
+                export_paths = MagicMock()
+                export_paths.export_files = {"patch": export_info}
+                # Also mock get_patch_path since local path uses _get_export_path
+                export_paths.get_patch_path.return_value = export_info.path
+                export_paths.resolve_path.side_effect = lambda t, **kw: Path(
+                    t.format(**kw)
+                )
+
+                rows = load_job_results(
+                    cli=MagicMock(),
+                    job=job,
+                    registry=registry,
+                    export_paths=export_paths,
+                    run_id="run-1",
+                    quiet=True,
+                )
+
+                # Local path: file doesn't exist, so 0 rows loaded; minio helper never called
+                self.assertEqual(rows, 0)
+                mock_minio.assert_not_called()
+        finally:
+            registry.close()
+
+
 if __name__ == "__main__":
     unittest.main()

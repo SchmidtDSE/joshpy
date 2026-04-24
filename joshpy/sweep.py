@@ -213,6 +213,21 @@ def load_job_results(
     if load_config is None:
         load_config = LoadConfig()
 
+    # Route minio:// exports through the S3-aware loader. Local paths
+    # continue through the filesystem retry loop below.
+    export_info = export_paths.export_files.get(export_type)
+    if export_info is not None and export_info.protocol == "minio":
+        return _load_job_results_minio(
+            cli=cli,
+            registry=registry,
+            job=job,
+            export_paths=export_paths,
+            export_info=export_info,
+            run_id=run_id,
+            export_type=export_type,
+            quiet=quiet,
+        )
+
     # Get path template for requested export type
     path_template = _get_export_path(export_paths, export_type)
     if not path_template:
@@ -275,6 +290,48 @@ def load_job_results(
                 print(f"  Error loading {csv_path}: {last_error}")
 
     return total_rows
+
+
+def _load_job_results_minio(
+    cli: JoshCLI,
+    registry: RunRegistry,
+    job: ExpandedJob,
+    export_paths: ExportPaths,
+    export_info: Any,  # ExportFileInfo
+    run_id: str,
+    export_type: str,
+    quiet: bool,
+) -> int:
+    """Per-job loader for ``minio://`` export targets.
+
+    Mirrors the S3 path in :func:`ingest_results` / :func:`_load_ingest_replicates`
+    but works from an already-known (job, run_id) pair instead of a
+    registry lookup by label/hash. Called from :func:`load_job_results`
+    when it detects ``export_info.protocol == "minio"``.
+    """
+    from types import SimpleNamespace
+
+    bucket, dl_dir = _configure_minio_access(
+        cli, registry, export_info, export_info.path,
+        download=False, output_dir=None, minio_bucket=None, quiet=quiet,
+    )
+
+    # _load_ingest_replicates only reads meta.config.parameters to enrich
+    # path-template variables; job.parameters carries the same values.
+    meta = _IngestMetadata(
+        run_hash=job.run_hash,
+        config=SimpleNamespace(parameters=job.parameters),
+        simulation=job.simulation,
+        total_replicates=job.replicates,
+        label=job.label,
+    )
+
+    return _load_ingest_replicates(
+        registry, export_paths, export_info.path,
+        is_minio=True, download=False, bucket=bucket, dl_dir=dl_dir,
+        meta=meta, run_id=run_id,
+        export_type=export_type, quiet=quiet,
+    )
 
 
 def recover_sweep_results(
@@ -653,6 +710,7 @@ def ingest_results(
     download: bool = False,
     output_dir: Path | None = None,
     minio_bucket: str | None = None,
+    export_paths: ExportPaths | None = None,
     quiet: bool = False,
 ) -> int:
     """Recover and ingest results into the registry by label or run hash.
@@ -677,6 +735,10 @@ def ingest_results(
             Only used when ``download=True``.
         minio_bucket: Override the MinIO bucket (default: parsed from
             the ``minio://`` export path).
+        export_paths: Pre-computed ExportPaths. When provided, skips the
+            ``cli.inspect_exports`` subprocess call. Callers inside a hot
+            sweep loop (e.g. ``run_sweep`` auto-ingest) can pass the cached
+            value from ``_register_job_outputs``.
         quiet: Suppress progress output.
 
     Returns:
@@ -698,9 +760,10 @@ def ingest_results(
     josh_path, temp_josh = _get_josh_source(meta.config, meta.run_hash)
 
     try:
-        export_paths = cli.inspect_exports(
-            InspectExportsConfig(script=josh_path, simulation=meta.simulation)
-        )
+        if export_paths is None:
+            export_paths = cli.inspect_exports(
+                InspectExportsConfig(script=josh_path, simulation=meta.simulation)
+            )
 
         export_info = export_paths.export_files.get(export_type)
         if export_info is None:
