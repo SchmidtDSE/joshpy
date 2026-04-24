@@ -1451,6 +1451,83 @@ class TestConfigureS3(unittest.TestCase):
         second_call = mock_conn.execute.call_args_list[1]
         self.assertIn("CREATE OR REPLACE SECRET", second_call[0][0])
 
+    def _secret_params(self, mock_conn):
+        """Extract [access_key, secret_key, endpoint, url_style, use_ssl]."""
+        return mock_conn.execute.call_args_list[1][0][1]
+
+    def test_bare_hostname_passthrough(self):
+        """Bare hostnames pass through unchanged with default use_ssl=True."""
+        from joshpy.registry import configure_s3
+
+        mock_conn = MagicMock()
+        configure_s3(mock_conn, "storage.example.com", "AKID", "SECRET")
+
+        params = self._secret_params(mock_conn)
+        self.assertEqual(params[2], "storage.example.com")
+        self.assertTrue(params[4])
+
+    def test_https_scheme_stripped(self):
+        """https:// prefix is stripped; use_ssl inferred True."""
+        from joshpy.registry import configure_s3
+
+        mock_conn = MagicMock()
+        configure_s3(
+            mock_conn, "https://storage.googleapis.com", "AKID", "SECRET"
+        )
+
+        params = self._secret_params(mock_conn)
+        self.assertEqual(params[2], "storage.googleapis.com")
+        self.assertTrue(params[4])
+
+    def test_http_scheme_stripped_and_ssl_false(self):
+        """http:// prefix is stripped; use_ssl inferred False."""
+        from joshpy.registry import configure_s3
+
+        mock_conn = MagicMock()
+        configure_s3(mock_conn, "http://localhost:9000", "AKID", "SECRET")
+
+        params = self._secret_params(mock_conn)
+        self.assertEqual(params[2], "localhost:9000")
+        self.assertFalse(params[4])
+
+    def test_explicit_use_ssl_overrides_inference(self):
+        """Explicit use_ssl wins over scheme inference."""
+        from joshpy.registry import configure_s3
+
+        mock_conn = MagicMock()
+        configure_s3(
+            mock_conn, "https://storage.example.com", "AKID", "SECRET",
+            use_ssl=False,
+        )
+
+        params = self._secret_params(mock_conn)
+        self.assertFalse(params[4])
+
+    def test_trailing_slash_stripped(self):
+        """Trailing slash on the endpoint is stripped."""
+        from joshpy.registry import configure_s3
+
+        mock_conn = MagicMock()
+        configure_s3(
+            mock_conn, "https://storage.example.com/", "AKID", "SECRET"
+        )
+
+        params = self._secret_params(mock_conn)
+        self.assertEqual(params[2], "storage.example.com")
+
+    def test_trailing_path_stripped(self):
+        """Trailing path segments are stripped from the endpoint."""
+        from joshpy.registry import configure_s3
+
+        mock_conn = MagicMock()
+        configure_s3(
+            mock_conn, "https://storage.example.com/bucket/prefix",
+            "AKID", "SECRET",
+        )
+
+        params = self._secret_params(mock_conn)
+        self.assertEqual(params[2], "storage.example.com")
+
 
 if __name__ == "__main__":
     unittest.main()

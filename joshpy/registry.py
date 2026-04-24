@@ -78,7 +78,7 @@ def configure_s3(
     access_key: str,
     secret_key: str,
     url_style: str = "path",
-    use_ssl: bool = True,
+    use_ssl: bool | None = None,
 ) -> None:
     """Configure a DuckDB connection for S3/MinIO access via httpfs.
 
@@ -90,14 +90,39 @@ def configure_s3(
     environment variables (``MINIO_ENDPOINT``, ``MINIO_ACCESS_KEY``,
     ``MINIO_SECRET_KEY``) before calling here.
 
+    DuckDB's httpfs expects ``ENDPOINT`` to be a bare hostname without a
+    scheme (e.g. ``"storage.googleapis.com"``).  This function accepts
+    either a bare hostname OR a full URL (``"https://storage.googleapis.com"``)
+    so callers can forward the same ``MINIO_ENDPOINT`` env var they pass to
+    the Josh JAR without needing to strip the scheme themselves.  When a
+    scheme is present ``use_ssl`` is inferred from it unless explicitly set.
+
     Args:
         conn: DuckDB connection object.
-        endpoint: S3-compatible endpoint (e.g. ``"storage.googleapis.com"``).
+        endpoint: S3-compatible endpoint.  Accepts bare hostname
+            (``"storage.googleapis.com"``) or full URL
+            (``"https://storage.googleapis.com"``).
         access_key: Access key / key ID.
         secret_key: Secret key.
         url_style: ``"path"`` (default, MinIO) or ``"vhost"`` (AWS).
-        use_ssl: Use HTTPS (default True).
+        use_ssl: Use HTTPS.  If None (default), inferred from endpoint
+            scheme when present, otherwise True.
     """
+    host = endpoint
+    inferred_ssl: bool | None = None
+    if host.startswith("https://"):
+        host = host[len("https://"):]
+        inferred_ssl = True
+    elif host.startswith("http://"):
+        host = host[len("http://"):]
+        inferred_ssl = False
+    # Strip any trailing path / slash -- DuckDB expects just host[:port]
+    host = host.rstrip("/").split("/", 1)[0]
+
+    resolved_ssl = use_ssl if use_ssl is not None else (
+        inferred_ssl if inferred_ssl is not None else True
+    )
+
     conn.execute("INSTALL httpfs; LOAD httpfs;")
     conn.execute(
         """
@@ -110,7 +135,7 @@ def configure_s3(
             USE_SSL ?
         )
         """,
-        [access_key, secret_key, endpoint, url_style, use_ssl],
+        [access_key, secret_key, host, url_style, resolved_ssl],
     )
 
 
