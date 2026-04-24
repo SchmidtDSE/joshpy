@@ -1992,7 +1992,8 @@ class TestPreprocessBatch(unittest.TestCase):
         )
         cmd = mock_run.call_args[0][0]
         for flag in ("--crs=", "--x-coord=", "--y-coord=", "--time-dim=",
-                     "--timestep=", "--default-value=", "--parallel", "--amend"):
+                     "--timestep=", "--default-value=", "--parallel", "--amend",
+                     "--no-wait", "--poll-interval=", "--timeout="):
             self.assertFalse(
                 any(c == flag or c.startswith(flag) for c in cmd),
                 f"unexpected {flag} in defaults",
@@ -2008,6 +2009,7 @@ class TestPreprocessBatch(unittest.TestCase):
                 x_coord="lon", y_coord="lat", time_dim="time",
                 timestep=0, default_value=-999.0,
                 parallel=True, amend=True,
+                no_wait=True, poll_interval=30, timeout=600,
             ),
         )
         cmd = mock_run.call_args[0][0]
@@ -2019,6 +2021,9 @@ class TestPreprocessBatch(unittest.TestCase):
         self.assertIn("--default-value=-999.0", cmd)
         self.assertIn("--parallel", cmd)
         self.assertIn("--amend", cmd)
+        self.assertIn("--no-wait", cmd)
+        self.assertIn("--poll-interval=30", cmd)
+        self.assertIn("--timeout=600", cmd)
 
 
 class TestPollBatch(unittest.TestCase):

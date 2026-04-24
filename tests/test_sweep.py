@@ -1258,6 +1258,182 @@ class TestIngestResults(unittest.TestCase):
         registry.close()
 
 
+class TestSweepManagerBuilderBatchRemote(unittest.TestCase):
+    """Tests for SweepManagerBuilder.with_batch_remote() and the _UNSET
+    sentinel-based default resolution in SweepManager.run()."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.template_path = Path(self.temp_dir) / "t.jshc.j2"
+        self.template_path.write_text("x = {{ p }}")
+        self.source_path = Path(self.temp_dir) / "sim.josh"
+        self.source_path.write_text("// josh")
+        self.config = JobConfig(
+            template_path=self.template_path,
+            source_path=self.source_path,
+            simulation="Main",
+            replicates=1,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="p", values=[1])]
+            ),
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_with_batch_remote_stashes_defaults(self):
+        builder = SweepManagerBuilder(self.config)
+        builder.with_batch_remote(
+            "gke-test", no_wait=True, poll_interval=30,
+            timeout=600, auto_ingest=False,
+        )
+        self.assertEqual(builder._batch_remote_target, "gke-test")
+        self.assertTrue(builder._batch_no_wait)
+        self.assertEqual(builder._batch_poll_interval, 30)
+        self.assertEqual(builder._batch_timeout, 600)
+        self.assertFalse(builder._batch_auto_ingest)
+
+    def test_build_propagates_defaults_to_manager(self):
+        manager = (
+            SweepManagerBuilder(self.config)
+            .with_registry(":memory:")
+            .with_batch_remote("gke-test", timeout=900)
+            .build()
+        )
+        try:
+            self.assertEqual(manager._batch_remote_target, "gke-test")
+            self.assertEqual(manager._batch_timeout, 900)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_run_uses_builder_defaults_when_kwargs_omitted(self):
+        """With `_batch_remote_target` set, `run()` should default to
+        `batch_remote=True, target=<stashed>`."""
+        from joshpy.jobs import SweepResult
+
+        mock_cli = MagicMock()
+        registry = RunRegistry(":memory:")
+        try:
+            manager = (
+                SweepManagerBuilder(self.config)
+                .with_registry(registry)
+                .with_cli(mock_cli)
+                .with_batch_remote("gke-test")
+                .build()
+            )
+
+            with patch("joshpy.sweep.run_sweep") as mock_run_sweep:
+                mock_run_sweep.return_value = SweepResult(
+                    job_results=[], succeeded=0, failed=0, run_ids={},
+                )
+                manager.run(quiet=True)
+
+            call_kwargs = mock_run_sweep.call_args.kwargs
+            self.assertTrue(call_kwargs["batch_remote"])
+            self.assertEqual(call_kwargs["target"], "gke-test")
+            self.assertFalse(call_kwargs["batch_no_wait"])
+            self.assertEqual(call_kwargs["poll_interval"], 10)
+            self.assertIsNone(call_kwargs["batch_timeout"])
+            self.assertTrue(call_kwargs["auto_ingest"])
+
+            manager.cleanup()
+            manager.close()
+        finally:
+            registry.close()
+
+    def test_run_explicit_override_wins(self):
+        """Passing `batch_remote=False` must override the builder default."""
+        from joshpy.jobs import SweepResult
+
+        mock_cli = MagicMock()
+        registry = RunRegistry(":memory:")
+        try:
+            manager = (
+                SweepManagerBuilder(self.config)
+                .with_registry(registry)
+                .with_cli(mock_cli)
+                .with_batch_remote("gke-test")
+                .build()
+            )
+
+            with patch("joshpy.sweep.run_sweep") as mock_run_sweep:
+                mock_run_sweep.return_value = SweepResult(
+                    job_results=[], succeeded=0, failed=0, run_ids={},
+                )
+                # Caller override: disable batch remote entirely
+                manager.run(batch_remote=False, target=None, quiet=True)
+
+            call_kwargs = mock_run_sweep.call_args.kwargs
+            self.assertFalse(call_kwargs["batch_remote"])
+            self.assertIsNone(call_kwargs["target"])
+
+            manager.cleanup()
+            manager.close()
+        finally:
+            registry.close()
+
+    def test_run_target_override_wins(self):
+        from joshpy.jobs import SweepResult
+
+        mock_cli = MagicMock()
+        registry = RunRegistry(":memory:")
+        try:
+            manager = (
+                SweepManagerBuilder(self.config)
+                .with_registry(registry)
+                .with_cli(mock_cli)
+                .with_batch_remote("gke-test")
+                .build()
+            )
+
+            with patch("joshpy.sweep.run_sweep") as mock_run_sweep:
+                mock_run_sweep.return_value = SweepResult(
+                    job_results=[], succeeded=0, failed=0, run_ids={},
+                )
+                manager.run(target="other-target", quiet=True)
+
+            call_kwargs = mock_run_sweep.call_args.kwargs
+            self.assertTrue(call_kwargs["batch_remote"])  # still True via builder
+            self.assertEqual(call_kwargs["target"], "other-target")
+
+            manager.cleanup()
+            manager.close()
+        finally:
+            registry.close()
+
+    def test_run_without_builder_defaults_to_local(self):
+        """Without with_batch_remote(), run() should default to
+        batch_remote=False (backwards compatible)."""
+        from joshpy.jobs import SweepResult
+
+        mock_cli = MagicMock()
+        registry = RunRegistry(":memory:")
+        try:
+            manager = (
+                SweepManagerBuilder(self.config)
+                .with_registry(registry)
+                .with_cli(mock_cli)
+                .build()
+            )
+
+            with patch("joshpy.sweep.run_sweep") as mock_run_sweep:
+                mock_run_sweep.return_value = SweepResult(
+                    job_results=[], succeeded=0, failed=0, run_ids={},
+                )
+                manager.run(quiet=True)
+
+            call_kwargs = mock_run_sweep.call_args.kwargs
+            self.assertFalse(call_kwargs["batch_remote"])
+            self.assertIsNone(call_kwargs["target"])
+
+            manager.cleanup()
+            manager.close()
+        finally:
+            registry.close()
+
+
 class TestConfigureS3(unittest.TestCase):
     """Tests for configure_s3()."""
 

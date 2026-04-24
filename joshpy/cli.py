@@ -527,6 +527,9 @@ class PreprocessBatchConfig:
         default_value: Default value to fill grid spaces before copying data.
         parallel: Enable parallel processing of patches within each timestep.
         amend: Amend existing output file rather than overwriting.
+        no_wait: If True, dispatch and exit without polling for completion.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Maximum seconds to wait for completion (optional).
     """
 
     script: Path
@@ -544,6 +547,9 @@ class PreprocessBatchConfig:
     default_value: float | None = None
     parallel: bool = False
     amend: bool = False
+    no_wait: bool = False
+    poll_interval: int | None = None
+    timeout: int | None = None
 
 
 @dataclass(frozen=True)
@@ -955,6 +961,12 @@ class JoshCLI:
             args.append("--parallel")
         if config.amend:
             args.append("--amend")
+        if config.no_wait:
+            args.append("--no-wait")
+        if config.poll_interval is not None:
+            args.append(f"--poll-interval={config.poll_interval}")
+        if config.timeout is not None:
+            args.append(f"--timeout={config.timeout}")
 
         return self._execute(args, timeout=timeout, jfr=jfr)
 

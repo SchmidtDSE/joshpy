@@ -1838,15 +1838,20 @@ def run_sweep(
     # Async batch remote tracking: job_id -> (job, dispatch_result)
     _async_dispatched: dict[str, tuple[ExpandedJob, Any]] = {}
 
+    # Batch metadata per run_hash for bottling (target + per-job minio_prefix).
+    _batch_metadata_by_hash: dict[str, dict[str, Any]] = {}
+
     # Per-sweep staging root for batch remote mode. One tempdir per sweep, one
     # subdir per ExpandedJob. Cleaned up in the finally below.
     sweep_workdir: Path | None = None
+    _stage_prefix_root: str | None = None
     if batch_remote:
         import tempfile
 
         sweep_workdir = Path(
             tempfile.mkdtemp(prefix=f"joshpy-sweep-{session_id or 'adhoc'}-")
         )
+        _stage_prefix_root = f"sweeps/{session_id or 'adhoc'}/"
 
     try:
         for i, job in enumerate(job_set):
@@ -1866,6 +1871,11 @@ def run_sweep(
                 per_job_prefix = (
                     f"sweeps/{session_id or 'adhoc'}/jobs/{job.run_hash}/"
                 )
+                _batch_metadata_by_hash[job.run_hash] = {
+                    "target": target,
+                    "minio_prefix": per_job_prefix,
+                    "stage_prefix_root": _stage_prefix_root,
+                }
                 stage_result = cli.stage_to_minio(
                     StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
                 )
@@ -1973,6 +1983,7 @@ def run_sweep(
                             cli=cli,
                             output_dir=bottle_dir or Path("bottles"),
                             omit_jshd=bottle_omit_jshd,
+                            batch_metadata=_batch_metadata_by_hash.get(job.run_hash),
                         )
                         if not quiet:
                             print(f"  [BOTTLE] {bottle_path}")
@@ -2071,12 +2082,23 @@ def run_sweep(
         if bottle is not None and _bottle_collect:
             from joshpy.bottle import create_sweep_bottle
 
+            sweep_batch_metadata: dict[str, Any] | None = None
+            if batch_remote:
+                sweep_batch_metadata = {
+                    "target": target,
+                    "stage_prefix_root": _stage_prefix_root,
+                }
+
             try:
                 bottle_path = create_sweep_bottle(
                     job_results=_bottle_collect,
                     cli=cli,
                     output_dir=bottle_dir or Path("bottles"),
                     omit_jshd=bottle_omit_jshd,
+                    batch_metadata=sweep_batch_metadata,
+                    per_job_batch_metadata=(
+                        _batch_metadata_by_hash if batch_remote else None
+                    ),
                 )
                 if not quiet:
                     print(f"[BOTTLE] {bottle_path} ({len(_bottle_collect)} jobs)")

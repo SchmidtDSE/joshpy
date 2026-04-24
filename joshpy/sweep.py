@@ -59,6 +59,11 @@ from joshpy.jobs import (
 )
 from joshpy.registry import RunRegistry, configure_s3
 
+# Sentinel for SweepManager.run() kwargs so the builder-stashed defaults
+# (set via with_batch_remote) can be distinguished from an explicit
+# caller-provided value.
+_UNSET: Any = object()
+
 
 @dataclass
 class LoadConfig:
@@ -773,6 +778,12 @@ class SweepManager:
     _catalog: Any | None = field(default=None, repr=False)  # ProjectCatalog
     _experiment_id: str | None = field(default=None, repr=False)
     _last_run_ids: dict[str, str] = field(default_factory=dict, repr=False)
+    # Builder-configured batch remote defaults (used by .run() when kwargs omitted)
+    _batch_remote_target: str | None = field(default=None, repr=False)
+    _batch_no_wait: bool = field(default=False, repr=False)
+    _batch_poll_interval: int = field(default=10, repr=False)
+    _batch_timeout: int | None = field(default=None, repr=False)
+    _batch_auto_ingest: bool = field(default=True, repr=False)
 
     # Entry points
     @classmethod
@@ -842,12 +853,12 @@ class SweepManager:
         remote: bool = False,
         api_key: str | None = None,
         endpoint: str | None = None,
-        batch_remote: bool = False,
-        target: str | None = None,
-        batch_no_wait: bool = False,
-        poll_interval: int = 10,
-        batch_timeout: int | None = None,
-        auto_ingest: bool = True,
+        batch_remote: bool | Any = _UNSET,
+        target: str | None | Any = _UNSET,
+        batch_no_wait: bool | Any = _UNSET,
+        poll_interval: int | Any = _UNSET,
+        batch_timeout: int | None | Any = _UNSET,
+        auto_ingest: bool | Any = _UNSET,
         stop_on_failure: bool = True,
         dry_run: bool = False,
         quiet: bool = False,
@@ -913,6 +924,20 @@ class SweepManager:
             ...     return registry.query("SELECT AVG(value) FROM cell_data WHERE run_hash=?", [run_hash]).fetchone()[0]
             >>> results = manager.run(objective=my_objective)
         """
+        # Resolve batch settings: caller overrides > builder defaults
+        if batch_remote is _UNSET:
+            batch_remote = self._batch_remote_target is not None
+        if target is _UNSET:
+            target = self._batch_remote_target
+        if batch_no_wait is _UNSET:
+            batch_no_wait = self._batch_no_wait
+        if poll_interval is _UNSET:
+            poll_interval = self._batch_poll_interval
+        if batch_timeout is _UNSET:
+            batch_timeout = self._batch_timeout
+        if auto_ingest is _UNSET:
+            auto_ingest = self._batch_auto_ingest
+
         # Check if strategy is adaptive
         strategy = self.config.sweep.strategy if self.config.sweep else None
 
@@ -1194,6 +1219,12 @@ class SweepManagerBuilder:
         self._label: str | None = None
         self._label_force: bool = False
         self._label_on_collision: str | None = None
+        # Batch-remote dispatch defaults (set via with_batch_remote()).
+        self._batch_remote_target: str | None = None
+        self._batch_no_wait: bool = False
+        self._batch_poll_interval: int = 10
+        self._batch_timeout: int | None = None
+        self._batch_auto_ingest: bool = True
 
     def with_registry(
         self,
@@ -1367,6 +1398,51 @@ class SweepManagerBuilder:
         self._label_on_collision = on_collision
         return self
 
+    def with_batch_remote(
+        self,
+        target: str,
+        *,
+        no_wait: bool = False,
+        poll_interval: int = 10,
+        timeout: int | None = None,
+        auto_ingest: bool = True,
+    ) -> SweepManagerBuilder:
+        """Pre-configure batch remote dispatch for the built SweepManager.
+
+        After calling this, ``SweepManager.run()`` defaults to
+        ``batch_remote=True`` with the supplied settings. Callers may still
+        override any individual setting at ``.run()`` call time.
+
+        Args:
+            target: Target profile name (loaded from ``~/.josh/targets/<name>.json``).
+            no_wait: If True, dispatch and return without polling. Polling
+                is then the caller's responsibility (or a later
+                ``SweepManager.ingest()`` call).
+            poll_interval: Seconds between poll attempts when ``no_wait=True``.
+            timeout: Overall timeout per job in seconds.
+            auto_ingest: If True, auto-call ``ingest_results()`` after each
+                successful batch job.
+
+        Returns:
+            Self for chaining.
+
+        Examples:
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_registry("experiment.duckdb", experiment_name="my_sweep")
+            ...     .with_batch_remote("gke-test")
+            ...     .build()
+            ... )
+            >>> # Equivalent to manager.run(batch_remote=True, target="gke-test")
+            >>> results = manager.run()
+        """
+        self._batch_remote_target = target
+        self._batch_no_wait = no_wait
+        self._batch_poll_interval = poll_interval
+        self._batch_timeout = timeout
+        self._batch_auto_ingest = auto_ingest
+        return self
+
     def build(self) -> SweepManager:
         """Build the SweepManager instance.
 
@@ -1484,6 +1560,11 @@ class SweepManagerBuilder:
             _owns_cli=self._owns_cli,
             _catalog=self._catalog,
             _experiment_id=experiment_id,
+            _batch_remote_target=self._batch_remote_target,
+            _batch_no_wait=self._batch_no_wait,
+            _batch_poll_interval=self._batch_poll_interval,
+            _batch_timeout=self._batch_timeout,
+            _batch_auto_ingest=self._batch_auto_ingest,
         )
 
     def _convert_file_mappings(
