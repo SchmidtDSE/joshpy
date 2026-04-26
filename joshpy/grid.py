@@ -425,16 +425,32 @@ class GridSpec:
         josh_name: str,
         subdirectory: str | None = None,
         variant: dict[str, str] | None = None,
+        compress: bool = False,
     ) -> Path:
-        """Compute the output .jshd path for a preprocessed file.
+        """Compute the output path for a preprocessed file.
+
+        By default produces ``<josh_name>.jshd``. With ``compress=True``,
+        produces ``<josh_name>.jshdz`` so the JAR's preprocess command
+        writes XZ-compressed output (typically 5-20x smaller for
+        geospatial rasters). The compressed file is read transparently
+        by josh's MultiFormatExternalGetter at simulation time.
 
         When *variant* is provided and the file has a ``template_path``,
-        the template is resolved with the variant values (plus defaults
-        for unspecified axes) and used as the output path.
+        the template wins — the suffix in the template is used as-is and
+        ``compress`` must NOT be set. Users wanting compression alongside
+        ``template_path`` should put ``.jshdz`` directly into the template
+        string.
         """
         if variant is not None and josh_name in self.files:
             info = self.files[josh_name]
             if "template_path" in info:
+                if compress:
+                    raise ValueError(
+                        f"compress=True is incompatible with template_path "
+                        f"(configured for {josh_name!r}). Put the desired "
+                        f"suffix (.jshd or .jshdz) directly into the "
+                        f"template_path string instead."
+                    )
                 merged = {k: v["default"] for k, v in self.variants.items()}
                 merged.update(variant)
                 resolved = info["template_path"].format(**merged)
@@ -447,7 +463,8 @@ class GridSpec:
         else:
             out_dir = self.output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
-        return out_dir / f"{josh_name}.jshd"
+        suffix = ".jshdz" if compress else ".jshd"
+        return out_dir / f"{josh_name}{suffix}"
 
     def _relative_path(self, absolute_path: Path) -> str:
         """Compute a path relative to output_dir."""
@@ -479,6 +496,7 @@ class GridSpec:
         amend: bool = False,
         subdirectory: str | None = None,
         variant: dict[str, str] | None = None,
+        compress: bool = False,
     ) -> CLIResult:
         """Preprocess a GeoTIFF file using this grid's geometry.
 
@@ -497,13 +515,24 @@ class GridSpec:
                 (e.g., ``{"scenario": "ssp370"}``). When provided, the
                 output path is resolved from the file's template_path
                 and ``_register_file()`` is skipped.
+            compress: If True, write XZ-compressed ``.jshdz`` output
+                instead of plain ``.jshd``. The file is read transparently
+                at simulation time via josh's MultiFormatExternalGetter,
+                typically 5-20x smaller on geospatial rasters.
+                Incompatible with ``template_path`` (raises ValueError) —
+                template_path users should put ``.jshdz`` directly into
+                the template string instead. Note: ``amend=True`` with
+                ``compress=True`` may not be supported by the underlying
+                JAR; the JAR will report any incompatibility at run time.
 
         Returns:
             CLIResult from the preprocessing command.
         """
         from joshpy.cli import GeotiffPreprocessConfig
 
-        output_path = self._compute_output_path(josh_name, subdirectory, variant)
+        output_path = self._compute_output_path(
+            josh_name, subdirectory, variant, compress=compress,
+        )
         script_path = self._render_preprocess_script()
         try:
             config = GeotiffPreprocessConfig(
@@ -544,6 +573,7 @@ class GridSpec:
         amend: bool = False,
         subdirectory: str | None = None,
         variant: dict[str, str] | None = None,
+        compress: bool = False,
     ) -> CLIResult:
         """Preprocess a NetCDF file using this grid's geometry.
 
@@ -565,13 +595,19 @@ class GridSpec:
                 (e.g., ``{"scenario": "ssp370"}``). When provided, the
                 output path is resolved from the file's template_path
                 and ``_register_file()`` is skipped.
+            compress: If True, write XZ-compressed ``.jshdz`` output
+                instead of plain ``.jshd``. See
+                :meth:`preprocess_geotiff` for full semantics and
+                template_path interaction.
 
         Returns:
             CLIResult from the preprocessing command.
         """
         from joshpy.cli import NetcdfPreprocessConfig
 
-        output_path = self._compute_output_path(josh_name, subdirectory, variant)
+        output_path = self._compute_output_path(
+            josh_name, subdirectory, variant, compress=compress,
+        )
         script_path = self._render_preprocess_script()
         try:
             config = NetcdfPreprocessConfig(
@@ -612,6 +648,7 @@ class GridSpec:
         amend: bool = False,
         subdirectory: str | None = None,
         variant: dict[str, str] | None = None,
+        compress: bool = False,
     ) -> CLIResult:
         """Preprocess a CSV point data file using this grid's geometry.
 
@@ -630,13 +667,19 @@ class GridSpec:
                 (e.g., ``{"scenario": "ssp370"}``). When provided, the
                 output path is resolved from the file's template_path
                 and ``_register_file()`` is skipped.
+            compress: If True, write XZ-compressed ``.jshdz`` output
+                instead of plain ``.jshd``. See
+                :meth:`preprocess_geotiff` for full semantics and
+                template_path interaction.
 
         Returns:
             CLIResult from the preprocessing command.
         """
         from joshpy.cli import CsvPreprocessConfig
 
-        output_path = self._compute_output_path(josh_name, subdirectory, variant)
+        output_path = self._compute_output_path(
+            josh_name, subdirectory, variant, compress=compress,
+        )
         script_path = self._render_preprocess_script()
         try:
             config = CsvPreprocessConfig(
