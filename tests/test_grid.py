@@ -311,6 +311,128 @@ class TestGridSpecPreprocess(unittest.TestCase):
             self.assertEqual(config_arg.variable, "temp")
             self.assertEqual(config_arg.units, "celsius")
 
+    def test_preprocess_geotiff_compress_writes_to_jshdz_path(self):
+        """compress=True changes the output path suffix to .jshdz."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_geotiff(
+                cli,
+                josh_name="cover",
+                data_file=Path(tmpdir) / "cover.tif",
+                band=0,
+                units="percent",
+                timestep=0,
+                compress=True,
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.output, Path(tmpdir) / "cover.jshdz")
+
+    def test_preprocess_compress_registers_jshdz_path(self):
+        """grid.files should record the .jshdz suffix on the registered path."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_geotiff(
+                cli,
+                josh_name="cover",
+                data_file=Path(tmpdir) / "cover.tif",
+                band=0,
+                units="percent",
+                timestep=0,
+                compress=True,
+            )
+
+            self.assertEqual(grid.files["cover"]["path"], "cover.jshdz")
+            self.assertEqual(grid.files["cover"]["units"], "percent")
+
+    def test_preprocess_compress_with_subdirectory(self):
+        """compress=True composes with subdirectory."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_geotiff(
+                cli,
+                josh_name="future",
+                data_file=Path(tmpdir) / "x.tif",
+                band=0,
+                units="K",
+                timestep=0,
+                subdirectory="monthly",
+                compress=True,
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(
+                config.output, Path(tmpdir) / "monthly" / "future.jshdz",
+            )
+            self.assertEqual(
+                grid.files["future"]["path"],
+                str(Path("monthly") / "future.jshdz"),
+            )
+
+    def test_preprocess_netcdf_compress(self):
+        """Mirror the geotiff compress test on the netcdf method (parity check)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="precip",
+                data_file=Path(tmpdir) / "x.nc",
+                variable="pr",
+                units="mm/day",
+                compress=True,
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.output, Path(tmpdir) / "precip.jshdz")
+            self.assertEqual(grid.files["precip"]["path"], "precip.jshdz")
+
+    def test_preprocess_csv_compress(self):
+        """compress=True works on the csv method too."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_csv(
+                cli,
+                josh_name="points",
+                data_file=Path(tmpdir) / "x.csv",
+                variable="value",
+                units="kg",
+                timestep=0,
+                compress=True,
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.output, Path(tmpdir) / "points.jshdz")
+            self.assertEqual(grid.files["points"]["path"], "points.jshdz")
+
+    def test_preprocess_compress_default_false_keeps_jshd(self):
+        """Regression: omitting compress kwarg preserves the .jshd default."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_geotiff(
+                cli,
+                josh_name="cover",
+                data_file=Path(tmpdir) / "cover.tif",
+                band=0,
+                units="percent",
+                timestep=0,
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.output, Path(tmpdir) / "cover.jshd")
+            self.assertEqual(grid.files["cover"]["path"], "cover.jshd")
+
     def test_preprocess_cleans_up_temp_script(self):
         """Temp .josh file should be cleaned up even on failure."""
         import glob
@@ -831,6 +953,89 @@ class TestGridSpecPreprocessVariant(unittest.TestCase):
             self.assertIn("cover", grid.files)
             self.assertIn("path", grid.files["cover"])
             self.assertEqual(grid.files["cover"]["path"], "cover.jshd")
+
+    def test_preprocess_compress_with_template_path_raises(self):
+        """compress=True is incompatible with template_path (per design).
+
+        Users wanting compression alongside template_path should put the
+        ``.jshdz`` suffix directly into the template string instead.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="test",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=10,
+                files={
+                    "futureTemp": {
+                        "template_path": "tas_{scenario}.jshd",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370"],
+                        "default": "ssp245",
+                    },
+                },
+            )
+            cli, _ = self._mock_cli()
+
+            with self.assertRaises(ValueError) as ctx:
+                grid.preprocess_geotiff(
+                    cli,
+                    josh_name="futureTemp",
+                    data_file=Path(tmpdir) / "x.tif",
+                    band=0,
+                    units="K",
+                    timestep=0,
+                    variant={"scenario": "ssp245"},
+                    compress=True,
+                )
+            self.assertIn("template_path", str(ctx.exception))
+            self.assertIn(".jshdz", str(ctx.exception))
+            cli.preprocess.assert_not_called()
+
+    def test_preprocess_template_path_jshdz_unchanged_without_compress(self):
+        """Pre-existing self-served path: template_path='x.jshdz' still works
+        without the compress kwarg (no regression on the prior workaround)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="test",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                steps=10,
+                files={
+                    "futureTemp": {
+                        "template_path": "tas_{scenario}.jshdz",
+                        "units": "K",
+                    },
+                },
+                variants={
+                    "scenario": {
+                        "values": ["ssp245", "ssp370"],
+                        "default": "ssp245",
+                    },
+                },
+            )
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_geotiff(
+                cli,
+                josh_name="futureTemp",
+                data_file=Path(tmpdir) / "x.tif",
+                band=0,
+                units="K",
+                timestep=0,
+                variant={"scenario": "ssp245"},
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.output, Path(tmpdir) / "tas_ssp245.jshdz")
 
 
 if __name__ == "__main__":
