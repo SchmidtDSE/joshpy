@@ -37,6 +37,11 @@ from joshpy.cli import (
     InspectExportsConfig,
     ExportFileInfo,
     ExportPaths,
+    StageFromMinioConfig,
+    StageToMinioConfig,
+    BatchRemoteConfig,
+    PreprocessBatchConfig,
+    PollBatchConfig,
 )
 
 # JFR diagnostics (always available, no external deps)
@@ -72,6 +77,19 @@ from joshpy.debug import (
     format_message,
 )
 
+# Target profile system (always available, no external deps)
+from joshpy.targets import (
+    TargetProfile,
+    HttpTargetConfig,
+    KubernetesTargetConfig,
+    ResolvedMinioCreds,
+    load_target,
+    save_target,
+    list_targets,
+    delete_target,
+    resolve_minio_creds,
+)
+
 # Optional jobs module (requires jinja2 and pyyaml)
 try:
     from joshpy.jobs import (
@@ -87,6 +105,7 @@ try:
         AdaptiveSweepResult,
         to_run_config,
         to_run_remote_config,
+        to_batch_remote_config,
         run_sweep,
         discover_jshd_files,
     )
@@ -119,6 +138,7 @@ try:
         RunInfo,
         SessionSummary,
         DataSummary,
+        configure_s3,
     )
     from joshpy.cell_data import (
         CellDataLoader,
@@ -136,6 +156,7 @@ try:
         SweepManagerBuilder,
         recover_sweep_results,
         load_job_results,
+        ingest_results,
         LoadConfig,
         ResultLoadError,
     )
@@ -182,6 +203,11 @@ __all__ = [
     "InspectExportsConfig",
     "ExportFileInfo",
     "ExportPaths",
+    "StageFromMinioConfig",
+    "StageToMinioConfig",
+    "BatchRemoteConfig",
+    "PreprocessBatchConfig",
+    "PollBatchConfig",
     # JFR diagnostics
     "ResourceProfile",
     "CpuProfile",
@@ -206,6 +232,16 @@ __all__ = [
     "load_debug_file",
     "load_debug_from_script",
     "format_message",
+    # Target profiles
+    "TargetProfile",
+    "HttpTargetConfig",
+    "KubernetesTargetConfig",
+    "ResolvedMinioCreds",
+    "load_target",
+    "save_target",
+    "list_targets",
+    "delete_target",
+    "resolve_minio_creds",
     # Jobs (optional)
     "ConfigSweepParameter",
     "FileSweepParameter",
@@ -219,6 +255,7 @@ __all__ = [
     "AdaptiveSweepResult",
     "to_run_config",
     "to_run_remote_config",
+    "to_batch_remote_config",
     "run_sweep",
     "discover_jshd_files",
     "GridSpec",
@@ -243,6 +280,7 @@ __all__ = [
     "RunInfo",
     "SessionSummary",
     "DataSummary",
+    "configure_s3",
     "CellDataLoader",
     "DiagnosticQueries",
     "SimulationDiagnostics",
@@ -252,6 +290,7 @@ __all__ = [
     "SweepManagerBuilder",
     "recover_sweep_results",
     "load_job_results",
+    "ingest_results",
     "LoadConfig",
     "ResultLoadError",
     "HAS_SWEEP",

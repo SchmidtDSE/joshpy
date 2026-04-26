@@ -399,6 +399,186 @@ class InspectJshdConfig:
 
 
 @dataclass(frozen=True)
+class StageFromMinioConfig:
+    """Arguments for 'java -jar joshsim.jar stageFromMinio' command.
+
+    Downloads all objects under a MinIO prefix to a local directory.
+    MinIO credentials are optional -- joshsim falls back to environment
+    variables (MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY,
+    MINIO_BUCKET) via its HierarchyConfig.
+
+    Attributes:
+        output_dir: Local directory to download files into.
+        prefix: MinIO object prefix to download from.
+        minio_endpoint: MinIO endpoint URL (optional).
+        minio_access_key: MinIO access key (optional).
+        minio_secret_key: MinIO secret key (optional).
+        minio_bucket: MinIO bucket name (optional).
+        config_file: Path to JSON configuration file (optional).
+        ensure_bucket_exists: Ensure the bucket exists before downloading.
+        minio_path: Base object name/path within bucket (optional).
+    """
+
+    output_dir: Path
+    prefix: str
+    minio_endpoint: str | None = None
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str | None = None
+    config_file: Path | None = None
+    ensure_bucket_exists: bool = False
+    minio_path: str | None = None
+
+
+@dataclass(frozen=True)
+class StageToMinioConfig:
+    """Arguments for 'java -jar joshsim.jar stageToMinio' command.
+
+    Uploads a local directory to MinIO under a given prefix.
+    MinIO credentials are optional -- joshsim falls back to environment
+    variables via its HierarchyConfig.
+
+    Attributes:
+        input_dir: Local directory to upload.
+        prefix: MinIO object prefix to upload to.
+        minio_endpoint: MinIO endpoint URL (optional).
+        minio_access_key: MinIO access key (optional).
+        minio_secret_key: MinIO secret key (optional).
+        minio_bucket: MinIO bucket name (optional).
+        config_file: Path to JSON configuration file (optional).
+        ensure_bucket_exists: Ensure the bucket exists before uploading.
+        minio_path: Base object name/path within bucket (optional).
+    """
+
+    input_dir: Path
+    prefix: str
+    minio_endpoint: str | None = None
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str | None = None
+    config_file: Path | None = None
+    ensure_bucket_exists: bool = False
+    minio_path: str | None = None
+
+
+@dataclass(frozen=True)
+class BatchRemoteConfig:
+    """Arguments for 'java -jar joshsim.jar batchRemote' command.
+
+    Mirrors josh's CLI surface. joshpy's staging model is always explicit
+    two-step: caller uploads inputs via :meth:`JoshCLI.stage_to_minio`, then
+    dispatches via :meth:`JoshCLI.batch_remote` with ``require_prestaged=True``
+    to verify the sentinel before the remote target starts.
+
+    Attributes:
+        simulation: Name of simulation to run.
+        target: Target profile name (required).
+        minio_prefix: MinIO object prefix where inputs already live (e.g.
+            ``batch-jobs/my-run/inputs/``). Must have the staging sentinel
+            present if ``require_prestaged=True``.
+        replicates: Number of replicates (default: 1).
+        no_wait: If True, dispatch and exit without polling (default: False).
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Job timeout in seconds (optional).
+        require_prestaged: Fail fast unless the staging sentinel at
+            ``minio_prefix`` reports ``complete``. Recommended for sweeps;
+            ``run_sweep`` sets this to True by default via
+            :func:`joshpy.jobs.to_batch_remote_config`.
+        custom_tags: Custom tags for template resolution (``--custom-tag
+            name=value``). Pods receive these via the runtime's custom-tag
+            propagation mechanism and resolve ``{name}`` references in
+            export paths. joshpy's :func:`joshpy.jobs.to_batch_remote_config`
+            auto-injects ``run_hash`` so users can write
+            ``exportFiles.patch = "minio://bucket/{run_hash}/output_{replicate}.csv"``
+            for deterministic per-simulation paths.
+        replicate_start: Offset added to each pod's replicate index. When K,
+            pods run as replicates K..K+replicates-1 (instead of 0..replicates-1).
+            Used by the pool collision policy to append new replicates to an
+            existing MinIO prefix without overwriting prior CSVs.
+    """
+
+    simulation: str
+    target: str
+    minio_prefix: str
+    replicates: int = 1
+    no_wait: bool = False
+    poll_interval: int | None = None
+    timeout: int | None = None
+    require_prestaged: bool = False
+    custom_tags: dict[str, str] = field(default_factory=dict)
+    replicate_start: int = 0
+
+
+@dataclass(frozen=True)
+class PreprocessBatchConfig:
+    """Arguments for 'java -jar joshsim.jar preprocessBatch' command.
+
+    Preprocesses geospatial data on a remote target, downloads the
+    resulting ``.jshd`` file.
+
+    Attributes:
+        script: Path to .josh file.
+        simulation: Name of simulation.
+        data_file: Input data file (e.g. .nc).
+        variable: Variable name in the data file.
+        units: Units of the data.
+        output: Output .jshd file path.
+        target: Target profile name (required).
+        crs: CRS to use when reading the file.
+        x_coord: Name of X coordinate dimension.
+        y_coord: Name of Y coordinate dimension.
+        time_dim: Name of time dimension.
+        timestep: Single timestep to process.
+        default_value: Default value to fill grid spaces before copying data.
+        parallel: Enable parallel processing of patches within each timestep.
+        amend: Amend existing output file rather than overwriting.
+        no_wait: If True, dispatch and exit without polling for completion.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Maximum seconds to wait for completion (optional).
+    """
+
+    script: Path
+    simulation: str
+    data_file: Path
+    variable: str
+    units: str
+    output: Path
+    target: str
+    crs: str | None = None
+    x_coord: str | None = None
+    y_coord: str | None = None
+    time_dim: str | None = None
+    timestep: int | None = None
+    default_value: float | None = None
+    parallel: bool = False
+    amend: bool = False
+    no_wait: bool = False
+    poll_interval: int | None = None
+    timeout: int | None = None
+
+
+@dataclass(frozen=True)
+class PollBatchConfig:
+    """Arguments for 'java -jar joshsim.jar pollBatch' command.
+
+    Single-shot status check for a dispatched batch job.
+
+    Exit codes from the JAR:
+        0 — complete (job succeeded)
+        1 — error (job failed)
+        2 — running / pending
+        100 — poll failure (transient, retry)
+
+    Attributes:
+        job_id: Job ID returned by ``batchRemote --no-wait``.
+        target: Target profile name (loads ``~/.josh/targets/<name>.json``).
+    """
+
+    job_id: str
+    target: str
+
+
+@dataclass(frozen=True)
 class InspectExportsConfig:
     """Arguments for 'java -jar joshsim.jar inspect-exports' command.
 
@@ -623,6 +803,205 @@ class JoshCLI:
                 stderr=str(e),
                 command=cmd,
             )
+
+    def stage_from_minio(
+        self,
+        config: StageFromMinioConfig,
+        timeout: float | None = None,
+    ) -> CLIResult:
+        """Download files from MinIO to a local directory.
+
+        Args:
+            config: Stage-from-MinIO configuration.
+            timeout: Timeout in seconds.
+
+        Returns:
+            CLIResult with execution details.
+        """
+        args = [
+            "stageFromMinio",
+            "--output-dir", str(config.output_dir.resolve()),
+            "--prefix", config.prefix,
+        ]
+
+        if config.minio_endpoint:
+            args.extend(["--minio-endpoint", config.minio_endpoint])
+        if config.minio_access_key:
+            args.extend(["--minio-access-key", config.minio_access_key])
+        if config.minio_secret_key:
+            args.extend(["--minio-secret-key", config.minio_secret_key])
+        if config.minio_bucket:
+            args.extend(["--minio-bucket", config.minio_bucket])
+        if config.config_file is not None:
+            args.append(f"--config-file={config.config_file.resolve()}")
+        if config.ensure_bucket_exists:
+            args.append("--ensure-bucket-exists")
+        if config.minio_path is not None:
+            args.append(f"--minio-path={config.minio_path}")
+
+        return self._execute(args, timeout=timeout)
+
+    def stage_to_minio(
+        self,
+        config: StageToMinioConfig,
+        timeout: float | None = None,
+    ) -> CLIResult:
+        """Upload a local directory to MinIO.
+
+        Args:
+            config: Stage-to-MinIO configuration.
+            timeout: Timeout in seconds.
+
+        Returns:
+            CLIResult with execution details.
+        """
+        args = [
+            "stageToMinio",
+            "--input-dir", str(config.input_dir.resolve()),
+            "--prefix", config.prefix,
+        ]
+
+        if config.minio_endpoint:
+            args.extend(["--minio-endpoint", config.minio_endpoint])
+        if config.minio_access_key:
+            args.extend(["--minio-access-key", config.minio_access_key])
+        if config.minio_secret_key:
+            args.extend(["--minio-secret-key", config.minio_secret_key])
+        if config.minio_bucket:
+            args.extend(["--minio-bucket", config.minio_bucket])
+        if config.config_file is not None:
+            args.append(f"--config-file={config.config_file.resolve()}")
+        if config.ensure_bucket_exists:
+            args.append("--ensure-bucket-exists")
+        if config.minio_path is not None:
+            args.append(f"--minio-path={config.minio_path}")
+
+        return self._execute(args, timeout=timeout)
+
+    def batch_remote(
+        self,
+        config: BatchRemoteConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+        stream_output: bool = False,
+    ) -> CLIResult:
+        """Dispatch a simulation to a remote target via MinIO staging.
+
+        Args:
+            config: Batch remote configuration.
+            timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
+            stream_output: Stream JAR output to terminal in real time.
+
+        Returns:
+            CLIResult with execution details.
+        """
+        args = [
+            "batchRemote",
+            f"--target={config.target}",
+            f"--minio-prefix={config.minio_prefix}",
+        ]
+
+        if config.replicates > 1:
+            args.append(f"--replicates={config.replicates}")
+        if config.no_wait:
+            args.append("--no-wait")
+        if config.poll_interval is not None:
+            args.append(f"--poll-interval={config.poll_interval}")
+        if config.timeout is not None:
+            args.append(f"--timeout={config.timeout}")
+        if config.require_prestaged:
+            args.append("--require-prestaged")
+        if config.replicate_start > 0:
+            args.append(f"--replicate-start={config.replicate_start}")
+        for name, value in config.custom_tags.items():
+            args.extend(["--custom-tag", f"{name}={value}"])
+
+        args.append(config.simulation)
+
+        return self._execute(
+            args, timeout=timeout, jfr=jfr, stream_output=stream_output,
+        )
+
+    def preprocess_batch(
+        self,
+        config: PreprocessBatchConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> CLIResult:
+        """Preprocess geospatial data on a remote target.
+
+        Args:
+            config: Preprocess-batch configuration.
+            timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
+
+        Returns:
+            CLIResult with execution details.
+        """
+        args = [
+            "preprocessBatch",
+            str(config.script.resolve()),
+            config.simulation,
+            str(config.data_file.resolve()),
+            config.variable,
+            config.units,
+            str(config.output.resolve()),
+            f"--target={config.target}",
+        ]
+
+        if config.crs is not None:
+            args.append(f"--crs={config.crs}")
+        if config.x_coord is not None:
+            args.append(f"--x-coord={config.x_coord}")
+        if config.y_coord is not None:
+            args.append(f"--y-coord={config.y_coord}")
+        if config.time_dim is not None:
+            args.append(f"--time-dim={config.time_dim}")
+        if config.timestep is not None:
+            args.append(f"--timestep={config.timestep}")
+        if config.default_value is not None:
+            args.append(f"--default-value={config.default_value}")
+        if config.parallel:
+            args.append("--parallel")
+        if config.amend:
+            args.append("--amend")
+        if config.no_wait:
+            args.append("--no-wait")
+        if config.poll_interval is not None:
+            args.append(f"--poll-interval={config.poll_interval}")
+        if config.timeout is not None:
+            args.append(f"--timeout={config.timeout}")
+
+        return self._execute(args, timeout=timeout, jfr=jfr)
+
+    def poll_batch(
+        self,
+        config: PollBatchConfig,
+        timeout: float | None = None,
+    ) -> CLIResult:
+        """Check the status of a dispatched batch job.
+
+        Exit codes:
+            0 — complete (job succeeded, stdout has JSON status)
+            1 — error (job failed, stdout has JSON with error details)
+            2 — running / pending
+            100 — poll failure (transient error, caller should retry)
+
+        Args:
+            config: Poll-batch configuration with job_id and target.
+            timeout: Timeout in seconds.
+
+        Returns:
+            CLIResult with exit_code indicating job state.
+        """
+        args = [
+            "pollBatch",
+            config.job_id,
+            f"--target={config.target}",
+        ]
+
+        return self._execute(args, timeout=timeout)
 
     def _execute_streaming(
         self,

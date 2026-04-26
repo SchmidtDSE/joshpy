@@ -125,6 +125,8 @@ def _compute_run_hash(
     josh_path: Path | None,
     config_content: str,
     file_mappings: dict[str, Path] | None = None,
+    *,
+    seed: int | None = None,
 ) -> str:
     """Compute hash uniquely identifying a simulation specification.
 
@@ -132,6 +134,8 @@ def _compute_run_hash(
     - Josh script content (.josh) - read at hash time
     - Rendered config content (.jshc) - not the template
     - Content hashes of all input data files (.jshd, etc.)
+    - Random seed, if explicitly set (preserves backward-compatible
+      hashes for unseeded runs)
 
     This provides a complete fingerprint of all inputs to a simulation,
     ensuring that runs with different input data get different hashes.
@@ -142,6 +146,11 @@ def _compute_run_hash(
         config_content: Rendered .jshc configuration content.
         file_mappings: Optional dict mapping names to file paths.
             All files must exist at hash time.
+        seed: Optional random seed. When set, contributes to the hash so
+            that ``seed=42`` and ``seed=99`` produce different hashes for
+            otherwise-identical inputs (per-trajectory reproducibility).
+            When ``None`` (the default), the hash matches the legacy
+            unseeded computation — existing registries are preserved.
 
     Returns:
         12-character hex string hash.
@@ -179,6 +188,11 @@ def _compute_run_hash(
                 )
             hasher.update(name.encode("utf-8"))
             hasher.update(_hash_file(path).encode("utf-8"))
+
+    # 4. Random seed (only when explicitly set, preserves hash for unseeded runs)
+    if seed is not None:
+        hasher.update(b"seed=")
+        hasher.update(str(seed).encode("utf-8"))
 
     return hasher.hexdigest()[:12]
 
@@ -1183,11 +1197,12 @@ class JobExpander:
                 if str(k) not in custom_tags:  # don't overwrite file param tags
                     custom_tags[str(k)] = str(v)
 
-            # Compute run_hash (includes josh + config + file_mappings)
+            # Compute run_hash (includes josh + config + file_mappings + seed)
             run_hash = _compute_run_hash(
                 josh_path=effective_source_path,
                 config_content=rendered,
                 file_mappings=file_mappings if file_mappings else None,
+                seed=config.seed,
             )
 
             # Add run_hash as a custom tag
@@ -1333,6 +1348,82 @@ def to_run_remote_config(
         endpoint=endpoint,
         data=data,
         custom_tags=job.custom_tags,
+    )
+
+
+def to_batch_remote_config(
+    job: ExpandedJob,
+    target: str,
+    minio_prefix: str,
+    *,
+    no_wait: bool = False,
+    poll_interval: int | None = None,
+    timeout: int | None = None,
+    require_prestaged: bool = True,
+    replicate_start: int = 0,
+    replicate_count: int | None = None,
+) -> BatchRemoteConfig:
+    """Convert an ExpandedJob to a BatchRemoteConfig for batch remote execution.
+
+    joshpy's staging model is always explicit stage-then-dispatch. Callers
+    (typically ``run_sweep``) first assemble a per-job workdir via
+    :func:`joshpy.batch_orchestrator.assemble_batch_workdir` and upload it
+    with :meth:`JoshCLI.stage_to_minio`, then pass the resulting prefix here.
+    The default ``require_prestaged=True`` makes the JAR fail fast if the
+    ``.josh-staged.json`` sentinel isn't ``status=complete``.
+
+    Power users dispatching against a pre-existing prefix (e.g., CI-staged
+    inputs, a persistent-storage target, or a re-run of a prior sweep) can
+    pass ``require_prestaged=False`` to skip the sentinel check entirely.
+
+    The job's ``custom_tags`` (which include ``run_hash`` and ``label`` auto-
+    populated during :class:`JobExpander.expand`) are passed through so pods
+    can resolve placeholders like ``{run_hash}`` and ``{label}`` in export
+    paths — matching the behavior of ``to_run_config`` and
+    ``to_run_remote_config`` for interoperability across dispatch modes.
+
+    Args:
+        job: The expanded job to convert.
+        target: Target profile name (e.g. ``"gke-test"``).
+        minio_prefix: Pre-staged MinIO prefix (e.g. ``sweeps/<id>/jobs/<hash>/``).
+        no_wait: If True, dispatch and return immediately.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Job timeout in seconds (optional).
+        require_prestaged: If True (default), JAR will fail fast unless the
+            prefix sentinel reports ``complete``. Set to False only when
+            intentionally dispatching against an unverified prefix.
+        replicate_start: Offset added to each pod's replicate index. Used by
+            the pool collision policy to append replicates K..K+N-1 onto an
+            existing MinIO prefix instead of overwriting 0..N-1.
+        replicate_count: Override the dispatch replicate count. When ``None``
+            (the default), uses ``job.replicates``. Pool-collision dispatches
+            set this to the remaining count (``total - replicate_start``) so
+            pods run exactly the missing indices.
+
+    Returns:
+        BatchRemoteConfig ready for use with JoshCLI.batch_remote().
+
+    Raises:
+        ValueError: If job.source_path is None.
+    """
+    from joshpy.cli import BatchRemoteConfig
+
+    if job.source_path is None:
+        raise ValueError(
+            "ExpandedJob.source_path is required for to_batch_remote_config()"
+        )
+
+    return BatchRemoteConfig(
+        simulation=job.simulation,
+        target=target,
+        minio_prefix=minio_prefix,
+        replicates=replicate_count if replicate_count is not None else job.replicates,
+        no_wait=no_wait,
+        poll_interval=poll_interval,
+        timeout=timeout,
+        require_prestaged=require_prestaged,
+        custom_tags=dict(job.custom_tags),
+        replicate_start=replicate_start,
     )
 
 
@@ -1625,6 +1716,13 @@ def run_sweep(
     remote: bool = False,
     api_key: str | None = None,
     endpoint: str | None = None,
+    batch_remote: bool = False,
+    target: str | None = None,
+    batch_no_wait: bool = False,
+    poll_interval: int = 10,
+    batch_timeout: int | None = None,
+    auto_ingest: bool = True,
+    collision_policy: str = "fail",
     on_complete: Callable[[ExpandedJob, Any], None] | None = None,
     stop_on_failure: bool = True,
     dry_run: bool = False,
@@ -1656,6 +1754,16 @@ def run_sweep(
         remote: If True, use run_remote() for cloud execution.
         api_key: Josh Cloud API key (required if remote=True).
         endpoint: Custom Josh Cloud endpoint URL.
+        batch_remote: If True, use batch_remote() for MinIO-staged execution.
+            Mutually exclusive with ``remote``.
+        target: Target profile name (required if batch_remote=True).
+        batch_no_wait: If True, dispatch all jobs with ``--no-wait`` then poll
+            for completion (async mode).  If False (default), each job blocks
+            until the JAR finishes polling internally (blocking mode).
+        poll_interval: Seconds between poll attempts in async mode (default: 10).
+        batch_timeout: Overall timeout in seconds per job for async polling.
+        auto_ingest: If True (default), call ``ingest_results()`` after each
+            successful batch job to load CSVs from S3 into the registry.
         on_complete: Optional callback invoked after each job completes.
             Signature: callback(job, result) -> None. Called after registry
             recording (if enabled). Use for progress reporting, logging, etc.
@@ -1722,6 +1830,10 @@ def run_sweep(
 
     if registry is not None and session_id is None:
         raise ValueError("session_id is required when registry is provided")
+    if batch_remote and remote:
+        raise ValueError("batch_remote and remote are mutually exclusive")
+    if batch_remote and target is None:
+        raise ValueError("target is required when batch_remote=True")
 
     # Setup registry callback if registry provided
     registry_callback: RegistryCallback | None = None
@@ -1764,19 +1876,168 @@ def run_sweep(
     _bottled_success = False
     _bottle_collect: list[tuple[ExpandedJob, Any]] = []
 
+    # Async batch remote tracking: job_id -> (job, dispatch_result)
+    _async_dispatched: dict[str, tuple[ExpandedJob, Any]] = {}
+
+    # Batch metadata per run_hash for bottling (target + per-job minio_prefix).
+    _batch_metadata_by_hash: dict[str, dict[str, Any]] = {}
+
+    # Per-sweep staging root for batch remote mode. One tempdir per sweep, one
+    # subdir per ExpandedJob. Cleaned up in the finally below.
+    sweep_workdir: Path | None = None
+    _stage_prefix_root: str | None = None
+    if batch_remote:
+        import tempfile
+
+        sweep_workdir = Path(
+            tempfile.mkdtemp(prefix=f"joshpy-sweep-{session_id or 'adhoc'}-")
+        )
+        _stage_prefix_root = f"sweeps/{session_id or 'adhoc'}/"
+
     try:
         for i, job in enumerate(job_set):
             if not quiet:
-                mode = "remote" if remote else "local"
+                mode = "batch-remote" if batch_remote else ("remote" if remote else "local")
                 print(f"[{i + 1}/{total_jobs}] Running ({mode}): {job.parameters}")
 
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
-            if remote:
+            if batch_remote:
+                from joshpy.batch_orchestrator import assemble_batch_workdir
+                from joshpy.cli import CLIResult, StageToMinioConfig
+                from joshpy.sweep import (
+                    SweepCollisionError,
+                    _apply_collision_policy,
+                    _list_existing_replicates_minio,
+                )
+
+                assert target is not None  # validated above
+                assert sweep_workdir is not None  # allocated when batch_remote=True
+
+                per_job_prefix = (
+                    f"sweeps/{session_id or 'adhoc'}/jobs/{job.run_hash}/"
+                )
+                _batch_metadata_by_hash[job.run_hash] = {
+                    "target": target,
+                    "minio_prefix": per_job_prefix,
+                    "stage_prefix_root": _stage_prefix_root,
+                }
+
+                # Collision policy: list existing outputs, compute dispatch plan.
+                # Registry lookup for export paths uses the cli-side inspect + glob.
+                action = None
+                patch_info = None
+                try:
+                    from joshpy.cli import InspectExportsConfig
+                    # source_path required for batch dispatch — to_batch_remote_config
+                    # raises if None, so skip the policy eval on that path.
+                    if job.source_path is None:
+                        raise RuntimeError("source_path required for batch dispatch")
+                    exports = cli.inspect_exports(
+                        InspectExportsConfig(
+                            script=job.source_path, simulation=job.simulation,
+                        )
+                    )
+                    patch_info = exports.export_files.get("patch") if exports else None
+                    if (
+                        patch_info is not None
+                        and patch_info.protocol == "minio"
+                        and registry is not None
+                    ):
+                        existing = _list_existing_replicates_minio(
+                            cli, registry, patch_info,
+                            known_vars={
+                                **job.parameters,
+                                **job.custom_tags,
+                                "run_hash": job.run_hash,
+                                "simulation": job.simulation,
+                            },
+                            quiet=quiet,
+                        )
+                        action = _apply_collision_policy(
+                            collision_policy, existing, job.replicates,
+                        )
+                except Exception as e:
+                    if not quiet:
+                        print(
+                            f"  [POLICY] Could not evaluate {collision_policy!r}: "
+                            f"{e}; dispatching in full."
+                        )
+
+                if action is not None and action.action == "fail":
+                    raise SweepCollisionError(
+                        [(job, patch_info.path if patch_info else "?",
+                          list(action.existing))]
+                    )
+
+                if action is not None and action.action == "skip":
+                    if not quiet:
+                        print(
+                            f"  [POLICY] Skipping dispatch: {len(action.existing)} "
+                            f"existing replicates already cover {job.replicates} requested."
+                        )
+                    import json as _json
+                    result = CLIResult(
+                        exit_code=0,
+                        stdout=_json.dumps({
+                            "skipped": True,
+                            "reason": "collision_policy",
+                            "existing": sorted(action.existing),
+                        }),
+                        stderr="",
+                        command=["batchRemote", "(skipped by collision policy)"],
+                    )
+                else:
+                    # Dispatch path: stage + dispatch, honoring pool offset/count.
+                    dispatch_start = action.replicate_start if action else 0
+                    dispatch_count = (
+                        action.replicates if action else job.replicates
+                    )
+
+                    job_dir = assemble_batch_workdir(job, sweep_workdir)
+                    stage_result = cli.stage_to_minio(
+                        StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
+                    )
+                    if not stage_result.success:
+                        result = stage_result
+                    else:
+                        br_config = to_batch_remote_config(
+                            job, target, per_job_prefix,
+                            no_wait=batch_no_wait,
+                            poll_interval=poll_interval if batch_no_wait else None,
+                            timeout=batch_timeout,
+                            require_prestaged=True,
+                            replicate_start=dispatch_start,
+                            replicate_count=dispatch_count,
+                        )
+                        result = cli.batch_remote(
+                            br_config, jfr=job_jfr, stream_output=stream_output,
+                        )
+            elif remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
             else:
                 run_config = to_run_config(job, enable_profiler=enable_profiler)
                 result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
+
+            # Async batch dispatch: parse job_id, defer result tracking
+            if batch_no_wait and batch_remote and result.success:
+                import json as _json
+
+                try:
+                    dispatch_data = _json.loads(result.stdout.strip())
+                    job_id = dispatch_data["jobId"]
+                    _async_dispatched[job_id] = (job, result)
+                    if not quiet:
+                        print(f"  [DISPATCHED] job_id={job_id}")
+                    # Store batch metadata in registry
+                    if registry_callback is not None:
+                        run_id = registry_callback.record(job, result)
+                        run_ids[job.run_hash] = run_id
+                    continue  # skip normal result handling
+                except (ValueError, KeyError) as e:
+                    if not quiet:
+                        print(f"  [WARN] Could not parse --no-wait output: {e}")
+                    # Fall through to normal result handling
 
             job_results.append((job, result))
 
@@ -1819,6 +2080,27 @@ def run_sweep(
                 ):
                     export_paths_cache[cache_key] = resolved_paths
 
+                # Auto-ingest MinIO CSVs for successful batch-remote jobs.
+                # Passes the cached export_paths so ingest_results skips
+                # its own inspect_exports subprocess.
+                if (
+                    batch_remote
+                    and auto_ingest
+                    and result.success
+                    and resolved_paths is not None
+                ):
+                    from joshpy.sweep import ingest_results
+
+                    try:
+                        ingest_results(
+                            cli, registry_callback.registry, job.run_hash,
+                            export_paths=resolved_paths,
+                            quiet=quiet,
+                        )
+                    except Exception as e:
+                        if not quiet:
+                            print(f"  [INGEST] Warning: ingest failed: {e}")
+
             # Call user's callback if provided
             if on_complete is not None:
                 on_complete(job, result)
@@ -1842,6 +2124,7 @@ def run_sweep(
                             cli=cli,
                             output_dir=bottle_dir or Path("bottles"),
                             omit_jshd=bottle_omit_jshd,
+                            batch_metadata=_batch_metadata_by_hash.get(job.run_hash),
                         )
                         if not quiet:
                             print(f"  [BOTTLE] {bottle_path}")
@@ -1864,6 +2147,75 @@ def run_sweep(
                     succeeded_before=succeeded,
                 )
 
+        # -----------------------------------------------------------
+        # Async batch polling: wait for all dispatched jobs
+        # -----------------------------------------------------------
+        if _async_dispatched:
+            import time
+
+            from joshpy.cli import CLIResult, PollBatchConfig
+
+            assert target is not None  # validated above
+            remaining = set(_async_dispatched.keys())
+
+            if not quiet:
+                print(f"Polling {len(remaining)} dispatched jobs...")
+
+            poll_start = time.monotonic()
+            while remaining:
+                if batch_timeout is not None:
+                    elapsed = time.monotonic() - poll_start
+                    if elapsed > batch_timeout:
+                        for job_id in list(remaining):
+                            job, _ = _async_dispatched[job_id]
+                            timeout_result = CLIResult(
+                                success=False,
+                                exit_code=-1,
+                                stdout="",
+                                stderr=f"Batch job {job_id} timed out after {batch_timeout}s",
+                                command=[],
+                            )
+                            job_results.append((job, timeout_result))
+                            failed += 1
+                            remaining.discard(job_id)
+                        break
+
+                for job_id in list(remaining):
+                    job, dispatch_result = _async_dispatched[job_id]
+                    poll_result = cli.poll_batch(
+                        PollBatchConfig(job_id=job_id, target=target),
+                    )
+
+                    if poll_result.exit_code == 0:
+                        # Complete
+                        remaining.discard(job_id)
+                        job_results.append((job, poll_result))
+                        succeeded += 1
+                        if not quiet:
+                            print(f"  [COMPLETE] {job_id}")
+                    elif poll_result.exit_code == 1:
+                        # Error
+                        remaining.discard(job_id)
+                        job_results.append((job, poll_result))
+                        failed += 1
+                        if not quiet:
+                            print(f"  [ERROR] {job_id}")
+                        if stop_on_failure:
+                            if manage_status and registry is not None and session_id is not None:
+                                registry.update_session_status(session_id, "failed")
+                            raise SweepExecutionError(
+                                job=job,
+                                result=poll_result,
+                                trial_num=0,
+                                succeeded_before=succeeded,
+                            )
+                    elif poll_result.exit_code in (2, 100):
+                        # Running/pending or transient poll failure — keep waiting
+                        pass
+
+                if remaining:
+                    time.sleep(poll_interval)
+
         if not quiet:
             print(f"Completed: {succeeded} succeeded, {failed} failed")
 
@@ -1871,12 +2223,23 @@ def run_sweep(
         if bottle is not None and _bottle_collect:
             from joshpy.bottle import create_sweep_bottle
 
+            sweep_batch_metadata: dict[str, Any] | None = None
+            if batch_remote:
+                sweep_batch_metadata = {
+                    "target": target,
+                    "stage_prefix_root": _stage_prefix_root,
+                }
+
             try:
                 bottle_path = create_sweep_bottle(
                     job_results=_bottle_collect,
                     cli=cli,
                     output_dir=bottle_dir or Path("bottles"),
                     omit_jshd=bottle_omit_jshd,
+                    batch_metadata=sweep_batch_metadata,
+                    per_job_batch_metadata=(
+                        _batch_metadata_by_hash if batch_remote else None
+                    ),
                 )
                 if not quiet:
                     print(f"[BOTTLE] {bottle_path} ({len(_bottle_collect)} jobs)")
@@ -1900,3 +2263,8 @@ def run_sweep(
         if manage_status and registry is not None and session_id is not None:
             registry.update_session_status(session_id, "failed")
         raise
+    finally:
+        if sweep_workdir is not None:
+            import shutil
+
+            shutil.rmtree(sweep_workdir, ignore_errors=True)

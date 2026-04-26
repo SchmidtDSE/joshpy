@@ -446,9 +446,9 @@ class TestJoshCLI(unittest.TestCase):
 
         cmd = mock_run.call_args[0][0]
         self.assertIn("--data", cmd)
-        # Find the data value
+        # Find the data value — name gets extension appended when missing
         data_idx = cmd.index("--data")
-        self.assertIn("editor=", cmd[data_idx + 1])
+        self.assertIn("editor.jshc=", cmd[data_idx + 1])
 
     @patch("subprocess.run")
     def test_run_with_custom_tags(self, mock_run):
@@ -1444,6 +1444,735 @@ class TestStreamOutput(unittest.TestCase):
         mock_popen.assert_called_once()
         self.assertTrue(result.success)
         self.assertIn("remote step", result.stdout)
+
+
+class TestStageFromMinioConfig(unittest.TestCase):
+    """Tests for StageFromMinioConfig."""
+
+    def test_defaults(self):
+        from joshpy.cli import StageFromMinioConfig
+
+        config = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"),
+            prefix="batch-jobs/abc/inputs/",
+        )
+        self.assertEqual(config.output_dir, Path("/tmp/out"))
+        self.assertEqual(config.prefix, "batch-jobs/abc/inputs/")
+        self.assertIsNone(config.minio_endpoint)
+        self.assertIsNone(config.minio_access_key)
+        self.assertIsNone(config.minio_secret_key)
+        self.assertIsNone(config.minio_bucket)
+
+    def test_frozen(self):
+        from joshpy.cli import StageFromMinioConfig
+
+        config = StageFromMinioConfig(output_dir=Path("/tmp"), prefix="p/")
+        with self.assertRaises(AttributeError):
+            config.prefix = "other/"
+
+
+class TestStageFromMinio(unittest.TestCase):
+    """Tests for JoshCLI.stage_from_minio()."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """stage_from_minio() should build correct CLI args."""
+        from joshpy.cli import StageFromMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"),
+            prefix="batch-jobs/abc/inputs/",
+        )
+        cli.stage_from_minio(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("stageFromMinio", cmd)
+        self.assertIn("--output-dir", cmd)
+        self.assertIn("--prefix", cmd)
+        prefix_idx = cmd.index("--prefix")
+        self.assertEqual(cmd[prefix_idx + 1], "batch-jobs/abc/inputs/")
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_minio_flags_only_when_set(self, mock_run, _mock_jar):
+        """Only non-None minio flags should be passed."""
+        from joshpy.cli import StageFromMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        # With no minio flags
+        config_no_minio = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"), prefix="p/"
+        )
+        cli.stage_from_minio(config_no_minio)
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--minio-endpoint", cmd)
+        self.assertNotIn("--minio-access-key", cmd)
+        self.assertNotIn("--minio-secret-key", cmd)
+        self.assertNotIn("--minio-bucket", cmd)
+
+        # With all minio flags
+        config_with_minio = StageFromMinioConfig(
+            output_dir=Path("/tmp/out"),
+            prefix="p/",
+            minio_endpoint="https://storage.example.com",
+            minio_access_key="AKID",
+            minio_secret_key="SECRET",
+            minio_bucket="my-bucket",
+        )
+        cli.stage_from_minio(config_with_minio)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--minio-endpoint", cmd)
+        self.assertIn("--minio-access-key", cmd)
+        self.assertIn("--minio-secret-key", cmd)
+        self.assertIn("--minio-bucket", cmd)
+        ep_idx = cmd.index("--minio-endpoint")
+        self.assertEqual(cmd[ep_idx + 1], "https://storage.example.com")
+        bucket_idx = cmd.index("--minio-bucket")
+        self.assertEqual(cmd[bucket_idx + 1], "my-bucket")
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_extra_flags(self, mock_run, _mock_jar):
+        """config_file, ensure_bucket_exists, minio_path only emitted when set."""
+        from joshpy.cli import StageFromMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        cli.stage_from_minio(
+            StageFromMinioConfig(
+                output_dir=Path("/tmp/out"),
+                prefix="p/",
+                config_file=Path("/etc/josh.json"),
+                ensure_bucket_exists=True,
+                minio_path="models/v1/",
+            ),
+        )
+        cmd = mock_run.call_args[0][0]
+        self.assertTrue(any(c.startswith("--config-file=") for c in cmd))
+        self.assertIn("--ensure-bucket-exists", cmd)
+        self.assertIn("--minio-path=models/v1/", cmd)
+
+
+class TestStageToMinio(unittest.TestCase):
+    """Tests for JoshCLI.stage_to_minio()."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """stage_to_minio() should build correct CLI args."""
+        from joshpy.cli import StageToMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = StageToMinioConfig(
+            input_dir=Path("/tmp/inputs"),
+            prefix="batch-jobs/abc/inputs/",
+        )
+        cli.stage_to_minio(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("stageToMinio", cmd)
+        self.assertIn("--input-dir", cmd)
+        self.assertIn("--prefix", cmd)
+        prefix_idx = cmd.index("--prefix")
+        self.assertEqual(cmd[prefix_idx + 1], "batch-jobs/abc/inputs/")
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_minio_flags_only_when_set(self, mock_run, _mock_jar):
+        """Only non-None minio flags should be passed."""
+        from joshpy.cli import StageToMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        # With no minio flags
+        config_no_minio = StageToMinioConfig(
+            input_dir=Path("/tmp/inputs"), prefix="p/"
+        )
+        cli.stage_to_minio(config_no_minio)
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--minio-endpoint", cmd)
+        self.assertNotIn("--minio-access-key", cmd)
+        self.assertNotIn("--minio-secret-key", cmd)
+        self.assertNotIn("--minio-bucket", cmd)
+
+        # With all minio flags
+        config_with_minio = StageToMinioConfig(
+            input_dir=Path("/tmp/inputs"),
+            prefix="p/",
+            minio_endpoint="https://storage.example.com",
+            minio_access_key="AKID",
+            minio_secret_key="SECRET",
+            minio_bucket="my-bucket",
+        )
+        cli.stage_to_minio(config_with_minio)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--minio-endpoint", cmd)
+        self.assertIn("--minio-bucket", cmd)
+        ep_idx = cmd.index("--minio-endpoint")
+        self.assertEqual(cmd[ep_idx + 1], "https://storage.example.com")
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_extra_flags(self, mock_run, _mock_jar):
+        """config_file, ensure_bucket_exists, minio_path only emitted when set."""
+        from joshpy.cli import StageToMinioConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        # Defaults: none of the extras
+        cli.stage_to_minio(
+            StageToMinioConfig(input_dir=Path("/tmp/inputs"), prefix="p/"),
+        )
+        cmd = mock_run.call_args[0][0]
+        self.assertFalse(any(c.startswith("--config-file=") for c in cmd))
+        self.assertNotIn("--ensure-bucket-exists", cmd)
+        self.assertFalse(any(c.startswith("--minio-path=") for c in cmd))
+
+        # All extras set
+        cli.stage_to_minio(
+            StageToMinioConfig(
+                input_dir=Path("/tmp/inputs"),
+                prefix="p/",
+                config_file=Path("/etc/josh.json"),
+                ensure_bucket_exists=True,
+                minio_path="models/v1/",
+            ),
+        )
+        cmd = mock_run.call_args[0][0]
+        self.assertTrue(any(c.startswith("--config-file=") for c in cmd))
+        self.assertIn("--ensure-bucket-exists", cmd)
+        self.assertIn("--minio-path=models/v1/", cmd)
+
+
+class TestStageToMinioConfig(unittest.TestCase):
+    """Tests for StageToMinioConfig dataclass."""
+
+    def test_basic_creation(self):
+        from joshpy.cli import StageToMinioConfig
+
+        config = StageToMinioConfig(
+            input_dir=Path("/tmp/inputs"), prefix="batch-jobs/abc/"
+        )
+        self.assertEqual(config.input_dir, Path("/tmp/inputs"))
+        self.assertEqual(config.prefix, "batch-jobs/abc/")
+        self.assertIsNone(config.minio_endpoint)
+
+    def test_frozen(self):
+        from joshpy.cli import StageToMinioConfig
+
+        config = StageToMinioConfig(
+            input_dir=Path("/tmp/inputs"), prefix="p/"
+        )
+        with self.assertRaises(AttributeError):
+            config.prefix = "other/"
+
+
+class TestBatchRemote(unittest.TestCase):
+    """Tests for JoshCLI.batch_remote()."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """batch_remote() should build correct CLI args."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        result = cli.batch_remote(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("batchRemote", cmd)
+        self.assertIn("Main", cmd)
+        self.assertIn("--target=gke-test", cmd)
+        self.assertIn("--minio-prefix=sweeps/test/", cmd)
+        # No positional script arg anymore; simulation is trailing positional
+        self.assertFalse(any("sim.josh" in c for c in cmd))
+        # Simulation name is the trailing positional (after all flags)
+        self.assertEqual(cmd[-1], "Main")
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_replicates(self, mock_run, _mock_jar):
+        """batch_remote() should include --replicates when > 1."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            replicates=5,
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--replicates=5", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_replicates_default_omitted(self, mock_run, _mock_jar):
+        """batch_remote() should omit --replicates when == 1."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertFalse(any("--replicates" in c for c in cmd))
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_no_wait(self, mock_run, _mock_jar):
+        """batch_remote() should include --no-wait flag."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            no_wait=True,
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--no-wait", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_no_wait_default_omitted(self, mock_run, _mock_jar):
+        """batch_remote() should omit --no-wait when False."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--no-wait", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_poll_interval_and_timeout(self, mock_run, _mock_jar):
+        """batch_remote() should include --poll-interval and --timeout."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            poll_interval=30,
+            timeout=600,
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--poll-interval=30", cmd)
+        self.assertIn("--timeout=600", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_require_prestaged(self, mock_run, _mock_jar):
+        """batch_remote() should include --require-prestaged when set."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            require_prestaged=True,
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--require-prestaged", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_custom_tags_emitted(self, mock_run, _mock_jar):
+        """batch_remote() should emit --custom-tag name=value for each tag."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            custom_tags={"run_hash": "abcdef012345", "label": "exp-1"},
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        # Each tag becomes two adjacent args: "--custom-tag", "name=value"
+        self.assertIn("--custom-tag", cmd)
+        self.assertIn("run_hash=abcdef012345", cmd)
+        self.assertIn("label=exp-1", cmd)
+        # Sanity: two pairs for two tags
+        self.assertEqual(cmd.count("--custom-tag"), 2)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_custom_tags_empty_default_omitted(self, mock_run, _mock_jar):
+        """Empty custom_tags dict emits no --custom-tag flags."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--custom-tag", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_replicate_start(self, mock_run, _mock_jar):
+        """batch_remote() should emit --replicate-start=K when nonzero."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            replicate_start=7,
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--replicate-start=7", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_replicate_start_default_omitted(self, mock_run, _mock_jar):
+        """batch_remote() should omit --replicate-start when 0."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertFalse(any("--replicate-start" in c for c in cmd))
+
+
+class TestBatchRemoteConfig(unittest.TestCase):
+    """Tests for BatchRemoteConfig dataclass."""
+
+    def test_basic_creation(self):
+        from joshpy.cli import BatchRemoteConfig
+
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        self.assertEqual(config.simulation, "Main")
+        self.assertEqual(config.target, "gke-test")
+        self.assertEqual(config.minio_prefix, "sweeps/test/")
+        self.assertEqual(config.replicates, 1)
+        self.assertFalse(config.no_wait)
+        self.assertIsNone(config.poll_interval)
+        self.assertIsNone(config.timeout)
+        self.assertFalse(config.require_prestaged)
+        # stage_from_local_dir is intentionally not exposed — joshpy's
+        # staging model is always explicit stage_to_minio + require_prestaged.
+        self.assertFalse(hasattr(config, "stage_from_local_dir"))
+
+    def test_frozen(self):
+        from joshpy.cli import BatchRemoteConfig
+
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        with self.assertRaises(AttributeError):
+            config.target = "other"
+
+
+class TestPreprocessBatch(unittest.TestCase):
+    """Tests for JoshCLI.preprocess_batch()."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """preprocess_batch() should build correct CLI args."""
+        from joshpy.cli import PreprocessBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = PreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/data.nc"),
+            variable="temperature",
+            units="K",
+            output=Path("/path/to/output.jshd"),
+            target="gke-test",
+        )
+        result = cli.preprocess_batch(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("preprocessBatch", cmd)
+        self.assertTrue(any("sim.josh" in c for c in cmd))
+        self.assertIn("Main", cmd)
+        self.assertTrue(any("data.nc" in c for c in cmd))
+        self.assertIn("temperature", cmd)
+        self.assertIn("K", cmd)
+        self.assertTrue(any("output.jshd" in c for c in cmd))
+        self.assertIn("--target=gke-test", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_positional_arg_order(self, mock_run, _mock_jar):
+        """preprocessBatch positional args must be in correct order."""
+        from joshpy.cli import PreprocessBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = PreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/data.nc"),
+            variable="temp",
+            units="K",
+            output=Path("/path/to/out.jshd"),
+            target="gke-test",
+        )
+        cli.preprocess_batch(config)
+
+        cmd = mock_run.call_args[0][0]
+        # Find indices of positional args after "preprocessBatch"
+        pb_idx = cmd.index("preprocessBatch")
+        self.assertIn("Main", cmd[pb_idx + 2:pb_idx + 3])
+        self.assertIn("temp", cmd)
+        self.assertIn("K", cmd)
+        # --target should come after positional args
+        target_idx = cmd.index("--target=gke-test")
+        self.assertGreater(target_idx, pb_idx + 6)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_optional_flags(self, mock_run, _mock_jar):
+        """preprocess_batch() should include optional flags only when set."""
+        from joshpy.cli import PreprocessBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        # Defaults: no optional flags
+        cli.preprocess_batch(
+            PreprocessBatchConfig(
+                script=Path("/s.josh"), simulation="M",
+                data_file=Path("/d.nc"), variable="v", units="u",
+                output=Path("/o.jshd"), target="t",
+            ),
+        )
+        cmd = mock_run.call_args[0][0]
+        for flag in ("--crs=", "--x-coord=", "--y-coord=", "--time-dim=",
+                     "--timestep=", "--default-value=", "--parallel", "--amend",
+                     "--no-wait", "--poll-interval=", "--timeout="):
+            self.assertFalse(
+                any(c == flag or c.startswith(flag) for c in cmd),
+                f"unexpected {flag} in defaults",
+            )
+
+        # All set
+        cli.preprocess_batch(
+            PreprocessBatchConfig(
+                script=Path("/s.josh"), simulation="M",
+                data_file=Path("/d.nc"), variable="v", units="u",
+                output=Path("/o.jshd"), target="t",
+                crs="EPSG:4326",
+                x_coord="lon", y_coord="lat", time_dim="time",
+                timestep=0, default_value=-999.0,
+                parallel=True, amend=True,
+                no_wait=True, poll_interval=30, timeout=600,
+            ),
+        )
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--crs=EPSG:4326", cmd)
+        self.assertIn("--x-coord=lon", cmd)
+        self.assertIn("--y-coord=lat", cmd)
+        self.assertIn("--time-dim=time", cmd)
+        self.assertIn("--timestep=0", cmd)
+        self.assertIn("--default-value=-999.0", cmd)
+        self.assertIn("--parallel", cmd)
+        self.assertIn("--amend", cmd)
+        self.assertIn("--no-wait", cmd)
+        self.assertIn("--poll-interval=30", cmd)
+        self.assertIn("--timeout=600", cmd)
+
+
+class TestPollBatch(unittest.TestCase):
+    """Tests for JoshCLI.poll_batch()."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """poll_batch() should build correct CLI args."""
+        from joshpy.cli import PollBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"status":"complete"}', stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = PollBatchConfig(job_id="abc-123", target="gke-test")
+        result = cli.poll_batch(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("pollBatch", cmd)
+        self.assertIn("abc-123", cmd)
+        self.assertIn("--target=gke-test", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_exit_code_2_running(self, mock_run, _mock_jar):
+        """poll_batch() exit code 2 means job is still running."""
+        from joshpy.cli import PollBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        result = cli.poll_batch(PollBatchConfig(job_id="abc", target="t"))
+        self.assertFalse(result.success)
+        self.assertEqual(result.exit_code, 2)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_exit_code_100_poll_failure(self, mock_run, _mock_jar):
+        """poll_batch() exit code 100 means transient poll failure."""
+        from joshpy.cli import PollBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=100, stdout="", stderr="poll failed")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        result = cli.poll_batch(PollBatchConfig(job_id="abc", target="t"))
+        self.assertEqual(result.exit_code, 100)
+
+
+class TestPollBatchConfig(unittest.TestCase):
+    """Tests for PollBatchConfig dataclass."""
+
+    def test_basic_creation(self):
+        from joshpy.cli import PollBatchConfig
+
+        config = PollBatchConfig(job_id="abc-123", target="gke-test")
+        self.assertEqual(config.job_id, "abc-123")
+        self.assertEqual(config.target, "gke-test")
+
+    def test_frozen(self):
+        from joshpy.cli import PollBatchConfig
+
+        config = PollBatchConfig(job_id="abc", target="t")
+        with self.assertRaises(AttributeError):
+            config.job_id = "other"
+
+
+class TestPreprocessBatchConfig(unittest.TestCase):
+    """Tests for PreprocessBatchConfig dataclass."""
+
+    def test_basic_creation(self):
+        from joshpy.cli import PreprocessBatchConfig
+
+        config = PreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/data.nc"),
+            variable="temp",
+            units="K",
+            output=Path("/path/to/out.jshd"),
+            target="gke-test",
+        )
+        self.assertEqual(config.variable, "temp")
+        self.assertEqual(config.target, "gke-test")
+
+    def test_frozen(self):
+        from joshpy.cli import PreprocessBatchConfig
+
+        config = PreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/data.nc"),
+            variable="temp",
+            units="K",
+            output=Path("/path/to/out.jshd"),
+            target="gke-test",
+        )
+        with self.assertRaises(AttributeError):
+            config.target = "other"
 
 
 if __name__ == "__main__":

@@ -72,6 +72,73 @@ def _check_duckdb() -> None:
         )
 
 
+def configure_s3(
+    conn: Any,
+    endpoint: str,
+    access_key: str,
+    secret_key: str,
+    url_style: str = "path",
+    use_ssl: bool | None = None,
+) -> None:
+    """Configure a DuckDB connection for S3/MinIO access via httpfs.
+
+    Installs and loads the httpfs extension, then creates an S3 secret
+    so ``read_csv_auto('s3://bucket/key.csv')`` works transparently.
+
+    Credential resolution is the caller's responsibility -- this function
+    takes explicit values.  ``ingest_results()`` resolves credentials from
+    environment variables (``MINIO_ENDPOINT``, ``MINIO_ACCESS_KEY``,
+    ``MINIO_SECRET_KEY``) before calling here.
+
+    DuckDB's httpfs expects ``ENDPOINT`` to be a bare hostname without a
+    scheme (e.g. ``"storage.googleapis.com"``).  This function accepts
+    either a bare hostname OR a full URL (``"https://storage.googleapis.com"``)
+    so callers can forward the same ``MINIO_ENDPOINT`` env var they pass to
+    the Josh JAR without needing to strip the scheme themselves.  When a
+    scheme is present ``use_ssl`` is inferred from it unless explicitly set.
+
+    Args:
+        conn: DuckDB connection object.
+        endpoint: S3-compatible endpoint.  Accepts bare hostname
+            (``"storage.googleapis.com"``) or full URL
+            (``"https://storage.googleapis.com"``).
+        access_key: Access key / key ID.
+        secret_key: Secret key.
+        url_style: ``"path"`` (default, MinIO) or ``"vhost"`` (AWS).
+        use_ssl: Use HTTPS.  If None (default), inferred from endpoint
+            scheme when present, otherwise True.
+    """
+    host = endpoint
+    inferred_ssl: bool | None = None
+    if host.startswith("https://"):
+        host = host[len("https://"):]
+        inferred_ssl = True
+    elif host.startswith("http://"):
+        host = host[len("http://"):]
+        inferred_ssl = False
+    # Strip any trailing path / slash -- DuckDB expects just host[:port]
+    host = host.rstrip("/").split("/", 1)[0]
+
+    resolved_ssl = use_ssl if use_ssl is not None else (
+        inferred_ssl if inferred_ssl is not None else True
+    )
+
+    conn.execute("INSTALL httpfs; LOAD httpfs;")
+    conn.execute(
+        """
+        CREATE OR REPLACE SECRET (
+            TYPE s3,
+            KEY_ID ?,
+            SECRET ?,
+            ENDPOINT ?,
+            URL_STYLE ?,
+            USE_SSL ?
+        )
+        """,
+        [access_key, secret_key, host, url_style, resolved_ssl],
+    )
+
+
 def _get_git_hash() -> str | None:
     """Get current git HEAD hash, or None if not in a git repo."""
     try:

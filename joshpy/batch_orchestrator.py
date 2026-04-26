@@ -1,0 +1,76 @@
+"""Per-job staging directory assembly for batch remote execution.
+
+The sweep loop assembles one directory per ``ExpandedJob`` so each job stages
+only its own ``.josh``/``.jshc``/``.jshd`` files into its MinIO prefix,
+ensuring unrelated files in the caller's working directory don't leak into
+the remote target.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from joshpy.jobs import ExpandedJob
+
+
+def assemble_batch_workdir(job: ExpandedJob, workdir: Path) -> Path:
+    """Create a per-ExpandedJob staging directory.
+
+    Layout::
+
+        workdir/<run_hash>/
+          sim.josh            # symlink to job.source_path
+          config.jshc         # unique rendered config for this job (written)
+          <name>.jshd         # symlink per entry in job.file_mappings
+
+    Uses symlinks (not copies) to avoid disk duplication of large .jshd files;
+    ``cli.stage_to_minio`` uploads via content reads and follows symlinks.
+    Idempotent: re-running against the same workdir replaces existing entries.
+
+    Args:
+        job: The expanded job. ``job.source_path`` must be set.
+        workdir: Parent directory to create the per-job subdir inside.
+
+    Returns:
+        Path to the per-job staging directory (``workdir/<run_hash>/``).
+
+    Raises:
+        ValueError: If ``job.source_path`` is None.
+    """
+    if job.source_path is None:
+        raise ValueError("ExpandedJob.source_path is required for batch remote")
+
+    target = workdir / job.run_hash
+    target.mkdir(parents=True, exist_ok=True)
+
+    sim_link = target / "sim.josh"
+    if sim_link.exists() or sim_link.is_symlink():
+        sim_link.unlink()
+    os.symlink(job.source_path.resolve(), sim_link)
+
+    (target / "config.jshc").write_text(job.config_content)
+
+    for name, path in job.file_mappings.items():
+        # Preserve whichever suffix the source file actually has (.jshd
+        # uncompressed vs .jshdz XZ-compressed) so the remote target's
+        # multi-format getter routes reads correctly. If the file_mappings
+        # key already carries a recognized suffix, use it as-is; otherwise
+        # append the source file's suffix (default .jshd).
+        name_lower = name.lower()
+        if name_lower.endswith(".jshd") or name_lower.endswith(".jshdz"):
+            dest_name = name
+        else:
+            src_suffix = path.suffix.lower()
+            if src_suffix not in (".jshd", ".jshdz"):
+                src_suffix = ".jshd"
+            dest_name = f"{name}{src_suffix}"
+
+        dest = target / dest_name
+        if dest.exists() or dest.is_symlink():
+            dest.unlink()
+        os.symlink(path.resolve(), dest)
+
+    return target

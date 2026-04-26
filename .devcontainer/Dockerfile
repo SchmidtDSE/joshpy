@@ -9,6 +9,18 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && mkdir -p /home/$USERNAME/.vscode-server /home/$USERNAME/.pixi-env \
     && chown -R $USERNAME:$USERNAME /home/$USERNAME
 
+# gcloud SDK + kubectl for batch remote targets (K8s, Cloud Run)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY .devcontainer/scripts/on_build/install_gcloud.sh /tmp/install_gcloud.sh
+COPY .devcontainer/scripts/on_build/install_kubectl.sh /tmp/install_kubectl.sh
+RUN chmod +x /tmp/install_gcloud.sh /tmp/install_kubectl.sh \
+    && /tmp/install_gcloud.sh \
+    && /tmp/install_kubectl.sh \
+    && rm /tmp/install_gcloud.sh /tmp/install_kubectl.sh
+
 WORKDIR /workspaces/joshpy
 USER $USERNAME
 CMD ["bash"]
