@@ -89,6 +89,30 @@ class TestRunHash(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             _compute_run_hash(None, "config", {"data": Path("/nonexistent/data.jshd")})
 
+    def test_seed_none_matches_legacy_hash(self):
+        """seed=None preserves the unseeded hash (registry backward-compat)."""
+        legacy = _compute_run_hash(None, "config")
+        with_explicit_none = _compute_run_hash(None, "config", seed=None)
+        self.assertEqual(legacy, with_explicit_none)
+
+    def test_seed_changes_hash(self):
+        """Same content with different seeds produces different hashes."""
+        hash_seed42 = _compute_run_hash(None, "config", seed=42)
+        hash_seed99 = _compute_run_hash(None, "config", seed=99)
+        self.assertNotEqual(hash_seed42, hash_seed99)
+
+    def test_same_seed_same_hash(self):
+        """Same content with the same seed reproduces the same hash."""
+        hash1 = _compute_run_hash(None, "config", seed=42)
+        hash2 = _compute_run_hash(None, "config", seed=42)
+        self.assertEqual(hash1, hash2)
+
+    def test_seed_set_differs_from_unseeded(self):
+        """seed=42 and seed=None disambiguate (intentional per-trajectory hash)."""
+        unseeded = _compute_run_hash(None, "config")
+        seeded = _compute_run_hash(None, "config", seed=42)
+        self.assertNotEqual(unseeded, seeded)
+
     def test_hash_file(self):
         """_hash_file should return consistent hashes."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2389,8 +2413,74 @@ class TestToBatchRemoteConfig(unittest.TestCase):
         self.assertTrue(config.require_prestaged)
         # stage_from_local_dir intentionally not exposed in joshpy
         self.assertFalse(hasattr(config, "stage_from_local_dir"))
-        # BatchRemoteConfig should no longer carry custom_tags (removed)
-        self.assertFalse(hasattr(config, "custom_tags"))
+        # custom_tags passthrough (empty here; tested in test_custom_tags_propagated)
+        self.assertEqual(config.custom_tags, {})
+        # replicate_start defaults to 0
+        self.assertEqual(config.replicate_start, 0)
+
+    def test_custom_tags_propagated_from_job(self):
+        """to_batch_remote_config passes job.custom_tags through unchanged."""
+        from joshpy.jobs import to_batch_remote_config
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123def456",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=Path("/path/to/sim.josh"),
+            custom_tags={"run_hash": "abc123def456", "label": "exp1", "x": "1"},
+        )
+
+        config = to_batch_remote_config(job, "gke-test", "sweeps/s1/jobs/abc123def456/")
+
+        self.assertEqual(config.custom_tags["run_hash"], "abc123def456")
+        self.assertEqual(config.custom_tags["label"], "exp1")
+        self.assertEqual(config.custom_tags["x"], "1")
+
+    def test_custom_tags_copied_not_shared(self):
+        """Mutating the returned custom_tags must not affect job.custom_tags."""
+        from joshpy.jobs import to_batch_remote_config
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123",
+            parameters={},
+            simulation="Main",
+            replicates=1,
+            source_path=Path("/path/to/sim.josh"),
+            custom_tags={"run_hash": "abc123"},
+        )
+
+        config = to_batch_remote_config(job, "gke-test", "sweeps/s1/jobs/abc123/")
+        config.custom_tags["injected"] = "bad"
+
+        self.assertNotIn("injected", job.custom_tags)
+
+    def test_replicate_start_passthrough(self):
+        """to_batch_remote_config accepts replicate_start and forwards it."""
+        from joshpy.jobs import to_batch_remote_config
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=Path("/tmp/config.jshc"),
+            config_name="config.jshc",
+            run_hash="abc123",
+            parameters={},
+            simulation="Main",
+            replicates=5,
+            source_path=Path("/path/to/sim.josh"),
+        )
+
+        config = to_batch_remote_config(
+            job, "gke-test", "sweeps/s1/jobs/abc123/", replicate_start=10,
+        )
+
+        self.assertEqual(config.replicate_start, 10)
 
     def test_no_wait_mode(self):
         from joshpy.jobs import to_batch_remote_config

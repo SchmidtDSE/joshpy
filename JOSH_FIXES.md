@@ -1,12 +1,29 @@
-# Josh Fixes Required Before joshpy `feat/batch-run` Merge
+# Josh Fixes for joshpy `feat/batch-run` Integration
 
-Two separate bugs surfaced during pre-merge integration testing of joshpy's `feat/batch-run` branch against the current `joshsim-fat-dev.jar`. Both are small, localized changes in `josh` itself. Neither is a joshpy-side regression — joshpy is doing the right thing in both cases.
+This doc tracks josh-side changes needed by joshpy. Some are already shipped; new ones are appended as they're identified during integration. joshpy-side counterparts live in [PR7_PLAN.md](PR7_PLAN.md).
 
-This doc captures the investigation trail and proposed fix so the josh team can land them quickly. joshpy's side of the pre-merge work is tracked separately (Track A).
+## Status
+
+| # | Fix | Status |
+|---|-----|--------|
+| 1 | `preprocessBatch` absolute-path propagation | ✅ Merged |
+| 2 | `MinimalEngineBridge.getExternal` hardcoded `.jshd` extension | ✅ Merged |
+| 3 | Pod run-entrypoint missing `cd $WORK_DIR` before `java -jar` | ✅ Merged |
+| 4 | Pod entrypoint DNS readiness + `stageFromMinio` retry | ⬜ TODO¹ |
+| 5 | `batchRemote` accepts `--custom-tag` and propagates to pod | ✅ Merged² |
+| 6 | `run` accepts `--replicate-start=K` + `JOSH_REPLICATE_OFFSET` env var in entrypoint | ✅ Merged² |
+
+¹ Fix 4 was not exercised deterministically during the [post-Fix-5/6 E2E retest](/tmp/e2e_reports/RETEST_AFTER_PR7.md) — none of the 11 dispatches happened to hit DNS flakiness. Recommend confirming via direct entrypoint inspection.
+
+² Fixes 5 and 6 confirmed end-to-end on 2026-04-26 against JAR `dcfeb60c…`:
+- Fix 5: Test 7 verified `{run_hash}` resolves on pod after joshpy emits `--custom-tag run_hash=…` via `BatchRemoteConfig.custom_tags`.
+- Fix 6: Test 8 verified pool-policy dispatch with `replicate_start=2` produced output files at indices 2, 3, 4 (i.e., `JOSH_REPLICATE_OFFSET + JOB_COMPLETION_INDEX`).
+
+Fixes 1, 2, 3 are documented below for historical reference. Fixes 4–6 are the new asks driving this update.
 
 ---
 
-## Fix 1: `preprocessBatch` mis-propagates the `<dataFile>` positional argument to the K8s pod
+## Fix 1: `preprocessBatch` mis-propagates the `<dataFile>` positional argument to the K8s pod ✅ MERGED
 
 ### Symptom
 
@@ -130,7 +147,7 @@ Re-run `tests/test5_preprocess_async.py` and `tests/test5b_blocking.py` from [jo
 
 ---
 
-## Fix 2: `MinimalEngineBridge.getExternal` hardcodes `.jshd` extension — can't reach `.jshdz` files
+## Fix 2: `MinimalEngineBridge.getExternal` hardcodes `.jshd` extension — can't reach `.jshdz` files ✅ MERGED
 
 ### Symptom
 
@@ -282,18 +299,275 @@ Re-run [`tests/test4_jshdz.py`](/tmp/test4_jshdz.py) from [joshpy e2e reports](/
 
 ---
 
+## Fix 3: Pod run-entrypoint missing `cd $WORK_DIR` before `java -jar` ✅ MERGED
+
+### Symptom
+
+K8s pod completes `stageFromMinio` (downloads files into `/tmp/work/`), then the simulation fails resolving `external "soil_quality"` with a `FileNotFoundException` for the basename — even though the file is sitting in `/tmp/work/` as expected.
+
+### Root cause
+
+`cloud-img/run-entrypoint.sh` invoked the JAR without changing directory:
+
+```sh
+WORK_DIR="/tmp/work"
+java -jar "$JAR" stageFromMinio --output-dir="$WORK_DIR"
+SCRIPT=$(find "$WORK_DIR" -name '*.josh' -type f | head -1)
+java -jar "$JAR" run "$SCRIPT" "$JOSH_SIMULATION" --replicate-index="$REPLICATE_INDEX"
+```
+
+The JAR's CWD is the Dockerfile `WORKDIR` (`/app`), so `JvmWorkingDirInputGetter.loadFromWorkingDir(name)` opens `/app/<name>` instead of `/tmp/work/<name>`.
+
+### Fix landed
+
+One-liner: `cd "$WORK_DIR"` immediately before the `run` invocation. Mirrored in `preprocess-entrypoint.sh` for parity.
+
+---
+
+## Fix 4: Pod entrypoint DNS readiness + `stageFromMinio` retry
+
+### Symptom
+
+Roughly 1-in-10 K8s jobs on GKE Autopilot's spot pool fail with:
+
+```
+stageFromMinio failed: storage.googleapis.com: Temporary failure in name resolution
+```
+
+The pod is scheduled, the image pulled, the container started — and the very first network call from the JAR hits a DNS resolver that isn't fully configured yet. The whole pod terminates because the entrypoint doesn't retry.
+
+Combined with spot-node cold-start scheduling delays (30-120s) and image pull (~35s for a 200MB image), this often exhausts a tight `timeoutSeconds` (e.g., 300s) before the pod can recover. Net effect: failed sweeps that are entirely retry-able.
+
+### Root cause
+
+[`cloud-img/run-entrypoint.sh`](https://github.com/SchmidtDSE/josh/blob/main/cloud-img/run-entrypoint.sh) makes a single `stageFromMinio` call with no readiness probe and no retry:
+
+```sh
+java -jar "$JAR" stageFromMinio \
+  --prefix="$JOSH_MINIO_PREFIX" \
+  --output-dir="$WORK_DIR"
+```
+
+If DNS fails on the first try (which it occasionally does within the first ~5s of pod start on Autopilot), the script exits non-zero and K8s marks the pod failed.
+
+This is a well-known GKE Autopilot pattern. The canonical fix in production-grade images is to (a) probe DNS readiness before any network call, and (b) retry transient network operations a few times with backoff.
+
+### Proposed fix
+
+Update [`cloud-img/run-entrypoint.sh`](https://github.com/SchmidtDSE/josh/blob/main/cloud-img/run-entrypoint.sh) (and apply the same pattern to `preprocess-entrypoint.sh`):
+
+```sh
+#!/bin/sh
+set -e
+
+JAR="${1:-/app/joshsim-fat.jar}"
+WORK_DIR="/tmp/work"
+
+# Wait for DNS resolver to be usable. Cheap (<50ms) on the happy path.
+# Most Autopilot DNS hiccups clear within 2-4s of container start.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if getent hosts storage.googleapis.com >/dev/null 2>&1; then
+    break
+  fi
+  echo "DNS not ready (attempt $attempt), waiting..."
+  sleep 2
+done
+
+# Retry stageFromMinio for transient network failures (3 tries, 5/10/15s backoff).
+stage_attempts=0
+until java -jar "$JAR" stageFromMinio \
+        --prefix="$JOSH_MINIO_PREFIX" \
+        --output-dir="$WORK_DIR"; do
+  stage_attempts=$((stage_attempts + 1))
+  if [ "$stage_attempts" -ge 3 ]; then
+    echo "ERROR: stageFromMinio failed after 3 attempts" >&2
+    exit 1
+  fi
+  echo "stageFromMinio attempt $stage_attempts failed, retrying..."
+  sleep $((stage_attempts * 5))
+done
+
+SCRIPT=$(find "$WORK_DIR" -name '*.josh' -type f | head -1)
+if [ -z "$SCRIPT" ]; then
+  echo "ERROR: No .josh file found in $WORK_DIR" >&2
+  exit 1
+fi
+
+REPLICATE_INDEX="${JOB_COMPLETION_INDEX:-0}"
+
+cd "$WORK_DIR"
+java -XX:+ExitOnOutOfMemoryError -jar "$JAR" run "$SCRIPT" "$JOSH_SIMULATION" \
+  --replicate-index="$REPLICATE_INDEX"
+```
+
+`getent hosts` is in `glibc` (already in the eclipse-temurin base image). No new package needed. If the team prefers `nslookup`, that's also fine — just install `dnsutils` in the Dockerfile. `getent` is more portable.
+
+### Test plan
+
+- Existing K8s integration tests should still pass (happy path unchanged).
+- New: validate against a forced-flake by introducing a brief `iptables` block on egress within the first second of container start (or by running on a known-flaky cluster window). The retry should kick in and recover.
+- Validate the "DNS never recovers" failure mode still fails fast (within ~20s) so we don't leave a pod hanging on `timeoutSeconds`.
+
+### Risk
+
+**LOW.** Pure shell additions. Worst case is small added latency on healthy pods (~50ms for DNS probe). No JVM-level changes.
+
+---
+
+## Fix 5: `batchRemote` accepts `--custom-tag` and propagates to pods
+
+### Why this matters
+
+`run` and `runRemote` accept `--custom-tag k=v` flags, which are resolvable as template variables in `exportFiles.<type>` paths inside the simulation. `batchRemote` dropped this in the post-#423 refactor, breaking parity. Practical consequence: a `.josh` file that references `{run_hash}` (or any other custom tag) in its export path works locally and on Cloud Run-direct, but cannot work on the K8s batch path.
+
+This is the principled way for joshpy to inject `run_hash` into export paths — same mechanism josh already uses for parameter values, labels, and user-defined tags. Without it, joshpy has to resort to pre-interpolating tokens in `sim.josh` before upload, which breaks the "same .josh file works in any mode" invariant.
+
+### Proposed change
+
+Three coordinated edits across the dispatch chain:
+
+#### (a) CLI surface
+
+[`src/main/java/org/joshsim/command/BatchRemoteCommand.java`](https://github.com/SchmidtDSE/josh/blob/main/src/main/java/org/joshsim/command/BatchRemoteCommand.java) — re-add the `--custom-tag` option using the existing picocli pattern from `RunCommand`:
+
+```java
+@Option(
+    names = {"--custom-tag"},
+    description = "Custom tag for template resolution (key=value). Repeatable.",
+    paramLabel = "<key=value>"
+)
+private Map<String, String> customTags = new LinkedHashMap<>();
+```
+
+Pass `customTags` into the dispatch object alongside the other `BatchRemoteParams` fields.
+
+#### (b) K8s target propagation
+
+[`src/main/java/org/joshsim/pipeline/target/KubernetesBatchTarget.java`](https://github.com/SchmidtDSE/josh/blob/main/src/main/java/org/joshsim/pipeline/target/KubernetesBatchTarget.java) — serialize the tag map as a single env var on the K8s Job spec. JSON keeps it parseable and dodges name-mangling concerns:
+
+```java
+if (!customTags.isEmpty()) {
+    String json = new ObjectMapper().writeValueAsString(customTags);
+    envVars.add(plainEnvVar("JOSH_CUSTOM_TAGS", json));
+}
+```
+
+(or whichever JSON lib the codebase uses; doesn't need to be Jackson specifically.)
+
+#### (c) HTTP target propagation
+
+[`src/main/java/org/joshsim/pipeline/target/HttpBatchTarget.java`](https://github.com/SchmidtDSE/josh/blob/main/src/main/java/org/joshsim/pipeline/target/HttpBatchTarget.java) — include in the form POST. Same shape as `KubernetesBatchTarget`. Server-side handler (`JoshSimBatchHandler`) reads it back and appends `--custom-tag` flags when invoking the inner `run`.
+
+#### (d) Pod entrypoint passthrough
+
+[`cloud-img/run-entrypoint.sh`](https://github.com/SchmidtDSE/josh/blob/main/cloud-img/run-entrypoint.sh) — parse `JOSH_CUSTOM_TAGS` and append flags. Requires `jq` in the image:
+
+```sh
+TAGS=""
+if [ -n "$JOSH_CUSTOM_TAGS" ]; then
+  TAGS=$(echo "$JOSH_CUSTOM_TAGS" \
+    | jq -r 'to_entries | map("--custom-tag " + .key + "=" + (.value|tostring)) | .[]')
+fi
+
+cd "$WORK_DIR"
+# shellcheck disable=SC2086
+java -XX:+ExitOnOutOfMemoryError -jar "$JAR" run "$SCRIPT" "$JOSH_SIMULATION" \
+  --replicate-index="$REPLICATE_INDEX" $TAGS
+```
+
+If adding `jq` to the base image is undesirable, an alternative is one env var per tag (`JOSH_CUSTOM_TAG_<key>=<value>`) and a `for` loop in shell. Slightly more brittle on key naming (tag keys with special characters need escaping); JSON is cleaner.
+
+### Test plan
+
+- Unit: `BatchRemoteCommand` parses `--custom-tag a=1 --custom-tag b=2` into a map.
+- Unit: `KubernetesBatchTarget` builds Job spec containing `JOSH_CUSTOM_TAGS` env var with the JSON-encoded map.
+- Unit: `HttpBatchTarget` includes `customTags` field in the POST body.
+- E2E (K8s): dispatch with `--custom-tag run_hash=abc123`, sim's export path uses `{run_hash}`, output CSV lands at `.../abc123/...`.
+- E2E (Cloud Run): same as above through `JoshSimBatchHandler`.
+
+### Risk
+
+**LOW-MEDIUM.** Touches three modules + the entrypoint, but each change is small and the patterns are already established by `RunCommand`. The biggest unknown is the JSON-decoding step in shell — worth sanity-testing on values containing spaces or quotes (joshpy's typical tags are simple alphanumeric, but the team should pick the encoding it's comfortable with).
+
+After this lands, joshpy will auto-inject `run_hash` (and any user-supplied tags) at `BatchRemoteConfig` build time. See [PR7_PLAN.md](PR7_PLAN.md) item 4.
+
+---
+
+## Fix 6: `run` accepts `--replicate-start=K`; entrypoint adds `JOSH_REPLICATE_OFFSET`
+
+### Why this matters
+
+joshpy wants to support pool/resume semantics for sweeps with stable run hashes:
+
+- "Dispatched 0–4 yesterday, want 10 total" → dispatch 5–9 only.
+- "5 of 10 replicates failed on a flake" → re-dispatch only the missing 5.
+
+Today `run --replicates=N` always means "do indices 0..N-1". K8s indexed-Job parallelism uses `JOB_COMPLETION_INDEX` directly as the replicate index. To pool, we need a way to offset the index range.
+
+### Proposed change
+
+#### (a) `run` CLI
+
+[`src/main/java/org/joshsim/command/RunCommand.java`](https://github.com/SchmidtDSE/josh/blob/main/src/main/java/org/joshsim/command/RunCommand.java) — add an option:
+
+```java
+@Option(
+    names = {"--replicate-start"},
+    description = "Starting replicate index (default: 0). Combined with --replicates "
+                + "this selects the half-open range [start, start+count).",
+    defaultValue = "0"
+)
+private int replicateStart = 0;
+```
+
+Plumb it into the existing replicate loop: instead of `for rep in 0..replicates-1`, use `for rep in replicateStart..replicateStart + replicates - 1`. The `{replicate}` template resolution uses the actual rep number, so output paths are correct without further changes.
+
+#### (b) K8s pod entrypoint
+
+[`cloud-img/run-entrypoint.sh`](https://github.com/SchmidtDSE/josh/blob/main/cloud-img/run-entrypoint.sh) — add the env var with default 0 so existing dispatches behave unchanged:
+
+```sh
+REPLICATE_INDEX=$((${JOB_COMPLETION_INDEX:-0} + ${JOSH_REPLICATE_OFFSET:-0}))
+
+cd "$WORK_DIR"
+java ... --replicate-index="$REPLICATE_INDEX" ...
+```
+
+#### (c) `batchRemote` CLI passes through
+
+[`BatchRemoteCommand.java`](https://github.com/SchmidtDSE/josh/blob/main/src/main/java/org/joshsim/command/BatchRemoteCommand.java) — accept `--replicate-start=K` and propagate to the K8s target via `JOSH_REPLICATE_OFFSET` env var (and to the HTTP target via a form field that the server-side handler forwards as `--replicate-start` when invoking the inner `run`).
+
+The `--replicates=N` semantics stay unchanged — it remains the *count* of replicates to run. With `--replicate-start=K --replicates=N`, the K8s Job dispatches `N` pods covering indices `[K, K+N)`.
+
+### Test plan
+
+- Unit: `run --replicate-start=5 --replicates=3` produces output for replicates 5, 6, 7.
+- Unit: K8s Job spec built with offset=5 and parallelism=3 has each pod resolve to its assigned absolute index when summed with `JOB_COMPLETION_INDEX`.
+- E2E: stage and dispatch with offset, verify CSVs land at indices 5, 6, 7 (not 0, 1, 2).
+
+### Risk
+
+**LOW.** Pure additive: default `replicate_start=0` preserves all current behavior. No change for callers that don't pass the flag.
+
+After this lands, joshpy can implement the pre-dispatch MinIO listing + replicate offset computation (collision policy `pool`/`replace`/`skip`/`fail`). See [PR7_PLAN.md](PR7_PLAN.md) item 5.
+
+---
+
 ## Summary for josh triage
 
-| Fix | File | Lines | Size | Risk |
-|-----|------|-------|------|------|
-| 1. preprocess absolute-path propagation | `src/main/java/org/joshsim/command/PreprocessBatchCommand.java` | 203-208 | ~15 LoC | LOW — localized; unit-testable; explicit error on out-of-dir inputs |
-| 2. `.jshdz` auto-resolution for `external` | `src/main/java/org/joshsim/precompute/MultiFormatExternalGetter.java` + `src/main/java/org/joshsim/lang/bridge/MinimalEngineBridge.java` | ~49 + ~197 | ~15-25 LoC | LOW — additive fallback; default case behavior unchanged for already-suffixed names |
+| Fix | File(s) | Status | Approx LoC | Risk |
+|-----|---------|--------|------------|------|
+| 1. preprocess absolute-path propagation | `command/PreprocessBatchCommand.java` | ✅ Merged | ~15 | LOW |
+| 2. `.jshdz` resolution via `external` | `lang/bridge/MinimalEngineBridge.java` + `precompute/MultiFormatExternalGetter.java` | ✅ Merged | ~15-25 | LOW |
+| 3. Pod entrypoint `cd $WORK_DIR` | `cloud-img/run-entrypoint.sh`, `cloud-img/preprocess-entrypoint.sh` | ✅ Merged | ~2 | LOW |
+| 4. DNS readiness + `stageFromMinio` retry | `cloud-img/run-entrypoint.sh`, `cloud-img/preprocess-entrypoint.sh` | ⬜ TODO | ~15 | LOW |
+| 5. `batchRemote --custom-tag` passthrough | `BatchRemoteCommand.java` + `KubernetesBatchTarget.java` + `HttpBatchTarget.java` + `JoshSimBatchHandler.java` + entrypoints | ⬜ TODO | ~50 | LOW-MED |
+| 6. `--replicate-start` + `JOSH_REPLICATE_OFFSET` | `RunCommand.java` + `BatchRemoteCommand.java` + entrypoint | ⬜ TODO | ~25 | LOW |
 
-Both are independent; can land as two small PRs in parallel. Once merged, rebuild `joshsim-fat-dev.jar` and joshpy's `get-jars` pulls in the fixed JAR for re-validation.
+Fixes 4–6 are independent and can land in any order. After they merge and the JAR is rebuilt, joshpy completes PR7 (auto-inject `run_hash` as custom-tag, MinIO-listing + replicate-offset dispatch, pre-dispatch collision check). See [PR7_PLAN.md](PR7_PLAN.md).
 
 ## Artifacts referenced
 
 - joshpy E2E reports: `/tmp/e2e_reports/`
-- Failing joshpy tests: `/tmp/test4_jshdz.py`, `/tmp/test5_preprocess_async.py`, `/tmp/test5b_blocking.py`
-- joshpy branch: `feat/batch-run` (PRs [#36](https://github.com/SchmidtDSE/joshpy/pull/36) merged, [#37](https://github.com/SchmidtDSE/joshpy/pull/37) merged, [#38](https://github.com/SchmidtDSE/joshpy/pull/38) open)
-- Pod entrypoint (reference): [`cloud-img/preprocess-entrypoint.sh`](https://github.com/SchmidtDSE/josh/blob/main/cloud-img/preprocess-entrypoint.sh)
+- Failing joshpy tests at the time of original investigation: `/tmp/test4_jshdz.py`, `/tmp/test5_preprocess_async.py`, `/tmp/test5b_blocking.py`
+- joshpy branch: `feat/batch-run` (PRs [#36](https://github.com/SchmidtDSE/joshpy/pull/36), [#37](https://github.com/SchmidtDSE/joshpy/pull/37), [#38](https://github.com/SchmidtDSE/joshpy/pull/38) merged; [#39](https://github.com/SchmidtDSE/joshpy/pull/39) open)

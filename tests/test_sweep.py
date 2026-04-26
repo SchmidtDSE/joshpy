@@ -1678,5 +1678,745 @@ class TestLoadJobResultsMinioRouting(unittest.TestCase):
             registry.close()
 
 
+class TestStaticCollisionCheck(unittest.TestCase):
+    """Tests for _check_export_path_safety + SweepManager.run(force=...)."""
+
+    def _make_job(self, source_path: Path, run_hash: str = "abcdef012345") -> "ExpandedJob":
+        from joshpy.jobs import ExpandedJob
+
+        return ExpandedJob(
+            config_content="",
+            config_path=source_path.parent / "c.jshc",
+            config_name="c",
+            run_hash=run_hash,
+            parameters={},
+            simulation="Main",
+            replicates=2,
+            source_path=source_path,
+            file_mappings={},
+        )
+
+    def _make_export_paths(self, *, protocol: str, path: str) -> MagicMock:
+        export_info = MagicMock()
+        export_info.protocol = protocol
+        export_info.path = path
+        export_paths = MagicMock()
+        export_paths.export_files = {"patch": export_info}
+        return export_paths
+
+    def _make_job_set(self, jobs: list) -> MagicMock:
+        job_set = MagicMock()
+        job_set.__iter__ = lambda self: iter(jobs)
+        return job_set
+
+    # --- Helper-level tests --------------------------------------------------
+
+    def test_local_file_protocol_skips_check(self):
+        """protocol='file' is out of scope; never raises even with prior runs."""
+        from joshpy.sweep import _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = self._make_job(src)
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._make_export_paths(
+                protocol="file", path="/tmp/output_{replicate}.csv",
+            )
+            registry = MagicMock()
+            registry.get_runs_for_hash.return_value = [MagicMock()]  # prior runs
+
+            _check_export_path_safety(cli, self._make_job_set([job]), registry)
+            registry.get_runs_for_hash.assert_not_called()
+
+    def test_template_with_timestamp_skips_check(self):
+        """Template containing {timestamp} disambiguates dispatches; safe."""
+        from joshpy.sweep import _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = self._make_job(src)
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._make_export_paths(
+                protocol="minio",
+                path="/bucket/{timestamp}/output_{replicate}.csv",
+            )
+            registry = MagicMock()
+            registry.get_runs_for_hash.return_value = [MagicMock()]
+
+            _check_export_path_safety(cli, self._make_job_set([job]), registry)
+            registry.get_runs_for_hash.assert_not_called()
+
+    def test_template_with_run_hash_skips_check(self):
+        """Template containing {run_hash} disambiguates per-simulation; safe."""
+        from joshpy.sweep import _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = self._make_job(src)
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._make_export_paths(
+                protocol="minio",
+                path="/bucket/{run_hash}/output_{replicate}.csv",
+            )
+            registry = MagicMock()
+            registry.get_runs_for_hash.return_value = [MagicMock()]
+
+            _check_export_path_safety(cli, self._make_job_set([job]), registry)
+            registry.get_runs_for_hash.assert_not_called()
+
+    def test_minio_no_prior_runs_passes(self):
+        """Plain template + empty registry: no collision, no raise."""
+        from joshpy.sweep import _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = self._make_job(src)
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._make_export_paths(
+                protocol="minio", path="/bucket/output_{replicate}.csv",
+            )
+            registry = MagicMock()
+            registry.get_runs_for_hash.return_value = []  # no prior runs
+
+            _check_export_path_safety(cli, self._make_job_set([job]), registry)
+            registry.get_runs_for_hash.assert_called_once_with("abcdef012345")
+
+    def test_minio_with_prior_runs_raises(self):
+        """Plain minio template + prior run for hash → SweepCollisionError."""
+        from joshpy.sweep import _check_export_path_safety, SweepCollisionError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = self._make_job(src, run_hash="hashAAA111")
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._make_export_paths(
+                protocol="minio", path="/bucket/output_{replicate}.csv",
+            )
+            registry = MagicMock()
+            registry.get_runs_for_hash.return_value = [MagicMock()]
+
+            with self.assertRaises(SweepCollisionError) as ctx:
+                _check_export_path_safety(cli, self._make_job_set([job]), registry)
+            err = ctx.exception
+            self.assertEqual(len(err.conflicts), 1)
+            conflict_job, _template, priors = err.conflicts[0]
+            self.assertEqual(conflict_job.run_hash, "hashAAA111")
+            self.assertEqual(len(priors), 1)
+            # Error message should be actionable.
+            msg = str(err)
+            self.assertIn("hashAAA111", msg)
+            self.assertIn("{timestamp}", msg)
+            self.assertIn("{run_hash}", msg)
+            self.assertIn("force=True", msg)
+
+    def test_cache_populated_and_reused(self):
+        """Multiple jobs sharing (source, simulation) call inspect_exports once."""
+        from joshpy.sweep import _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job1 = self._make_job(src, run_hash="h1")
+            job2 = self._make_job(src, run_hash="h2")
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._make_export_paths(
+                protocol="minio", path="/bucket/{timestamp}/output_{replicate}.csv",
+            )
+            registry = MagicMock()
+            registry.get_runs_for_hash.return_value = []
+
+            cache = _check_export_path_safety(
+                cli, self._make_job_set([job1, job2]), registry,
+            )
+
+            cli.inspect_exports.assert_called_once()  # cached for second job
+            self.assertEqual(len(cache), 1)
+            self.assertIn((str(src), "Main"), cache)
+
+    def test_external_cache_passthrough(self):
+        """Pre-populated cache bypasses inspect_exports entirely."""
+        from joshpy.sweep import _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = self._make_job(src)
+            pre = self._make_export_paths(
+                protocol="minio", path="/bucket/{timestamp}/output_{replicate}.csv",
+            )
+            cache: dict = {(str(src), "Main"): pre}
+            cli = MagicMock()
+            registry = MagicMock()
+            registry.get_runs_for_hash.return_value = []
+
+            _check_export_path_safety(
+                cli, self._make_job_set([job]), registry,
+                export_paths_cache=cache,
+            )
+            cli.inspect_exports.assert_not_called()
+
+    # --- Integration through SweepManager.run --------------------------------
+
+    def _build_manager_with_batch_remote(self, tmp: Path):
+        """Construct a SweepManager wired to mock CLI/registry with batch-remote target."""
+        src = tmp / "sim.josh"
+        src.write_text("simulation Main { }")
+        job = self._make_job(src, run_hash="hashCOLLIDE0")
+        job_set = self._make_job_set([job])
+        job_set.total_jobs = 1
+        job_set.total_replicates = 2
+
+        cli = MagicMock()
+        cli.inspect_exports.return_value = self._make_export_paths(
+            protocol="minio", path="/bucket/output_{replicate}.csv",
+        )
+        registry = MagicMock()
+        registry.get_runs_for_hash.return_value = [MagicMock()]
+
+        config = MagicMock()
+        config.sweep = None  # non-adaptive
+
+        manager = SweepManager(
+            config=config,
+            registry=registry,
+            cli=cli,
+            job_set=job_set,
+            session_id="s1",
+            _batch_remote_target="gke-test",
+        )
+        return manager, cli
+
+    def test_run_raises_collision_by_default(self):
+        """Manager.run() with batch-remote + plain path + prior run → raises."""
+        from joshpy.sweep import SweepCollisionError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _cli = self._build_manager_with_batch_remote(Path(tmp))
+            with self.assertRaises(SweepCollisionError):
+                manager.run(quiet=True)
+
+    @patch("joshpy.sweep.run_sweep")
+    def test_run_force_true_bypasses(self, mock_run_sweep):
+        """force=True bypasses the collision check."""
+        mock_run_sweep.return_value = MagicMock(
+            succeeded=1, failed=0, run_ids={}, total_rows=0,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _cli = self._build_manager_with_batch_remote(Path(tmp))
+            manager.run(force=True, quiet=True)
+            mock_run_sweep.assert_called_once()
+
+    @patch("joshpy.sweep.run_sweep")
+    def test_run_dry_run_bypasses(self, mock_run_sweep):
+        """dry_run=True skips the check (nothing dispatched anyway)."""
+        mock_run_sweep.return_value = MagicMock(
+            succeeded=0, failed=0, run_ids={}, total_rows=0,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, _cli = self._build_manager_with_batch_remote(Path(tmp))
+            manager.run(dry_run=True, quiet=True)
+            mock_run_sweep.assert_called_once()
+
+    @patch("joshpy.sweep.run_sweep")
+    def test_run_local_does_not_check(self, mock_run_sweep):
+        """Non-batch-remote (local) sweeps skip the collision check entirely."""
+        mock_run_sweep.return_value = MagicMock(
+            succeeded=1, failed=0, run_ids={}, total_rows=0,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manager, cli = self._build_manager_with_batch_remote(Path(tmp))
+            manager._batch_remote_target = None  # disable batch-remote
+            # Should not even call inspect_exports for the collision check
+            manager.run(quiet=True)
+            cli.inspect_exports.assert_not_called()
+
+
+class TestApplyCollisionPolicy(unittest.TestCase):
+    """Tests for _apply_collision_policy pure function."""
+
+    def test_empty_existing_dispatches_full(self):
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("pool", set(), n_requested=10)
+        self.assertEqual(action.action, "dispatch")
+        self.assertEqual(action.replicate_start, 0)
+        self.assertEqual(action.replicates, 10)
+
+    def test_fail_with_existing_returns_fail(self):
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("fail", {0, 1, 2}, n_requested=5)
+        self.assertEqual(action.action, "fail")
+        self.assertEqual(action.existing, frozenset({0, 1, 2}))
+
+    def test_fail_with_empty_still_dispatches(self):
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("fail", set(), n_requested=5)
+        self.assertEqual(action.action, "dispatch")
+
+    def test_skip_with_any_existing_returns_skip(self):
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("skip", {0}, n_requested=10)
+        self.assertEqual(action.action, "skip")
+
+    def test_skip_with_empty_dispatches(self):
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("skip", set(), n_requested=5)
+        self.assertEqual(action.action, "dispatch")
+
+    def test_pool_fills_gap(self):
+        """Pool dispatches the missing replicates starting at max(existing)+1."""
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("pool", {0, 1, 2, 3, 4}, n_requested=10)
+        self.assertEqual(action.action, "dispatch")
+        self.assertEqual(action.replicate_start, 5)
+        self.assertEqual(action.replicates, 5)  # 10 - 5 remaining
+
+    def test_pool_complete_skips(self):
+        """Pool skips when existing already covers requested count."""
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("pool", {0, 1, 2, 3, 4}, n_requested=5)
+        self.assertEqual(action.action, "skip")
+
+    def test_pool_over_complete_skips(self):
+        """Pool with existing > requested still skips (idempotent)."""
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("pool", {0, 1, 2, 3, 4, 5}, n_requested=5)
+        self.assertEqual(action.action, "skip")
+
+    def test_pool_sparse_existing_uses_max(self):
+        """Pool uses max(existing)+1, not count(existing), as the offset."""
+        from joshpy.sweep import _apply_collision_policy
+
+        # {0, 7} — max is 7, so next is 8
+        action = _apply_collision_policy("pool", {0, 7}, n_requested=10)
+        self.assertEqual(action.action, "dispatch")
+        self.assertEqual(action.replicate_start, 8)
+        self.assertEqual(action.replicates, 2)
+
+    def test_unknown_policy_raises(self):
+        from joshpy.sweep import _apply_collision_policy
+
+        with self.assertRaises(ValueError):
+            _apply_collision_policy("replace", set(), n_requested=5)
+
+    def test_overwrite_with_existing_dispatches_full(self):
+        """overwrite ignores prior outputs and dispatches 0..N-1 over them."""
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("overwrite", {0, 1, 2}, n_requested=5)
+        self.assertEqual(action.action, "dispatch")
+        self.assertEqual(action.replicate_start, 0)
+        self.assertEqual(action.replicates, 5)
+
+    def test_overwrite_with_empty_dispatches_full(self):
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("overwrite", set(), n_requested=5)
+        self.assertEqual(action.action, "dispatch")
+        self.assertEqual(action.replicate_start, 0)
+        self.assertEqual(action.replicates, 5)
+
+    def test_overwrite_shrinking_sweep_leaves_orphans(self):
+        """Shrinking sweep (old=10, new=5): dispatch only 0..4; 5..9 stay orphaned."""
+        from joshpy.sweep import _apply_collision_policy
+
+        action = _apply_collision_policy("overwrite", set(range(10)), n_requested=5)
+        self.assertEqual(action.action, "dispatch")
+        self.assertEqual(action.replicates, 5)
+        # The action doesn't track orphans — that's a known limitation,
+        # documented in with_collision_policy() docstring.
+
+
+class TestListExistingReplicatesMinio(unittest.TestCase):
+    """Tests for _list_existing_replicates_minio (MinIO listing via DuckDB glob)."""
+
+    def _export_info(self, path: str, protocol: str = "minio", host: str = "bucket"):
+        from joshpy.cli import ExportFileInfo
+        return ExportFileInfo(
+            raw=f"{protocol}://{host}{path}",
+            protocol=protocol,
+            host=host,
+            path=path,
+            file_type="csv",
+        )
+
+    def test_template_without_replicate_placeholder_returns_empty(self):
+        from joshpy.sweep import _list_existing_replicates_minio
+
+        info = self._export_info("/prefix/single_output.csv")
+        result = _list_existing_replicates_minio(
+            MagicMock(), MagicMock(), info, {}, quiet=True,
+        )
+        self.assertEqual(result, set())
+
+    def test_template_with_timestamp_returns_empty(self):
+        """{timestamp} signals per-dispatch isolation; don't pool across runs."""
+        from joshpy.sweep import _list_existing_replicates_minio
+
+        info = self._export_info("/prefix/{timestamp}/output_{replicate}.csv")
+        result = _list_existing_replicates_minio(
+            MagicMock(), MagicMock(), info, {}, quiet=True,
+        )
+        self.assertEqual(result, set())
+
+    def test_template_with_unknown_placeholder_uses_wildcard(self):
+        """Unknown placeholders (e.g. {step}) become wildcards, replicate still extracted."""
+        from joshpy.sweep import _list_existing_replicates_minio
+
+        info = self._export_info("/prefix/output_{step}_{replicate}.csv")
+        mock_registry = MagicMock()
+        # Multiple "step" variants per replicate — all dedupe to the same replicate index
+        mock_registry.conn.execute.return_value.fetchall.return_value = [
+            ("s3://bucket/prefix/output_0_0.csv",),
+            ("s3://bucket/prefix/output_5_0.csv",),  # same replicate, different step
+            ("s3://bucket/prefix/output_0_1.csv",),
+            ("s3://bucket/prefix/output_5_1.csv",),
+        ]
+        with patch(
+            "joshpy.sweep._configure_minio_access", return_value=("bucket", None),
+        ):
+            result = _list_existing_replicates_minio(
+                MagicMock(), mock_registry, info, {}, quiet=True,
+            )
+        self.assertEqual(result, {0, 1})
+        # Glob pattern should have BOTH {step} and {replicate} as *
+        glob_arg = mock_registry.conn.execute.call_args[0][1][0]
+        self.assertEqual(
+            glob_arg, "s3://bucket/prefix/output_*_*.csv",
+        )
+
+    def test_run_hash_resolved_via_known_vars(self):
+        """{run_hash} in the template is resolved via known_vars."""
+        from joshpy.sweep import _list_existing_replicates_minio
+
+        info = self._export_info("/prefix/{run_hash}/output_{replicate}.csv")
+        mock_registry = MagicMock()
+        mock_registry.conn.execute.return_value.fetchall.return_value = [
+            ("s3://bucket/prefix/abc123/output_0.csv",),
+            ("s3://bucket/prefix/abc123/output_1.csv",),
+            ("s3://bucket/prefix/abc123/output_7.csv",),
+        ]
+        with patch(
+            "joshpy.sweep._configure_minio_access", return_value=("bucket", None),
+        ):
+            result = _list_existing_replicates_minio(
+                MagicMock(), mock_registry, info,
+                known_vars={"run_hash": "abc123"}, quiet=True,
+            )
+        self.assertEqual(result, {0, 1, 7})
+
+        # The glob pattern should have {run_hash} resolved but {replicate} as *
+        call_args = mock_registry.conn.execute.call_args
+        self.assertIn("s3://bucket/prefix/abc123/output_*.csv", call_args[0][1])
+
+    def test_glob_failure_returns_empty(self):
+        """DuckDB glob exception is swallowed and returns empty set."""
+        from joshpy.sweep import _list_existing_replicates_minio
+
+        info = self._export_info("/prefix/output_{replicate}.csv")
+        mock_registry = MagicMock()
+        mock_registry.conn.execute.side_effect = RuntimeError("S3 credentials missing")
+        with patch(
+            "joshpy.sweep._configure_minio_access", return_value=("bucket", None),
+        ):
+            result = _list_existing_replicates_minio(
+                MagicMock(), mock_registry, info, {}, quiet=True,
+            )
+        self.assertEqual(result, set())
+
+    def test_ignores_non_matching_names(self):
+        """Files not matching the prefix/suffix regex are ignored."""
+        from joshpy.sweep import _list_existing_replicates_minio
+
+        info = self._export_info("/prefix/output_{replicate}.csv")
+        mock_registry = MagicMock()
+        mock_registry.conn.execute.return_value.fetchall.return_value = [
+            ("s3://bucket/prefix/output_3.csv",),
+            ("s3://bucket/prefix/output_something.csv",),  # not a number
+            ("s3://bucket/prefix/unrelated.csv",),
+            ("s3://bucket/prefix/output_12.csv",),
+        ]
+        with patch(
+            "joshpy.sweep._configure_minio_access", return_value=("bucket", None),
+        ):
+            result = _list_existing_replicates_minio(
+                MagicMock(), mock_registry, info, {}, quiet=True,
+            )
+        self.assertEqual(result, {3, 12})
+
+
+class TestCollisionPolicyBuilder(unittest.TestCase):
+    """Tests for SweepManagerBuilder.with_collision_policy."""
+
+    def test_default_is_fail(self):
+        from joshpy.jobs import JobConfig
+        from joshpy.sweep import SweepManagerBuilder
+
+        config = JobConfig(
+            source_path=Path("/fake.josh"), simulation="Main", replicates=1,
+        )
+        builder = SweepManagerBuilder(config)
+        self.assertEqual(builder._collision_policy, "fail")
+
+    def test_with_collision_policy_stores(self):
+        from joshpy.jobs import JobConfig
+        from joshpy.sweep import SweepManagerBuilder
+
+        config = JobConfig(
+            source_path=Path("/fake.josh"), simulation="Main", replicates=1,
+        )
+        builder = SweepManagerBuilder(config).with_collision_policy("pool")
+        self.assertEqual(builder._collision_policy, "pool")
+
+    def test_invalid_policy_raises(self):
+        from joshpy.jobs import JobConfig
+        from joshpy.sweep import SweepManagerBuilder
+
+        config = JobConfig(
+            source_path=Path("/fake.josh"), simulation="Main", replicates=1,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            SweepManagerBuilder(config).with_collision_policy("destroy-all")
+        self.assertIn("destroy-all", str(ctx.exception))
+        self.assertIn("must be one of", str(ctx.exception))
+
+    def test_with_collision_policy_accepts_overwrite(self):
+        from joshpy.jobs import JobConfig
+        from joshpy.sweep import SweepManagerBuilder
+
+        config = JobConfig(
+            source_path=Path("/fake.josh"), simulation="Main", replicates=1,
+        )
+        builder = SweepManagerBuilder(config).with_collision_policy("overwrite")
+        self.assertEqual(builder._collision_policy, "overwrite")
+
+    def test_builder_default_propagates_to_manager(self):
+        from joshpy.jobs import JobConfig
+        from joshpy.sweep import SweepManagerBuilder
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            config = JobConfig(
+                source_path=src, simulation="Main", replicates=1,
+            )
+            builder = SweepManagerBuilder(config).with_collision_policy("skip")
+            manager = builder.build()
+            self.assertEqual(manager._collision_policy, "skip")
+            manager.close()
+
+
+class TestCollisionPolicyInRunSweep(unittest.TestCase):
+    """Integration tests: collision policy applied inside run_sweep batch-remote."""
+
+    def _make_job(self, tmp: Path, run_hash: str = "hashPool") -> "ExpandedJob":
+        from joshpy.jobs import ExpandedJob
+        src = tmp / "sim.josh"
+        src.write_text("start simulation Main\nend simulation\n")
+        return ExpandedJob(
+            config_content="x = 1 count",
+            config_path=tmp / "config.jshc",
+            config_name="config.jshc",
+            run_hash=run_hash,
+            parameters={},
+            simulation="Main",
+            replicates=10,
+            source_path=src,
+            custom_tags={"run_hash": run_hash},
+        )
+
+    def _mock_cli(self, existing_files: list[str]):
+        """Build a MockCLI that returns a minio:// patch export and the given existing files."""
+        from joshpy.cli import CLIResult, ExportFileInfo, ExportPaths
+        cli = MagicMock()
+        cli.stage_to_minio.return_value = CLIResult(
+            exit_code=0, stdout="", stderr="", command=["stageToMinio"],
+        )
+        cli.batch_remote.return_value = CLIResult(
+            exit_code=0, stdout="", stderr="", command=["batchRemote"],
+        )
+        cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="minio://bucket/prefix/output_{replicate}.csv",
+                    protocol="minio",
+                    host="bucket",
+                    path="/prefix/output_{replicate}.csv",
+                    file_type="csv",
+                ),
+            },
+            debug_files={},
+        )
+        # Registry with glob() returning existing files
+        mock_registry = MagicMock()
+        mock_registry.conn.execute.return_value.fetchall.return_value = [
+            (f,) for f in existing_files
+        ]
+        return cli, mock_registry
+
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    def test_pool_policy_dispatches_with_offset(self, _mock_cfg):
+        from joshpy.jobs import run_sweep
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._make_job(Path(tmp))
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=10,
+                __iter__=lambda self: iter([job]),
+            )
+            existing = [f"s3://bucket/prefix/output_{i}.csv" for i in range(5)]
+            cli, registry = self._mock_cli(existing)
+
+            run_sweep(
+                cli, job_set,
+                registry=registry,
+                session_id="s1",
+                batch_remote=True,
+                target="gke-test",
+                collision_policy="pool",
+                quiet=True,
+                manage_status=False,
+            )
+
+            # stage_to_minio and batch_remote called once each (we dispatched the gap)
+            cli.stage_to_minio.assert_called_once()
+            cli.batch_remote.assert_called_once()
+            # The BatchRemoteConfig should have replicate_start=5, replicates=5
+            br_config = cli.batch_remote.call_args[0][0]
+            self.assertEqual(br_config.replicate_start, 5)
+            self.assertEqual(br_config.replicates, 5)
+
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    def test_skip_policy_skips_staging(self, _mock_cfg):
+        from joshpy.jobs import run_sweep
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._make_job(Path(tmp))
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=10,
+                __iter__=lambda self: iter([job]),
+            )
+            existing = [f"s3://bucket/prefix/output_{i}.csv" for i in range(3)]
+            cli, registry = self._mock_cli(existing)
+
+            result = run_sweep(
+                cli, job_set,
+                registry=registry,
+                session_id="s1",
+                batch_remote=True,
+                target="gke-test",
+                collision_policy="skip",
+                quiet=True,
+                manage_status=False,
+            )
+
+            # No stage / no dispatch — skip policy is idempotent no-op
+            cli.stage_to_minio.assert_not_called()
+            cli.batch_remote.assert_not_called()
+            # And we still count the skipped job as succeeded
+            self.assertEqual(result.succeeded, 1)
+            self.assertEqual(result.failed, 0)
+
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    def test_pool_policy_complete_skips(self, _mock_cfg):
+        """Pool with existing >= requested skips (idempotent)."""
+        from joshpy.jobs import run_sweep
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._make_job(Path(tmp))
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=10,
+                __iter__=lambda self: iter([job]),
+            )
+            existing = [f"s3://bucket/prefix/output_{i}.csv" for i in range(10)]
+            cli, registry = self._mock_cli(existing)
+
+            run_sweep(
+                cli, job_set,
+                registry=registry,
+                session_id="s1",
+                batch_remote=True,
+                target="gke-test",
+                collision_policy="pool",
+                quiet=True,
+                manage_status=False,
+            )
+
+            cli.stage_to_minio.assert_not_called()
+            cli.batch_remote.assert_not_called()
+
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    def test_overwrite_policy_dispatches_full_over_existing(self, _mock_cfg):
+        """overwrite dispatches 0..N-1 even when prior replicates exist on MinIO."""
+        from joshpy.jobs import run_sweep
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._make_job(Path(tmp))
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=10,
+                __iter__=lambda self: iter([job]),
+            )
+            existing = [f"s3://bucket/prefix/output_{i}.csv" for i in range(5)]
+            cli, registry = self._mock_cli(existing)
+
+            run_sweep(
+                cli, job_set,
+                registry=registry,
+                session_id="s1",
+                batch_remote=True,
+                target="gke-test",
+                collision_policy="overwrite",
+                quiet=True,
+                manage_status=False,
+            )
+
+            cli.stage_to_minio.assert_called_once()
+            cli.batch_remote.assert_called_once()
+            br_config = cli.batch_remote.call_args[0][0]
+            # overwrite dispatches the full range from 0
+            self.assertEqual(br_config.replicate_start, 0)
+            self.assertEqual(br_config.replicates, 10)
+
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    def test_fail_policy_in_run_sweep_raises(self, _mock_cfg):
+        """run_sweep called directly with policy='fail' + existing → SweepCollisionError."""
+        from joshpy.jobs import run_sweep
+        from joshpy.sweep import SweepCollisionError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._make_job(Path(tmp))
+            job_set = MagicMock(
+                total_jobs=1, total_replicates=10,
+                __iter__=lambda self: iter([job]),
+            )
+            existing = [f"s3://bucket/prefix/output_{i}.csv" for i in range(3)]
+            cli, registry = self._mock_cli(existing)
+
+            with self.assertRaises(SweepCollisionError):
+                run_sweep(
+                    cli, job_set,
+                    registry=registry,
+                    session_id="s1",
+                    batch_remote=True,
+                    target="gke-test",
+                    collision_policy="fail",
+                    quiet=True,
+                    manage_status=False,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

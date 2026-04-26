@@ -38,6 +38,7 @@ Example usage:
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import time
 from collections.abc import Callable
@@ -132,6 +133,338 @@ class ResultLoadError(Exception):
             f"Failed to load results for job {job.run_hash}: {message}. "
             f"{succeeded_before} jobs succeeded before this failure."
         )
+
+
+class SweepCollisionError(Exception):
+    """Raised when a batch-remote sweep would silently overwrite prior MinIO outputs.
+
+    The static check fires when:
+    - the export path template lacks both ``{timestamp}`` and ``{run_hash}``, AND
+    - the registry already has runs for one or more jobs in this sweep, AND
+    - the user did not pass ``force=True`` to ``SweepManager.run()``.
+
+    Attributes:
+        conflicts: List of ``(job, path_template, prior_runs)`` triples — one
+            entry per job in the sweep that would collide.
+    """
+
+    def __init__(
+        self,
+        conflicts: list[tuple[ExpandedJob, str, list[Any]]],
+    ) -> None:
+        self.conflicts = conflicts
+        super().__init__(self._format_message())
+
+    def _format_message(self) -> str:
+        n = len(self.conflicts)
+        first_template = self.conflicts[0][1]
+        per_run_lines = "\n".join(
+            f"  - run_hash {job.run_hash}: {len(priors)} prior run(s)"
+            for job, _template, priors in self.conflicts
+        )
+        return (
+            f"{n} job(s) in this sweep would silently overwrite prior MinIO outputs.\n\n"
+            f"{per_run_lines}\n\n"
+            f"Your export path template ({first_template!r}) doesn't include "
+            f"{{timestamp}} or {{run_hash}} — re-dispatching will overwrite the "
+            f"existing CSVs while the registry still references them. The "
+            f"registry would report more replicates than MinIO actually contains.\n\n"
+            "Fix one of:\n"
+            "  1. Add {timestamp} to your export path (recommended — every dispatch\n"
+            "     gets a fresh folder):\n"
+            '         exportFiles.patch = "minio://bucket/{timestamp}/output_{replicate}.csv"\n\n'
+            "  2. Once batchRemote --custom-tag passthrough lands and joshpy auto-injects\n"
+            "     run_hash, use {run_hash} for deterministic per-simulation paths:\n"
+            '         exportFiles.patch = "minio://bucket/{run_hash}/output_{replicate}.csv"\n\n'
+            "  3. Drop the prior run(s) from the registry if you intend a fresh re-run.\n\n"
+            "  4. Pass force=True to SweepManager.run() to proceed anyway (you accept\n"
+            "     that subsequent ingest() calls will count duplicate replicates)."
+        )
+
+
+def _check_export_path_safety(
+    cli: JoshCLI,
+    job_set: JobSet,
+    registry: RunRegistry,
+    *,
+    export_paths_cache: dict[tuple[str, str], ExportPaths] | None = None,
+    quiet: bool = False,
+) -> dict[tuple[str, str], ExportPaths]:
+    """Raise SweepCollisionError if a batch-remote sweep would overwrite prior MinIO outputs.
+
+    For each job in ``job_set``, compute its export path template (caching by
+    ``(source_path, simulation)``) and check three conditions:
+
+    1. The patch export protocol is ``minio://`` — local paths are out of scope.
+    2. The path template lacks ``{timestamp}`` and ``{run_hash}`` placeholders —
+       either is sufficient to disambiguate dispatches.
+    3. The registry has prior runs for the job's ``run_hash``.
+
+    If all three are true for any job, raises ``SweepCollisionError`` listing the
+    conflicting hashes.
+
+    Args:
+        cli: Josh CLI for ``inspect_exports``.
+        job_set: The expanded jobs to check.
+        registry: Registry to query for prior runs.
+        export_paths_cache: Optional pre-populated cache. New entries are added
+            in place. Returned for callers (e.g., the auto_ingest hook) to reuse.
+        quiet: Suppress progress output (currently unused; reserved).
+
+    Returns:
+        The updated export-paths cache (same dict that was passed in, if any).
+    """
+    if export_paths_cache is None:
+        export_paths_cache = {}
+
+    conflicts: list[tuple[ExpandedJob, str, list[Any]]] = []
+
+    for job in job_set:
+        if job.source_path is None:
+            continue
+        cache_key = (str(job.source_path), job.simulation)
+        export_paths = export_paths_cache.get(cache_key)
+        if export_paths is None:
+            export_paths = cli.inspect_exports(
+                InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+            )
+            export_paths_cache[cache_key] = export_paths
+
+        export_info = export_paths.export_files.get("patch")
+        if export_info is None or export_info.protocol != "minio":
+            continue
+
+        path_template = export_info.path
+        if "{timestamp}" in path_template or "{run_hash}" in path_template:
+            continue
+
+        prior_runs = registry.get_runs_for_hash(job.run_hash)
+        if prior_runs:
+            conflicts.append((job, path_template, list(prior_runs)))
+
+    if conflicts:
+        raise SweepCollisionError(conflicts)
+
+    return export_paths_cache
+
+
+# Collision policies for batch-remote sweeps. See SweepManagerBuilder.with_collision_policy.
+COLLISION_POLICIES: tuple[str, ...] = ("fail", "pool", "skip", "overwrite")
+
+
+class _PartialFormat(dict):
+    """Dict subclass for ``str.format_map`` — unknown keys stay as ``{key}``.
+
+    Used to resolve known template variables (e.g. ``{run_hash}``, ``{label}``)
+    in an export path while leaving ``{replicate}`` (and any other unknown
+    placeholders) intact for downstream pattern matching.
+    """
+
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _list_existing_replicates_minio(
+    cli: JoshCLI,
+    registry: RunRegistry,
+    export_info: Any,
+    known_vars: dict[str, Any],
+    *,
+    quiet: bool = False,
+) -> set[int]:
+    """List existing MinIO/S3 objects and extract replicate indices from filenames.
+
+    Resolves all known template variables via ``known_vars`` (keeping unknown
+    placeholders like ``{replicate}`` intact), globs the resulting S3 pattern
+    via DuckDB's ``glob()``, then extracts the integer replicate index from
+    each filename.
+
+    Returns an empty set if:
+    - the template has no ``{replicate}`` placeholder (single-file output);
+    - the template contains unresolved placeholders beyond ``{replicate}`` and
+      ``{timestamp}`` (e.g. ``{step}``, ``{variable}`` — multi-file patterns
+      aren't handled by the MVP);
+    - listing fails for any reason (treated as "nothing prior").
+
+    Args:
+        cli: JoshCLI (needed by ``_configure_minio_access``).
+        registry: RunRegistry whose DuckDB conn is used for the glob query.
+        export_info: ``ExportFileInfo`` — ``protocol`` must be ``"minio"``.
+        known_vars: Resolved template variables (``run_hash``, ``label``,
+            custom tags, simulation parameters). ``{replicate}`` stays literal.
+        quiet: Suppress progress/warning output.
+
+    Returns:
+        Set of replicate indices found on MinIO.
+    """
+    try:
+        resolved = export_info.path.format_map(_PartialFormat(known_vars))
+    except (IndexError, ValueError):
+        return set()
+
+    if "{replicate}" not in resolved:
+        # Without {replicate}, all replicates land in one consolidated CSV —
+        # the file count can't tell us how many replicates exist. Caller
+        # treats empty set as "dispatch fresh".
+        return set()
+
+    if "{timestamp}" in resolved:
+        # {timestamp} means the user explicitly chose per-dispatch isolation
+        # (each run writes to a fresh folder). Listing across dispatches
+        # would find unrelated runs; safer to treat as no prior outputs.
+        return set()
+
+    bucket = export_info.host
+    try:
+        _configure_minio_access(
+            cli, registry, export_info, resolved,
+            download=False, output_dir=None, minio_bucket=None, quiet=quiet,
+        )
+    except Exception as e:
+        if not quiet:
+            print(f"  [POLICY] MinIO access not configured: {e}")
+        return set()
+
+    # Build glob: replace {replicate} and any other surviving placeholders
+    # with '*'. (After the runtime-vars guard above, "other" placeholders
+    # in practice mean unsupported / aspirational template vars rather
+    # than multi-file fanout — Josh writes one CSV per replicate per
+    # export type regardless.)
+    glob_resolved = re.sub(r"\{[^{}]+\}", "*", resolved)
+    prefix_for_glob = glob_resolved.lstrip("/")
+    glob_pattern = f"s3://{bucket}/{prefix_for_glob}"
+
+    try:
+        rows = registry.conn.execute(
+            "SELECT file FROM glob(?)", [glob_pattern]
+        ).fetchall()
+    except Exception as e:
+        if not quiet:
+            print(f"  [POLICY] glob() failed ({e}); treating as no prior outputs.")
+        return set()
+
+    # Build extraction regex: {replicate} → (\d+) capture, anything else → .*?.
+    # Anchor on the s3 URL with bucket prefix so we don't accidentally match
+    # outside the user's intended folder.
+    pattern_parts: list[str] = [re.escape(f"s3://{bucket}")]
+    cursor = 0
+    placeholder_re = re.compile(r"\{([^{}]+)\}")
+    for m in placeholder_re.finditer(resolved):
+        pattern_parts.append(re.escape(resolved[cursor:m.start()]))
+        if m.group(1) == "replicate":
+            pattern_parts.append(r"(\d+)")
+        else:
+            pattern_parts.append(r".*?")
+        cursor = m.end()
+    pattern_parts.append(re.escape(resolved[cursor:]))
+    name_pattern = re.compile("".join(pattern_parts) + r"$")
+
+    found: set[int] = set()
+    for (name,) in rows:
+        name_match = name_pattern.match(name)
+        if name_match:
+            found.add(int(name_match.group(1)))
+    return found
+
+
+@dataclass
+class _CollisionAction:
+    """Outcome of applying a collision policy to an existing-replicates set.
+
+    Attributes:
+        action: ``"dispatch"`` (proceed with dispatch), ``"skip"`` (no-op),
+            or ``"fail"`` (raise — caller turns this into SweepCollisionError).
+        replicate_start: Offset for the batch-remote dispatch (ignored unless
+            action == "dispatch").
+        replicates: Number of replicates to dispatch (ignored unless
+            action == "dispatch").
+        existing: The pre-existing replicate indices observed on MinIO.
+    """
+
+    action: str
+    replicate_start: int = 0
+    replicates: int = 0
+    existing: frozenset[int] = field(default_factory=frozenset)
+
+
+def _apply_collision_policy(
+    policy: str,
+    existing: set[int],
+    n_requested: int,
+) -> _CollisionAction:
+    """Compute the dispatch plan for a job given policy + pre-existing state.
+
+    Policies:
+    - ``"fail"`` (default) — if any prior replicates exist, return ``action="fail"``.
+      The caller converts this into :class:`SweepCollisionError`. This path is
+      primarily reached through :func:`_check_export_path_safety` (Item 6);
+      include here so the code path is symmetric.
+    - ``"pool"`` — fill the gap between existing and requested. Dispatches
+      replicates ``max(existing)+1 .. n_requested-1`` at an offset. If already
+      complete (``max(existing)+1 >= n_requested``), returns ``action="skip"``.
+    - ``"skip"`` — idempotent: if *any* prior replicate exists, return
+      ``action="skip"`` (treat as complete for CI re-runs). Otherwise dispatch
+      normally.
+    - ``"overwrite"`` — always dispatch ``0..n_requested-1`` over whatever's
+      there. MinIO PUT replaces existing files at the same paths. NOTE: when
+      the new dispatch is *smaller* than the existing run, replicates beyond
+      ``n_requested-1`` remain as orphans — joshpy currently has no MinIO
+      delete primitive to clean them up. Caller must accept this or use
+      ``{timestamp}`` paths if cleanliness matters.
+
+    Args:
+        policy: One of :data:`COLLISION_POLICIES`.
+        existing: Pre-existing replicate indices on MinIO.
+        n_requested: Total replicates the user asked for (``job.replicates``).
+
+    Returns:
+        A ``_CollisionAction`` describing what to do.
+
+    Raises:
+        ValueError: if ``policy`` is not a recognized value.
+    """
+    if policy not in COLLISION_POLICIES:
+        raise ValueError(
+            f"Unknown collision policy {policy!r}; must be one of {COLLISION_POLICIES}"
+        )
+
+    existing_fs = frozenset(existing)
+
+    # "overwrite" always dispatches 0..N-1, ignoring whatever's there.
+    if policy == "overwrite":
+        return _CollisionAction(
+            action="dispatch",
+            replicate_start=0,
+            replicates=n_requested,
+            existing=existing_fs,
+        )
+
+    if not existing_fs:
+        return _CollisionAction(
+            action="dispatch",
+            replicate_start=0,
+            replicates=n_requested,
+            existing=existing_fs,
+        )
+
+    max_existing = max(existing_fs)
+
+    if policy == "fail":
+        return _CollisionAction(action="fail", existing=existing_fs)
+
+    if policy == "skip":
+        return _CollisionAction(action="skip", existing=existing_fs)
+
+    # policy == "pool"
+    k = max_existing + 1
+    if k >= n_requested:
+        return _CollisionAction(action="skip", existing=existing_fs)
+    return _CollisionAction(
+        action="dispatch",
+        replicate_start=k,
+        replicates=n_requested - k,
+        existing=existing_fs,
+    )
 
 
 def _wait_for_file(path: Path, config: LoadConfig) -> bool:
@@ -847,6 +1180,7 @@ class SweepManager:
     _batch_poll_interval: int = field(default=10, repr=False)
     _batch_timeout: int | None = field(default=None, repr=False)
     _batch_auto_ingest: bool = field(default=True, repr=False)
+    _collision_policy: str = field(default="fail", repr=False)
 
     # Entry points
     @classmethod
@@ -933,6 +1267,8 @@ class SweepManager:
         bottle: str | None = None,
         bottle_dir: Path | None = None,
         bottle_omit_jshd: bool = False,
+        force: bool = False,
+        collision_policy: str | Any = _UNSET,
     ) -> SweepResult:
         """Execute all jobs in the sweep.
 
@@ -964,6 +1300,15 @@ class SweepManager:
             enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
             stream_output: If True, stream JAR stdout/stderr to the terminal
                 in real time while still capturing them in CLIResult.
+            force: If True, bypass the static collision check that raises
+                ``SweepCollisionError`` when a batch-remote sweep would
+                silently overwrite prior MinIO outputs. Default False.
+            collision_policy: Override the builder-configured collision policy
+                for this call. One of :data:`COLLISION_POLICIES`: ``"fail"``
+                (default) triggers the static check; ``"pool"`` fills the gap
+                between existing and requested replicates via
+                ``replicate_start``; ``"skip"`` is idempotent (no-op if any
+                prior replicates exist).
 
         Returns:
             SweepResult for batch strategies, AdaptiveSweepResult for adaptive.
@@ -1000,6 +1345,31 @@ class SweepManager:
             batch_timeout = self._batch_timeout
         if auto_ingest is _UNSET:
             auto_ingest = self._batch_auto_ingest
+        if collision_policy is _UNSET:
+            collision_policy = self._collision_policy
+        if collision_policy not in COLLISION_POLICIES:
+            raise ValueError(
+                f"Unknown collision policy {collision_policy!r}; "
+                f"must be one of {COLLISION_POLICIES}"
+            )
+
+        # force=True is the legacy "dispatch over whatever's there" escape hatch.
+        # Translate it into collision_policy="overwrite" so it bypasses BOTH
+        # the static check (Item 6) AND the runtime listing check (Item 5).
+        if force:
+            collision_policy = "overwrite"
+
+        # Pre-dispatch static collision check. Only fires for policy="fail"
+        # (the default) — "pool" / "skip" / "overwrite" do their own runtime
+        # handling at dispatch time inside run_sweep. dry_run bypasses.
+        if (
+            batch_remote
+            and not dry_run
+            and collision_policy == "fail"
+        ):
+            _check_export_path_safety(
+                self.cli, self.job_set, self.registry, quiet=quiet,
+            )
 
         # Check if strategy is adaptive
         strategy = self.config.sweep.strategy if self.config.sweep else None
@@ -1053,6 +1423,7 @@ class SweepManager:
                 poll_interval=poll_interval,
                 batch_timeout=batch_timeout,
                 auto_ingest=auto_ingest,
+                collision_policy=collision_policy,
                 on_complete=on_complete,
                 stop_on_failure=stop_on_failure,
                 dry_run=dry_run,
@@ -1288,6 +1659,7 @@ class SweepManagerBuilder:
         self._batch_poll_interval: int = 10
         self._batch_timeout: int | None = None
         self._batch_auto_ingest: bool = True
+        self._collision_policy: str = "fail"
 
     def with_registry(
         self,
@@ -1506,6 +1878,63 @@ class SweepManagerBuilder:
         self._batch_auto_ingest = auto_ingest
         return self
 
+    def with_collision_policy(self, policy: str) -> SweepManagerBuilder:
+        """Configure how batch-remote sweeps handle prior MinIO outputs.
+
+        Args:
+            policy: One of:
+
+                - ``"fail"`` (default) — raise :class:`SweepCollisionError` at
+                  ``.run()`` time if the export path template lacks both
+                  ``{timestamp}`` and ``{run_hash}`` and any job's ``run_hash``
+                  already has runs in the registry. Equivalent to the static
+                  check; safest default.
+                - ``"pool"`` — list existing MinIO objects and dispatch only
+                  the missing replicates via
+                  :attr:`BatchRemoteConfig.replicate_start`. Enables
+                  "grow a sweep" workflows: first run N=5 succeeds, re-run
+                  with N=10 only dispatches replicates 5..9.
+                - ``"skip"`` — idempotent: if *any* matching MinIO object
+                  exists, skip the dispatch entirely. Useful for CI reruns.
+                - ``"overwrite"`` — always dispatch replicates 0..N-1 over
+                  whatever's there; MinIO PUT replaces files at matching
+                  paths. Note: shrinking sweeps (old N=10, new N=5) leaves
+                  orphans 5..9 since joshpy has no MinIO delete primitive.
+                  Use ``{timestamp}`` paths when orphan-cleanliness matters.
+
+        Returns:
+            Self for chaining.
+
+        Raises:
+            ValueError: If ``policy`` is not one of :data:`COLLISION_POLICIES`.
+
+        Examples:
+            >>> manager = (
+            ...     SweepManager.builder(config)
+            ...     .with_registry("experiment.duckdb")
+            ...     .with_batch_remote("gke-test")
+            ...     .with_collision_policy("pool")
+            ...     .build()
+            ... )
+
+        Notes:
+            ``"pool"`` and ``"skip"`` enumerate prior outputs by listing MinIO
+            and matching the export-path template. The template's
+            ``{replicate}`` slot becomes the integer capture; any other
+            unresolved placeholder (rare in practice — Josh writes one CSV
+            per replicate per export type regardless of which template
+            variables appear) becomes a wildcard. ``{timestamp}`` is the one
+            special case: its presence signals per-dispatch isolation, so
+            listing returns empty (no pooling across timestamps).
+        """
+        if policy not in COLLISION_POLICIES:
+            raise ValueError(
+                f"Unknown collision policy {policy!r}; "
+                f"must be one of {COLLISION_POLICIES}"
+            )
+        self._collision_policy = policy
+        return self
+
     def build(self) -> SweepManager:
         """Build the SweepManager instance.
 
@@ -1628,6 +2057,7 @@ class SweepManagerBuilder:
             _batch_poll_interval=self._batch_poll_interval,
             _batch_timeout=self._batch_timeout,
             _batch_auto_ingest=self._batch_auto_ingest,
+            _collision_policy=self._collision_policy,
         )
 
     def _convert_file_mappings(

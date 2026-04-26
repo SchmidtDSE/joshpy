@@ -125,6 +125,8 @@ def _compute_run_hash(
     josh_path: Path | None,
     config_content: str,
     file_mappings: dict[str, Path] | None = None,
+    *,
+    seed: int | None = None,
 ) -> str:
     """Compute hash uniquely identifying a simulation specification.
 
@@ -132,6 +134,8 @@ def _compute_run_hash(
     - Josh script content (.josh) - read at hash time
     - Rendered config content (.jshc) - not the template
     - Content hashes of all input data files (.jshd, etc.)
+    - Random seed, if explicitly set (preserves backward-compatible
+      hashes for unseeded runs)
 
     This provides a complete fingerprint of all inputs to a simulation,
     ensuring that runs with different input data get different hashes.
@@ -142,6 +146,11 @@ def _compute_run_hash(
         config_content: Rendered .jshc configuration content.
         file_mappings: Optional dict mapping names to file paths.
             All files must exist at hash time.
+        seed: Optional random seed. When set, contributes to the hash so
+            that ``seed=42`` and ``seed=99`` produce different hashes for
+            otherwise-identical inputs (per-trajectory reproducibility).
+            When ``None`` (the default), the hash matches the legacy
+            unseeded computation — existing registries are preserved.
 
     Returns:
         12-character hex string hash.
@@ -179,6 +188,11 @@ def _compute_run_hash(
                 )
             hasher.update(name.encode("utf-8"))
             hasher.update(_hash_file(path).encode("utf-8"))
+
+    # 4. Random seed (only when explicitly set, preserves hash for unseeded runs)
+    if seed is not None:
+        hasher.update(b"seed=")
+        hasher.update(str(seed).encode("utf-8"))
 
     return hasher.hexdigest()[:12]
 
@@ -1183,11 +1197,12 @@ class JobExpander:
                 if str(k) not in custom_tags:  # don't overwrite file param tags
                     custom_tags[str(k)] = str(v)
 
-            # Compute run_hash (includes josh + config + file_mappings)
+            # Compute run_hash (includes josh + config + file_mappings + seed)
             run_hash = _compute_run_hash(
                 josh_path=effective_source_path,
                 config_content=rendered,
                 file_mappings=file_mappings if file_mappings else None,
+                seed=config.seed,
             )
 
             # Add run_hash as a custom tag
@@ -1345,6 +1360,8 @@ def to_batch_remote_config(
     poll_interval: int | None = None,
     timeout: int | None = None,
     require_prestaged: bool = True,
+    replicate_start: int = 0,
+    replicate_count: int | None = None,
 ) -> BatchRemoteConfig:
     """Convert an ExpandedJob to a BatchRemoteConfig for batch remote execution.
 
@@ -1359,6 +1376,12 @@ def to_batch_remote_config(
     inputs, a persistent-storage target, or a re-run of a prior sweep) can
     pass ``require_prestaged=False`` to skip the sentinel check entirely.
 
+    The job's ``custom_tags`` (which include ``run_hash`` and ``label`` auto-
+    populated during :class:`JobExpander.expand`) are passed through so pods
+    can resolve placeholders like ``{run_hash}`` and ``{label}`` in export
+    paths — matching the behavior of ``to_run_config`` and
+    ``to_run_remote_config`` for interoperability across dispatch modes.
+
     Args:
         job: The expanded job to convert.
         target: Target profile name (e.g. ``"gke-test"``).
@@ -1369,6 +1392,13 @@ def to_batch_remote_config(
         require_prestaged: If True (default), JAR will fail fast unless the
             prefix sentinel reports ``complete``. Set to False only when
             intentionally dispatching against an unverified prefix.
+        replicate_start: Offset added to each pod's replicate index. Used by
+            the pool collision policy to append replicates K..K+N-1 onto an
+            existing MinIO prefix instead of overwriting 0..N-1.
+        replicate_count: Override the dispatch replicate count. When ``None``
+            (the default), uses ``job.replicates``. Pool-collision dispatches
+            set this to the remaining count (``total - replicate_start``) so
+            pods run exactly the missing indices.
 
     Returns:
         BatchRemoteConfig ready for use with JoshCLI.batch_remote().
@@ -1387,11 +1417,13 @@ def to_batch_remote_config(
         simulation=job.simulation,
         target=target,
         minio_prefix=minio_prefix,
-        replicates=job.replicates,
+        replicates=replicate_count if replicate_count is not None else job.replicates,
         no_wait=no_wait,
         poll_interval=poll_interval,
         timeout=timeout,
         require_prestaged=require_prestaged,
+        custom_tags=dict(job.custom_tags),
+        replicate_start=replicate_start,
     )
 
 
@@ -1690,6 +1722,7 @@ def run_sweep(
     poll_interval: int = 10,
     batch_timeout: int | None = None,
     auto_ingest: bool = True,
+    collision_policy: str = "fail",
     on_complete: Callable[[ExpandedJob, Any], None] | None = None,
     stop_on_failure: bool = True,
     dry_run: bool = False,
@@ -1870,12 +1903,16 @@ def run_sweep(
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if batch_remote:
                 from joshpy.batch_orchestrator import assemble_batch_workdir
-                from joshpy.cli import StageToMinioConfig
+                from joshpy.cli import CLIResult, StageToMinioConfig
+                from joshpy.sweep import (
+                    SweepCollisionError,
+                    _apply_collision_policy,
+                    _list_existing_replicates_minio,
+                )
 
                 assert target is not None  # validated above
                 assert sweep_workdir is not None  # allocated when batch_remote=True
 
-                job_dir = assemble_batch_workdir(job, sweep_workdir)
                 per_job_prefix = (
                     f"sweeps/{session_id or 'adhoc'}/jobs/{job.run_hash}/"
                 )
@@ -1884,22 +1921,97 @@ def run_sweep(
                     "minio_prefix": per_job_prefix,
                     "stage_prefix_root": _stage_prefix_root,
                 }
-                stage_result = cli.stage_to_minio(
-                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
-                )
-                if not stage_result.success:
-                    result = stage_result
+
+                # Collision policy: list existing outputs, compute dispatch plan.
+                # Registry lookup for export paths uses the cli-side inspect + glob.
+                action = None
+                patch_info = None
+                try:
+                    from joshpy.cli import InspectExportsConfig
+                    # source_path required for batch dispatch — to_batch_remote_config
+                    # raises if None, so skip the policy eval on that path.
+                    if job.source_path is None:
+                        raise RuntimeError("source_path required for batch dispatch")
+                    exports = cli.inspect_exports(
+                        InspectExportsConfig(
+                            script=job.source_path, simulation=job.simulation,
+                        )
+                    )
+                    patch_info = exports.export_files.get("patch") if exports else None
+                    if (
+                        patch_info is not None
+                        and patch_info.protocol == "minio"
+                        and registry is not None
+                    ):
+                        existing = _list_existing_replicates_minio(
+                            cli, registry, patch_info,
+                            known_vars={
+                                **job.parameters,
+                                **job.custom_tags,
+                                "run_hash": job.run_hash,
+                                "simulation": job.simulation,
+                            },
+                            quiet=quiet,
+                        )
+                        action = _apply_collision_policy(
+                            collision_policy, existing, job.replicates,
+                        )
+                except Exception as e:
+                    if not quiet:
+                        print(
+                            f"  [POLICY] Could not evaluate {collision_policy!r}: "
+                            f"{e}; dispatching in full."
+                        )
+
+                if action is not None and action.action == "fail":
+                    raise SweepCollisionError(
+                        [(job, patch_info.path if patch_info else "?",
+                          list(action.existing))]
+                    )
+
+                if action is not None and action.action == "skip":
+                    if not quiet:
+                        print(
+                            f"  [POLICY] Skipping dispatch: {len(action.existing)} "
+                            f"existing replicates already cover {job.replicates} requested."
+                        )
+                    import json as _json
+                    result = CLIResult(
+                        exit_code=0,
+                        stdout=_json.dumps({
+                            "skipped": True,
+                            "reason": "collision_policy",
+                            "existing": sorted(action.existing),
+                        }),
+                        stderr="",
+                        command=["batchRemote", "(skipped by collision policy)"],
+                    )
                 else:
-                    br_config = to_batch_remote_config(
-                        job, target, per_job_prefix,
-                        no_wait=batch_no_wait,
-                        poll_interval=poll_interval if batch_no_wait else None,
-                        timeout=batch_timeout,
-                        require_prestaged=True,
+                    # Dispatch path: stage + dispatch, honoring pool offset/count.
+                    dispatch_start = action.replicate_start if action else 0
+                    dispatch_count = (
+                        action.replicates if action else job.replicates
                     )
-                    result = cli.batch_remote(
-                        br_config, jfr=job_jfr, stream_output=stream_output,
+
+                    job_dir = assemble_batch_workdir(job, sweep_workdir)
+                    stage_result = cli.stage_to_minio(
+                        StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
                     )
+                    if not stage_result.success:
+                        result = stage_result
+                    else:
+                        br_config = to_batch_remote_config(
+                            job, target, per_job_prefix,
+                            no_wait=batch_no_wait,
+                            poll_interval=poll_interval if batch_no_wait else None,
+                            timeout=batch_timeout,
+                            require_prestaged=True,
+                            replicate_start=dispatch_start,
+                            replicate_count=dispatch_count,
+                        )
+                        result = cli.batch_remote(
+                            br_config, jfr=job_jfr, stream_output=stream_output,
+                        )
             elif remote:
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
