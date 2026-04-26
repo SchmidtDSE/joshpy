@@ -9,15 +9,17 @@ This doc tracks josh-side changes needed by joshpy. Some are already shipped; ne
 | 1 | `preprocessBatch` absolute-path propagation | ✅ Merged |
 | 2 | `MinimalEngineBridge.getExternal` hardcoded `.jshd` extension | ✅ Merged |
 | 3 | Pod run-entrypoint missing `cd $WORK_DIR` before `java -jar` | ✅ Merged |
-| 4 | Pod entrypoint DNS readiness + `stageFromMinio` retry | ⬜ TODO¹ |
+| 4 | Pod entrypoint DNS readiness + `stageFromMinio` retry | ✅ Merged¹ |
 | 5 | `batchRemote` accepts `--custom-tag` and propagates to pod | ✅ Merged² |
 | 6 | `run` accepts `--replicate-start=K` + `JOSH_REPLICATE_OFFSET` env var in entrypoint | ✅ Merged² |
 
-¹ Fix 4 was not exercised deterministically during the [post-Fix-5/6 E2E retest](/tmp/e2e_reports/RETEST_AFTER_PR7.md) — none of the 11 dispatches happened to hit DNS flakiness. Recommend confirming via direct entrypoint inspection.
+All six fixes confirmed against JAR `dcfeb60c124beffcff8ed4d7dd245e2c8c24abe29fbcaf3d4caea9b23ffa4250` on 2026-04-26 (see [RETEST_AFTER_PR7.md](/tmp/e2e_reports/RETEST_AFTER_PR7.md)). Notes per fix:
 
-² Fixes 5 and 6 confirmed end-to-end on 2026-04-26 against JAR `dcfeb60c…`:
-- Fix 5: Test 7 verified `{run_hash}` resolves on pod after joshpy emits `--custom-tag run_hash=…` via `BatchRemoteConfig.custom_tags`.
-- Fix 6: Test 8 verified pool-policy dispatch with `replicate_start=2` produced output files at indices 2, 3, 4 (i.e., `JOSH_REPLICATE_OFFSET + JOB_COMPLETION_INDEX`).
+¹ Fix 4 verified by direct entrypoint inspection: `run-entrypoint.sh` and `preprocess-entrypoint.sh` both contain the 10× `getent hosts storage.googleapis.com` probe (2-second sleep between attempts) before invoking `stageFromMinio`, plus a 3-attempt retry around `stageFromMinio` with exponential backoff (5/10/15 s). The 11 E2E dispatches all succeeded without DNS hiccups; the retry path is wired regardless.
+
+² Fixes 5 and 6 verified end-to-end:
+- Fix 5: Test 7 confirmed `{run_hash}` resolves on pod after joshpy emits `--custom-tag run_hash=…` via `BatchRemoteConfig.custom_tags`. The pod entrypoint reads `JOSH_CUSTOM_TAGS` as **newline-delimited** entries (one `key=value` per line) — simpler than the originally-proposed JSON+jq approach and equivalent semantically; joshpy's emission (the `--custom-tag` CLI flag) is unaffected.
+- Fix 6: Test 8 confirmed pool-policy dispatch with `replicate_start=2` produced output files at indices 2, 3, 4 — pod entrypoint computes `REPLICATE_INDEX = JOB_COMPLETION_INDEX + JOSH_REPLICATE_OFFSET` and passes `--replicate-index` to the JAR.
 
 Fixes 1, 2, 3 are documented below for historical reference. Fixes 4–6 are the new asks driving this update.
 
