@@ -1836,6 +1836,89 @@ class TestBatchRemote(unittest.TestCase):
         cmd = mock_run.call_args[0][0]
         self.assertIn("--require-prestaged", cmd)
 
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_custom_tags_emitted(self, mock_run, _mock_jar):
+        """batch_remote() should emit --custom-tag name=value for each tag."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            custom_tags={"run_hash": "abcdef012345", "label": "exp-1"},
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        # Each tag becomes two adjacent args: "--custom-tag", "name=value"
+        self.assertIn("--custom-tag", cmd)
+        self.assertIn("run_hash=abcdef012345", cmd)
+        self.assertIn("label=exp-1", cmd)
+        # Sanity: two pairs for two tags
+        self.assertEqual(cmd.count("--custom-tag"), 2)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_custom_tags_empty_default_omitted(self, mock_run, _mock_jar):
+        """Empty custom_tags dict emits no --custom-tag flags."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertNotIn("--custom-tag", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_replicate_start(self, mock_run, _mock_jar):
+        """batch_remote() should emit --replicate-start=K when nonzero."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            replicate_start=7,
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--replicate-start=7", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_replicate_start_default_omitted(self, mock_run, _mock_jar):
+        """batch_remote() should omit --replicate-start when 0."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertFalse(any("--replicate-start" in c for c in cmd))
+
 
 class TestBatchRemoteConfig(unittest.TestCase):
     """Tests for BatchRemoteConfig dataclass."""

@@ -12,7 +12,11 @@ start simulation Main
   steps.low = 0 count
   steps.high = 5 count
 
-  exportFiles.patch = "minio://josh-batch-storage/e2e-test/pr5_output_{replicate}.csv"
+  # {run_hash} keys outputs by joshpy's deterministic 12-char hash so
+  # repeated runs of this fixture don't collide with each other on MinIO.
+  # Requires josh batchRemote --custom-tag passthrough (Fix 5) + joshpy
+  # auto-injecting run_hash via to_batch_remote_config (Item 4).
+  exportFiles.patch = "minio://josh-batch-storage/e2e-test/{run_hash}/pr5_output_{replicate}.csv"
 
 end simulation
 

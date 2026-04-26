@@ -484,6 +484,17 @@ class BatchRemoteConfig:
             ``minio_prefix`` reports ``complete``. Recommended for sweeps;
             ``run_sweep`` sets this to True by default via
             :func:`joshpy.jobs.to_batch_remote_config`.
+        custom_tags: Custom tags for template resolution (``--custom-tag
+            name=value``). Pods receive these via the runtime's custom-tag
+            propagation mechanism and resolve ``{name}`` references in
+            export paths. joshpy's :func:`joshpy.jobs.to_batch_remote_config`
+            auto-injects ``run_hash`` so users can write
+            ``exportFiles.patch = "minio://bucket/{run_hash}/output_{replicate}.csv"``
+            for deterministic per-simulation paths.
+        replicate_start: Offset added to each pod's replicate index. When K,
+            pods run as replicates K..K+replicates-1 (instead of 0..replicates-1).
+            Used by the pool collision policy to append new replicates to an
+            existing MinIO prefix without overwriting prior CSVs.
     """
 
     simulation: str
@@ -494,6 +505,8 @@ class BatchRemoteConfig:
     poll_interval: int | None = None
     timeout: int | None = None
     require_prestaged: bool = False
+    custom_tags: dict[str, str] = field(default_factory=dict)
+    replicate_start: int = 0
 
 
 @dataclass(frozen=True)
@@ -899,6 +912,10 @@ class JoshCLI:
             args.append(f"--timeout={config.timeout}")
         if config.require_prestaged:
             args.append("--require-prestaged")
+        if config.replicate_start > 0:
+            args.append(f"--replicate-start={config.replicate_start}")
+        for name, value in config.custom_tags.items():
+            args.extend(["--custom-tag", f"{name}={value}"])
 
         args.append(config.simulation)
 
