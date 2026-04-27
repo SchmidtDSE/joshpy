@@ -22,9 +22,9 @@ def assemble_batch_workdir(job: ExpandedJob, workdir: Path) -> Path:
     Layout::
 
         workdir/<run_hash>/
-          sim.josh            # symlink to job.source_path
-          config.jshc         # unique rendered config for this job (written)
-          <name>.jshd         # symlink per entry in job.file_mappings
+          sim.josh                    # symlink to job.source_path
+          <job.config_name>.jshc      # unique rendered config for this job (written)
+          <name>.jshd                 # symlink per entry in job.file_mappings
 
     Uses symlinks (not copies) to avoid disk duplication of large .jshd files;
     ``cli.stage_to_minio`` uploads via content reads and follows symlinks.
@@ -51,7 +51,7 @@ def assemble_batch_workdir(job: ExpandedJob, workdir: Path) -> Path:
         sim_link.unlink()
     os.symlink(job.source_path.resolve(), sim_link)
 
-    (target / "config.jshc").write_text(job.config_content)
+    (target / job.config_name).write_text(job.config_content)
 
     for name, path in job.file_mappings.items():
         # Preserve whichever suffix the source file actually has (.jshd

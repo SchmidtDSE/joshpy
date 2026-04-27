@@ -26,7 +26,10 @@ def _make_job(
     return ExpandedJob(
         config_content="rendered_jshc_placeholder",
         config_path=config_path,
-        config_name="sweep",
+        # Real ExpandedJobs come out of JobExpander with .jshc-suffixed
+        # config_name (jobs.py:1093). Mirror that here so staged-filename
+        # assertions reflect the real shape.
+        config_name="sweep_config.jshc",
         run_hash=run_hash,
         parameters={"p": 1},
         simulation="Main",
@@ -71,10 +74,44 @@ class TestAssembleBatchWorkdir(unittest.TestCase):
 
             target = assemble_batch_workdir(job, workdir)
 
-            jshc = target / "config.jshc"
+            jshc = target / job.config_name
             self.assertTrue(jshc.exists())
             self.assertFalse(jshc.is_symlink())
             self.assertEqual(jshc.read_text(), "rendered_jshc_placeholder")
+            # Regression: must NOT silently fall back to a hardcoded "config.jshc"
+            # when job.config_name is non-default. Pre-fix bug: the JAR's
+            # RunCommand would resolve `config sweep_config.<key>` references
+            # against an absent sweep_config.jshc and raise "Config value not
+            # found" mid-run.
+            if job.config_name != "config.jshc":
+                self.assertFalse((target / "config.jshc").exists())
+
+    def test_config_written_under_custom_config_name(self):
+        """Regression for batch staging using job.config_name (not hardcoded).
+
+        Models commonly leave JobConfig.config_name unset → JobExpander
+        defaults to ``sweep_config.jshc`` and the .josh references
+        ``config sweep_config.<key>``. Staging under hardcoded
+        ``config.jshc`` causes the pod to fail at "Config value not found"
+        because the JAR can't locate the named config file in /tmp/work.
+        """
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            workdir = tmp / "work"
+            workdir.mkdir()
+            job = _make_job(tmp)
+            # Override to a deliberately non-default name to lock the contract
+            # against any future regression that hardcodes a single filename.
+            object.__setattr__(job, "config_name", "my_special_config.jshc")
+
+            target = assemble_batch_workdir(job, workdir)
+
+            self.assertTrue((target / "my_special_config.jshc").exists())
+            self.assertEqual(
+                (target / "my_special_config.jshc").read_text(),
+                "rendered_jshc_placeholder",
+            )
+            self.assertFalse((target / "config.jshc").exists())
 
     def test_file_mappings_become_symlinks_with_jshd_suffix(self):
         with tempfile.TemporaryDirectory() as tmp_str:
@@ -192,7 +229,7 @@ class TestAssembleBatchWorkdir(unittest.TestCase):
             self.assertTrue((target / "sim.josh").is_symlink())
             self.assertTrue((target / "a.jshd").is_symlink())
             self.assertEqual(
-                (target / "config.jshc").read_text(), "rendered_jshc_placeholder",
+                (target / job.config_name).read_text(), "rendered_jshc_placeholder",
             )
 
 
