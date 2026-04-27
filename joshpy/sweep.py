@@ -976,7 +976,10 @@ def _load_ingest_replicates(
     loaded = 0
     skipped = 0
 
-    template_vars_base: dict[str, Any] = {"simulation": meta.simulation}
+    template_vars_base: dict[str, Any] = {
+        "simulation": meta.simulation,
+        "run_hash": meta.run_hash,
+    }
     if meta.config.parameters:
         template_vars_base.update(meta.config.parameters)
     if meta.label:

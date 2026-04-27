@@ -1122,6 +1122,61 @@ class TestIngestResults(unittest.TestCase):
         self.assertEqual(rows, 0)
         registry.close()
 
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_run_hash_template_resolves(self, mock_loader_cls):
+        """Path templates containing {run_hash} should resolve, not KeyError-skip.
+
+        Regression for the canonical pattern recommended in the team-handoff
+        doc: ``minio://bucket/{run_hash}/output_{replicate}.csv``. The JAR
+        substitutes {run_hash} on write; ingest must do the same on read.
+        """
+        from joshpy.sweep import ingest_results
+        from joshpy.cli import ExportFileInfo, ExportPaths
+
+        registry, _, _ = self._make_registry_with_run(replicates=2)
+
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 100
+        mock_loader_cls.return_value = mock_loader
+
+        mock_cli = MagicMock()
+        mock_cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="file:///tmp/{run_hash}/output_{replicate}.csv",
+                    protocol="file",
+                    host="",
+                    path="/tmp/{run_hash}/output_{replicate}.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={"organism": None, "patch": None, "agent": None, "disturbance": None},
+        )
+
+        # Pre-create the resolved CSVs at /tmp/abc123def456/output_{0,1}.csv
+        run_hash_dir = Path("/tmp/abc123def456")
+        run_hash_dir.mkdir(exist_ok=True)
+        try:
+            for rep in range(2):
+                (run_hash_dir / f"output_{rep}.csv").write_text(
+                    "step,replicate,val\n0,0,1.0\n"
+                )
+            ingest_results(mock_cli, registry, "test-label", quiet=True)
+            self.assertEqual(mock_loader.load_csv.call_count, 2)
+            # Verify the loader saw the actual run_hash-substituted path
+            for call in mock_loader.load_csv.call_args_list:
+                csv_arg = call.kwargs.get("csv_path") or call.args[0]
+                self.assertIn("abc123def456", str(csv_arg))
+        finally:
+            for rep in range(2):
+                (run_hash_dir / f"output_{rep}.csv").unlink(missing_ok=True)
+            run_hash_dir.rmdir()
+
+        registry.close()
+
     def test_unknown_label_raises(self):
         """ingest_results should raise KeyError for unknown label."""
         from joshpy.sweep import ingest_results
