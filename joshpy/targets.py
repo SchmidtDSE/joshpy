@@ -51,6 +51,7 @@ _TO_JSON: dict[str, str] = {
     "api_key": "apiKey",
     "timeout_seconds": "timeoutSeconds",
     "ttl_seconds_after_finished": "ttlSecondsAfterFinished",
+    "node_selector": "nodeSelector",
 }
 _FROM_JSON: dict[str, str] = {v: k for k, v in _TO_JSON.items()}
 
@@ -89,6 +90,13 @@ class KubernetesTargetConfig:
         timeout_seconds: Job timeout in seconds.
         ttl_seconds_after_finished: Auto-cleanup delay after job completes.
         spot: Use preemptible / spot nodes.
+        node_selector: K8s pod-spec ``nodeSelector`` map (label key -> value)
+            that constrains pods to nodes carrying matching labels. On GKE
+            Autopilot, set ``{"cloud.google.com/compute-class": "Balanced"}``
+            to access the Balanced compute class (up to 222 vCPU / 851 GiB
+            per pod vs the default class's 30 vCPU / 110 GiB cap). Layers
+            additively with ``spot``: setting both yields a Spot Balanced
+            pod (~60-90% cost savings on a high-memory class).
     """
 
     namespace: str
@@ -100,6 +108,7 @@ class KubernetesTargetConfig:
     timeout_seconds: int | None = None
     ttl_seconds_after_finished: int | None = None
     spot: bool = False
+    node_selector: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

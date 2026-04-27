@@ -57,6 +57,12 @@ class TestKubernetesTargetConfig(unittest.TestCase):
         self.assertIsNone(cfg.timeout_seconds)
         self.assertIsNone(cfg.ttl_seconds_after_finished)
         self.assertFalse(cfg.spot)
+        self.assertEqual(cfg.node_selector, {})
+
+    def test_node_selector_dict_isolation(self):
+        a = KubernetesTargetConfig(namespace="a", image="a")
+        b = KubernetesTargetConfig(namespace="b", image="b")
+        self.assertIsNot(a.node_selector, b.node_selector)
 
     def test_resources_dict_isolation(self):
         a = KubernetesTargetConfig(namespace="a", image="a")
@@ -145,11 +151,21 @@ class TestSerialization(unittest.TestCase):
             timeout_seconds=600,
             ttl_seconds_after_finished=3600,
             spot=True,
+            node_selector={"cloud.google.com/compute-class": "Balanced"},
         )
         json_dict = _to_json_dict(original)
+        self.assertIn("nodeSelector", json_dict)
+        self.assertNotIn("node_selector", json_dict)
         python_dict = _from_json_dict(json_dict)
         restored = KubernetesTargetConfig(**python_dict)
         self.assertEqual(restored, original)
+
+    def test_to_json_omits_empty_node_selector(self):
+        """Default empty node_selector should be omitted from JSON output."""
+        cfg = KubernetesTargetConfig(namespace="ns", image="img")
+        d = _to_json_dict(cfg)
+        self.assertNotIn("nodeSelector", d)
+        self.assertNotIn("node_selector", d)
 
 
 # -----------------------------------------------------------------------
@@ -216,6 +232,38 @@ class TestSaveLoadTarget(unittest.TestCase):
                 self.assertEqual(loaded.target_type, "kubernetes")
                 self.assertEqual(loaded.kubernetes, original.kubernetes)
                 self.assertEqual(loaded.minio_endpoint, original.minio_endpoint)
+
+    def test_roundtrip_k8s_with_node_selector(self):
+        """nodeSelector survives the save/load filesystem roundtrip."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("joshpy.targets.TARGETS_DIR", Path(tmpdir)):
+                original = TargetProfile(
+                    target_type="kubernetes",
+                    kubernetes=KubernetesTargetConfig(
+                        namespace="joshsim",
+                        image="ghcr.io/schmidtdse/joshsim:latest",
+                        spot=True,
+                        node_selector={
+                            "cloud.google.com/compute-class": "Balanced",
+                        },
+                    ),
+                )
+                save_target("gke-balanced", original)
+
+                # Sanity-check the on-disk JSON uses camelCase
+                import json
+                raw = json.loads((Path(tmpdir) / "gke-balanced.json").read_text())
+                self.assertIn(
+                    "nodeSelector", raw["kubernetes"],
+                    "JSON must use the camelCase JAR-shared key",
+                )
+
+                loaded = load_target("gke-balanced")
+                self.assertEqual(
+                    loaded.kubernetes.node_selector,
+                    {"cloud.google.com/compute-class": "Balanced"},
+                )
+                self.assertTrue(loaded.kubernetes.spot)
 
     def test_roundtrip_minio_creds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
