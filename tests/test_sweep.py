@@ -913,6 +913,34 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
                 manager.cleanup()
                 manager.close()
 
+    def test_with_label_stamps_expanded_job(self):
+        """with_label() must stamp ExpandedJob.label *and* custom_tags['label'].
+
+        Regression: Path-2 ingest (manager.load_results → load_job_results →
+        _load_job_results_minio) builds _IngestMetadata from job.label. If
+        with_label() only updated custom_tags, that path silently dropped
+        {label} substitutions and skipped every replicate.
+        """
+        config = JobConfig(
+            template_string="maxGrowth = 50 meters",
+            simulation="Main",
+        )
+
+        manager = (
+            SweepManagerBuilder(config)
+            .with_registry(":memory:", experiment_name="test")
+            .with_label("smoke-test")
+            .build()
+        )
+
+        try:
+            job = manager.job_set.jobs[0]
+            self.assertEqual(job.label, "smoke-test")
+            self.assertEqual(job.custom_tags.get("label"), "smoke-test")
+        finally:
+            manager.cleanup()
+            manager.close()
+
     def test_with_label_multi_job_raises(self):
         """with_label() should raise for multi-job sweeps."""
         config = JobConfig(
@@ -1120,6 +1148,78 @@ class TestIngestResults(unittest.TestCase):
 
         rows = ingest_results(mock_cli, registry, "test-label", quiet=True)
         self.assertEqual(rows, 0)
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_label_template_resolves_via_custom_tags(self, mock_loader_cls):
+        """Path-2 (job-aware) ingest threads job.custom_tags through metadata.
+
+        Regression: meta.custom_tags is the only carrier for label / arbitrary
+        custom tags when the path-2 loader builds _IngestMetadata from a job
+        rather than the registry. Without it, paths like {label}/output_*.csv
+        skip every replicate even when the JAR substituted {label} on write.
+        """
+        from joshpy.sweep import (
+            _IngestMetadata, _load_ingest_replicates,
+        )
+        from joshpy.cli import ExportFileInfo, ExportPaths
+        from types import SimpleNamespace
+
+        registry, _, run_id = self._make_registry_with_run(replicates=2)
+
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 100
+        mock_loader_cls.return_value = mock_loader
+
+        export_paths = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw="file:///tmp/{label}/output_{replicate}.csv",
+                    protocol="file",
+                    host="",
+                    path="/tmp/{label}/output_{replicate}.csv",
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={"organism": None, "patch": None, "agent": None, "disturbance": None},
+        )
+
+        # Simulate a job-aware ingest (Path 2): label arrives via custom_tags,
+        # not via meta.label or meta.config.parameters.
+        meta = _IngestMetadata(
+            run_hash="abc123def456",
+            config=SimpleNamespace(parameters={}),
+            simulation="Main",
+            total_replicates=2,
+            label=None,
+            custom_tags={"label": "smoke-test", "run_hash": "abc123def456"},
+        )
+
+        label_dir = Path("/tmp/smoke-test")
+        label_dir.mkdir(exist_ok=True)
+        try:
+            for rep in range(2):
+                (label_dir / f"output_{rep}.csv").write_text(
+                    "step,replicate,val\n0,0,1.0\n"
+                )
+            _load_ingest_replicates(
+                registry, export_paths, "/tmp/{label}/output_{replicate}.csv",
+                is_minio=False, download=False, bucket="", dl_dir=None,
+                meta=meta, run_id=run_id,
+                export_type="patch", quiet=True,
+            )
+            self.assertEqual(mock_loader.load_csv.call_count, 2)
+            for call in mock_loader.load_csv.call_args_list:
+                csv_arg = call.kwargs.get("csv_path") or call.args[0]
+                self.assertIn("smoke-test", str(csv_arg))
+        finally:
+            for rep in range(2):
+                (label_dir / f"output_{rep}.csv").unlink(missing_ok=True)
+            label_dir.rmdir()
+
         registry.close()
 
     @patch("joshpy.sweep.CellDataLoader")
