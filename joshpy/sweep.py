@@ -649,14 +649,13 @@ def _load_job_results_minio(
         download=False, output_dir=None, minio_bucket=None, quiet=quiet,
     )
 
-    # _load_ingest_replicates only reads meta.config.parameters to enrich
-    # path-template variables; job.parameters carries the same values.
     meta = _IngestMetadata(
         run_hash=job.run_hash,
         config=SimpleNamespace(parameters=job.parameters),
         simulation=job.simulation,
         total_replicates=job.replicates,
         label=job.label,
+        custom_tags=dict(job.custom_tags),
     )
 
     return _load_ingest_replicates(
@@ -827,6 +826,7 @@ class _IngestMetadata:
     simulation: str
     total_replicates: int
     label: str | None
+    custom_tags: dict[str, str] | None = None
 
 
 def _resolve_ingest_metadata(
@@ -976,10 +976,11 @@ def _load_ingest_replicates(
     loaded = 0
     skipped = 0
 
-    template_vars_base: dict[str, Any] = {
-        "simulation": meta.simulation,
-        "run_hash": meta.run_hash,
-    }
+    template_vars_base: dict[str, Any] = {}
+    if meta.custom_tags:
+        template_vars_base.update(meta.custom_tags)
+    template_vars_base["simulation"] = meta.simulation
+    template_vars_base["run_hash"] = meta.run_hash
     if meta.config.parameters:
         template_vars_base.update(meta.config.parameters)
     if meta.label:
@@ -2029,9 +2030,7 @@ class SweepManagerBuilder:
                         force=self._label_force,
                         on_collision=self._label_on_collision,
                     )
-                    # Ensure the custom tag matches the effective label
-                    # (with_label() may override what JobConfig.label set
-                    # during expansion).
+                    job_set.jobs[0].label = effective_label
                     job_set.jobs[0].custom_tags["label"] = effective_label
 
         # Register with catalog if configured
