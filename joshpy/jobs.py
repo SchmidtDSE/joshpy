@@ -52,6 +52,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import shutil
+import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -760,6 +761,149 @@ class SweepConfig:
         )
 
 
+# --- Grid-aware declarative jobs.yaml support -------------------------------
+#
+# A grid-aware ``jobs.yaml`` describes a run/sweep by *referencing* a
+# ``grid.yaml`` (+ scenario) instead of hand-wiring ``file_mappings`` and grid
+# ``template_vars`` in Python. The composition below is the generic glue every
+# joshpy project would otherwise repeat; the model-specific variable names stay
+# in the project's ``.jshc.j2`` template as declarations. See
+# ``JOSHPY_GRID_CONFIG_FEATURE.md`` for the design.
+
+# Keys that drive dispatch/orchestration (SweepManager-level), not JobConfig.
+# They are recognized but not consumed when building a JobConfig.
+_GRID_JOBS_ORCHESTRATION_KEYS = frozenset(
+    {"registry", "experiment", "label", "target", "collision_policy"}
+)
+
+# JobConfig path-bearing keys resolved relative to the jobs.yaml directory.
+_GRID_JOBS_PATH_KEYS = (
+    "source_path",
+    "source_template_path",
+    "template_path",
+    "config_path",
+)
+
+
+def _normalize_sweep_block(sweep_block: Any) -> dict[str, Any] | None:
+    """Normalize a jobs.yaml ``sweep:`` block into a ``SweepConfig`` dict.
+
+    Accepts either the shorthand mapping form ``{param: [values], ...}`` or the
+    full ``SweepConfig`` dict form (``config_parameters``/``file_parameters``/
+    ``compound_parameters``/``parameters``/``strategy``). The shorthand expands
+    to ``config_parameters``; values may be a list, scalar, or range dict (the
+    same forms ``ConfigSweepParameter`` already accepts).
+    """
+    if sweep_block is None:
+        return None
+    if not isinstance(sweep_block, dict):
+        raise ValueError("'sweep' must be a mapping")
+
+    structured_keys = {
+        "config_parameters",
+        "file_parameters",
+        "compound_parameters",
+        "parameters",
+        "strategy",
+    }
+    if any(k in sweep_block for k in structured_keys):
+        # Full SweepConfig dict form — pass through to SweepConfig.from_dict.
+        return dict(sweep_block)
+
+    # Shorthand: {param: values}. ConfigSweepParameter normalizes the values.
+    return {
+        "config_parameters": [
+            {"name": name, "values": values} for name, values in sweep_block.items()
+        ]
+    }
+
+
+def _resolve_grid_jobs_spec(data: dict[str, Any], base_dir: Path) -> dict[str, Any]:
+    """Translate a grid-aware ``jobs.yaml`` mapping into ``JobConfig.from_dict`` keys.
+
+    When ``grid:`` is present, loads the referenced :class:`~joshpy.grid.GridSpec`
+    and resolves:
+
+    - ``scenario:`` scalar -> ``file_mappings`` via ``GridSpec.file_mappings_for``;
+      list -> a ``variant_sweep`` compound parameter over the ``scenario`` axis.
+    - grid ``template_vars`` (geometry) merged *under* any explicit ``template_vars``.
+    - ``model:`` / ``config:`` friendly aliases routed to ``source_*`` / config keys
+      by extension (``.j2`` -> template form).
+    - ``sweep:`` shorthand (see :func:`_normalize_sweep_block`).
+    - default ``simulation`` from the grid name.
+
+    Paths are resolved relative to *base_dir* (the jobs.yaml file's directory).
+    Resolved ``file_mappings`` are validated to exist. Orchestration keys
+    (registry/experiment/label/target/collision_policy) are dropped — they belong
+    to the dispatch layer, not the JobConfig.
+    """
+    from joshpy.grid import GridSpec
+
+    out: dict[str, Any] = dict(data)
+
+    grid_path = (base_dir / out.pop("grid")).resolve()
+    grid = GridSpec.from_yaml(grid_path)
+
+    scenario = out.pop("scenario", None)
+    model = out.pop("model", None)
+    config_ref = out.pop("config", None)
+    for key in _GRID_JOBS_ORCHESTRATION_KEYS:
+        out.pop(key, None)
+
+    # model:/config: friendly aliases -> standard keys, routed by extension.
+    if model is not None:
+        model_path = base_dir / model
+        key = "source_template_path" if str(model_path).endswith(".j2") else "source_path"
+        out[key] = str(model_path)
+    if config_ref is not None:
+        config_path = base_dir / config_ref
+        key = "template_path" if str(config_path).endswith(".j2") else "config_path"
+        out[key] = str(config_path)
+
+    # Resolve any path-bearing key relative to the jobs.yaml directory.
+    for key in _GRID_JOBS_PATH_KEYS:
+        if key in out and out[key] is not None:
+            out[key] = str((base_dir / out[key]).resolve())
+
+    # template_vars: grid geometry merged UNDER explicit user vars (user wins).
+    out["template_vars"] = {**grid.template_vars, **(out.get("template_vars") or {})}
+
+    # scenario: scalar -> file_mappings_for; list -> variant_sweep compound param.
+    variant_compound = None
+    if scenario is None:
+        file_mappings = grid.file_mappings
+    elif isinstance(scenario, (list, tuple)):
+        file_mappings = grid.file_mappings
+        variant_compound = grid.variant_sweep(axis="scenario", values=list(scenario))
+    else:
+        file_mappings = grid.file_mappings_for(scenario=scenario)
+
+    # Explicit file_mappings in the YAML extend/override grid-derived ones.
+    for name, value in (out.get("file_mappings") or {}).items():
+        file_mappings[name] = (base_dir / value).resolve()
+
+    missing = sorted(name for name, p in file_mappings.items() if not Path(p).exists())
+    if missing:
+        detail = ", ".join(f"{name} -> {file_mappings[name]}" for name in missing)
+        raise FileNotFoundError(
+            f"grid-aware jobs.yaml references data files that do not exist: {detail}"
+        )
+    out["file_mappings"] = {name: str(p) for name, p in file_mappings.items()}
+
+    # sweep: shorthand or full dict; inject the scenario variant sweep if present.
+    sweep_dict = _normalize_sweep_block(out.pop("sweep", None))
+    if variant_compound is not None:
+        sweep_dict = sweep_dict or {}
+        sweep_dict.setdefault("compound_parameters", []).append(variant_compound.to_dict())
+    if sweep_dict is not None:
+        out["sweep"] = sweep_dict
+
+    # Default simulation from the grid name (overridable).
+    out.setdefault("simulation", grid.name)
+
+    return out
+
+
 @dataclass
 class JobConfig:
     """Configuration for a job (may be template for expansion).
@@ -951,10 +1095,21 @@ class JobConfig:
 
     @classmethod
     def from_yaml_file(cls, path: Path) -> JobConfig:
-        """Load from YAML file."""
+        """Load from YAML file.
+
+        When the YAML contains a ``grid:`` key it is treated as a *grid-aware*
+        declarative job spec: joshpy loads the referenced ``GridSpec`` and
+        resolves ``file_mappings`` + grid ``template_vars`` automatically (see
+        :func:`_resolve_grid_jobs_spec`), with paths resolved relative to the
+        YAML file's directory. Without ``grid:`` the file is parsed as a plain
+        ``JobConfig`` mapping, exactly as before (backward compatible).
+        """
         _check_yaml()
+        path = Path(path)
         with open(path) as f:
             data = yaml.safe_load(f)
+        if isinstance(data, dict) and "grid" in data:
+            data = _resolve_grid_jobs_spec(data, path.parent.resolve())
         return cls.from_dict(data)
 
     def save_yaml(self, path: Path) -> None:
@@ -2268,3 +2423,119 @@ def run_sweep(
             import shutil
 
             shutil.rmtree(sweep_workdir, ignore_errors=True)
+
+
+# --- Preview CLI: ``python -m joshpy.jobs <jobs.yaml>`` ----------------------
+
+
+def _preview_jobs_yaml(path: Path, *, detailed: bool = False) -> str:
+    """Build a human-readable preview of a (grid-aware) jobs.yaml.
+
+    Loads the spec via :meth:`JobConfig.from_yaml_file`, computes the parameter
+    combinations *without* rendering templates or writing files, and summarizes
+    the binding. Pure/read-only — it does not dispatch anything.
+    """
+    _check_yaml()
+    path = Path(path)
+    raw = yaml.safe_load(path.read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path}: expected a YAML mapping")
+
+    config = JobConfig.from_yaml_file(path)
+
+    # Parameter combinations without side effects (no Jinja, no temp dirs).
+    try:
+        combos = config.sweep.expand() if config.sweep else [{}]
+        n_jobs: int | None = len(combos)
+    except (RuntimeError, ValueError):
+        # Adaptive strategies don't have an upfront count.
+        combos = []
+        n_jobs = None
+
+    lines: list[str] = []
+    lines.append(f"jobs.yaml: {path}")
+    if "grid" in raw:
+        lines.append(f"  grid:       {raw['grid']}")
+        if raw.get("scenario") is not None:
+            lines.append(f"  scenario:   {raw['scenario']}")
+    lines.append(f"  simulation: {config.simulation}")
+    lines.append(f"  replicates: {config.replicates}")
+
+    if n_jobs is None:
+        lines.append("  jobs:       (adaptive — determined at runtime)")
+    else:
+        lines.append(f"  jobs:       {n_jobs}  ({n_jobs * config.replicates} total runs)")
+
+    if config.file_mappings:
+        lines.append("  file_mappings:")
+        for name in sorted(config.file_mappings):
+            p = Path(config.file_mappings[name])
+            flag = "" if p.exists() else "  [MISSING]"
+            lines.append(f"    {name}: {p}{flag}")
+
+    if config.sweep:
+        sweep = config.sweep
+        if sweep.config_parameters:
+            params = ", ".join(f"{p.name}({len(p.values)})" for p in sweep.config_parameters)
+            lines.append(f"  sweep params:    {params}")
+        if sweep.file_parameters:
+            params = ", ".join(f"{p.name}({len(p.paths)})" for p in sweep.file_parameters)
+            lines.append(f"  sweep files:     {params}")
+        if sweep.compound_parameters:
+            params = ", ".join(f"{p.name}({len(p)})" for p in sweep.compound_parameters)
+            lines.append(f"  sweep compound:  {params}")
+
+    # Echo orchestration keys without acting on them — these drive dispatch
+    # (SweepManager / a future ``python -m joshpy.run``), not the JobConfig.
+    run_settings = {k: raw[k] for k in _GRID_JOBS_ORCHESTRATION_KEYS if k in raw}
+    if run_settings:
+        lines.append("  run settings (not executed):")
+        for key in sorted(run_settings):
+            lines.append(f"    {key}: {run_settings[key]}")
+
+    if detailed and combos:
+        lines.append("  expanded jobs:")
+        for i, combo in enumerate(combos):
+            lines.append(f"    [{i:>3}] {dict(combo)}")
+
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: preview/expand a grid-aware ``jobs.yaml``.
+
+    Usage::
+
+        python -m joshpy.jobs <jobs.yaml> [--detailed]
+
+    Loads the spec, resolves the grid binding, and prints the expansion summary.
+    It does NOT run anything — dispatch stays with ``SweepManager``.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m joshpy.jobs",
+        description="Preview a grid-aware jobs.yaml: resolve the grid binding and "
+        "print the expansion summary. Does not dispatch any jobs.",
+    )
+    parser.add_argument("jobs_yaml", type=Path, help="Path to a jobs.yaml spec.")
+    parser.add_argument(
+        "--detailed",
+        action="store_true",
+        help="List each expanded job's parameter combination.",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.jobs_yaml.exists():
+        parser.error(f"file not found: {args.jobs_yaml}")
+
+    try:
+        print(_preview_jobs_yaml(args.jobs_yaml, detailed=args.detailed))
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

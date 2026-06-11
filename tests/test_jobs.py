@@ -29,6 +29,9 @@ from joshpy.jobs import (
     to_run_remote_config,
     run_sweep,
     discover_jshd_files,
+    _normalize_sweep_block,
+    _preview_jobs_yaml,
+    main as jobs_main,
 )
 from joshpy.strategies import SweepExecutionError
 
@@ -2875,6 +2878,291 @@ class TestRunSweepBatchRemote(unittest.TestCase):
             # Sweep should report success despite the ingest failure
             self.assertEqual(result.succeeded, 1)
             self.assertEqual(result.failed, 0)
+
+
+class TestNormalizeSweepBlock(unittest.TestCase):
+    """Tests for _normalize_sweep_block (jobs.yaml sweep shorthand)."""
+
+    def test_none_returns_none(self):
+        self.assertIsNone(_normalize_sweep_block(None))
+
+    def test_shorthand_mapping_expands_to_config_parameters(self):
+        result = _normalize_sweep_block({"fireYear": [50, 75, 100], "k": [1, 2]})
+        names = {p["name"]: p["values"] for p in result["config_parameters"]}
+        self.assertEqual(names, {"fireYear": [50, 75, 100], "k": [1, 2]})
+
+    def test_full_sweepconfig_dict_passes_through(self):
+        full = {"config_parameters": [{"name": "a", "values": [1, 2]}]}
+        self.assertEqual(_normalize_sweep_block(full), full)
+
+    def test_non_mapping_raises(self):
+        with self.assertRaises(ValueError):
+            _normalize_sweep_block([1, 2, 3])
+
+    def test_shorthand_scalar_value(self):
+        # A scalar shorthand value is accepted (ConfigSweepParameter normalizes it).
+        result = _normalize_sweep_block({"patchSizeMeters": 30})
+        cfg = SweepConfig.from_dict(result)
+        self.assertEqual(cfg.config_parameters[0].values, [30])
+
+
+class TestGridAwareJobsYaml(unittest.TestCase):
+    """Tests for grid-aware JobConfig.from_yaml_file (declarative jobs.yaml)."""
+
+    GRID_YAML = """
+name: dev_fine
+grid:
+  size_m: 30
+  low: [33.9, -116.05]
+  high: [33.91, -116.04]
+  steps: 12
+variants:
+  scenario:
+    values: [ssp245, ssp370]
+    default: ssp245
+files:
+  cover:
+    path: cover.jshd
+    units: ""
+  futureTemp:
+    template_path: 'tas_{scenario}.jshd'
+    units: degC
+"""
+
+    def _make_project(self, tmp: Path) -> Path:
+        """Create a minimal grid + model/config templates. Returns the dir."""
+        for fname in ("cover.jshd", "tas_ssp245.jshd", "tas_ssp370.jshd"):
+            (tmp / fname).write_text("data")
+        (tmp / "grid.yaml").write_text(self.GRID_YAML)
+        (tmp / "model.josh.j2").write_text("simulation X { steps = {{ steps }} }")
+        (tmp / "config.jshc.j2").write_text("config c { patch = {{ size_m }} m }")
+        return tmp
+
+    def _write_jobs(self, tmp: Path, body: str, name: str = "jobs.yaml") -> Path:
+        path = tmp / name
+        path.write_text(body)
+        return path
+
+    def test_scalar_scenario_resolves_file_mappings(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: ssp370\n"
+                "model: model.josh.j2\n"
+                "config: config.jshc.j2\n"
+            ))
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertEqual(Path(cfg.file_mappings["cover"]).name, "cover.jshd")
+            # template_path file resolved with the chosen scenario value
+            self.assertEqual(Path(cfg.file_mappings["futureTemp"]).name, "tas_ssp370.jshd")
+
+    def test_grid_template_vars_merged(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: ssp245\n"
+                "template_vars:\n"
+                "  custom: 7\n"
+            ))
+            cfg = JobConfig.from_yaml_file(jobs)
+            # grid geometry present...
+            self.assertEqual(cfg.template_vars["size_m"], 30)
+            self.assertEqual(cfg.template_vars["steps"], 12)
+            # ...and the explicit user var is preserved.
+            self.assertEqual(cfg.template_vars["custom"], 7)
+
+    def test_explicit_template_vars_override_grid(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "template_vars:\n"
+                "  size_m: 999\n"
+            ))
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertEqual(cfg.template_vars["size_m"], 999)
+
+    def test_list_scenario_builds_variant_sweep(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: [ssp245, ssp370]\n"
+                "sweep:\n"
+                "  fireYear: [50, 75]\n"
+            ))
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertEqual(len(cfg.sweep.compound_parameters), 1)
+            self.assertEqual(cfg.sweep.compound_parameters[0].name, "scenario")
+            self.assertEqual(len(cfg.sweep.compound_parameters[0]), 2)
+            # cartesian: 2 scenarios x 2 fireYear values
+            self.assertEqual(len(cfg.sweep.expand()), 4)
+
+    def test_sweep_shorthand(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: ssp245\n"
+                "sweep:\n"
+                "  fireYear: [50, 75, 100]\n"
+            ))
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertEqual([p.name for p in cfg.sweep.config_parameters], ["fireYear"])
+            self.assertEqual(len(cfg.sweep.expand()), 3)
+
+    def test_model_config_extension_routing(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            (tmp / "raw.jshc").write_text("config c {}")
+            (tmp / "raw.josh").write_text("simulation X {}")
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: ssp245\n"
+                "model: model.josh.j2\n"
+                "config: config.jshc.j2\n"
+            ))
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertIsNotNone(cfg.source_template_path)
+            self.assertIsNone(cfg.source_path)
+            self.assertIsNotNone(cfg.template_path)
+            self.assertIsNone(cfg.config_path)
+
+            jobs_raw = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: ssp245\n"
+                "model: raw.josh\n"
+                "config: raw.jshc\n"
+            ), name="jobs_raw.yaml")
+            cfg_raw = JobConfig.from_yaml_file(jobs_raw)
+            self.assertIsNotNone(cfg_raw.source_path)
+            self.assertIsNone(cfg_raw.source_template_path)
+            self.assertIsNotNone(cfg_raw.config_path)
+            self.assertIsNone(cfg_raw.template_path)
+
+    def test_default_simulation_from_grid_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, "grid: grid.yaml\nscenario: ssp245\n")
+            self.assertEqual(JobConfig.from_yaml_file(jobs).simulation, "dev_fine")
+
+    def test_explicit_simulation_overrides_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(
+                tmp, "grid: grid.yaml\nscenario: ssp245\nsimulation: MyModel\n"
+            )
+            self.assertEqual(JobConfig.from_yaml_file(jobs).simulation, "MyModel")
+
+    def test_paths_resolved_relative_to_yaml_dir(self):
+        # jobs.yaml in a subdir referencing the grid one level up.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            subdir = tmp / "specs"
+            subdir.mkdir()
+            jobs = self._write_jobs(subdir, (
+                "grid: ../grid.yaml\n"
+                "scenario: ssp245\n"
+                "model: ../model.josh.j2\n"
+            ))
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertTrue(Path(cfg.file_mappings["cover"]).exists())
+            self.assertTrue(Path(cfg.source_template_path).exists())
+
+    def test_missing_data_file_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: ssp245\n"
+                "file_mappings:\n"
+                "  extra: does_not_exist.jshd\n"
+            ))
+            with self.assertRaises(FileNotFoundError):
+                JobConfig.from_yaml_file(jobs)
+
+    def test_orchestration_keys_dropped_from_jobconfig(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = self._make_project(Path(d))
+            jobs = self._write_jobs(tmp, (
+                "grid: grid.yaml\n"
+                "scenario: ssp245\n"
+                "registry: experiments/dev.duckdb\n"
+                "target: local\n"
+                "collision_policy: pool\n"
+            ))
+            # Should not raise (orchestration keys are not JobConfig fields).
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertEqual(cfg.simulation, "dev_fine")
+
+    def test_backward_compat_no_grid(self):
+        # YAML without grid: behaves exactly as before.
+        with tempfile.TemporaryDirectory() as d:
+            jobs = Path(d) / "plain.yaml"
+            jobs.write_text(
+                "simulation: Forest\nreplicates: 3\ntemplate_string: 'config c {}'\n"
+            )
+            cfg = JobConfig.from_yaml_file(jobs)
+            self.assertEqual(cfg.simulation, "Forest")
+            self.assertEqual(cfg.replicates, 3)
+            self.assertEqual(cfg.file_mappings, {})
+
+
+class TestJobsPreviewCli(unittest.TestCase):
+    """Tests for the python -m joshpy.jobs preview CLI."""
+
+    def _make_jobs(self, tmp: Path) -> Path:
+        for fname in ("cover.jshd", "tas_ssp245.jshd", "tas_ssp370.jshd"):
+            (tmp / fname).write_text("data")
+        (tmp / "grid.yaml").write_text(TestGridAwareJobsYaml.GRID_YAML)
+        jobs = tmp / "jobs.yaml"
+        jobs.write_text(
+            "grid: grid.yaml\n"
+            "scenario: [ssp245, ssp370]\n"
+            "replicates: 5\n"
+            "sweep:\n"
+            "  fireYear: [50, 75, 100]\n"
+            "registry: experiments/dev.duckdb\n"
+            "target: local\n"
+        )
+        return jobs
+
+    def test_preview_summary(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = self._make_jobs(Path(d))
+            out = _preview_jobs_yaml(jobs)
+            self.assertIn("simulation: dev_fine", out)
+            # 3 fireYear x 2 scenario = 6 jobs, x5 replicates = 30 runs
+            self.assertIn("jobs:       6", out)
+            self.assertIn("30 total runs", out)
+            self.assertIn("fireYear(3)", out)
+            self.assertIn("scenario(2)", out)
+            # orchestration keys echoed, not executed
+            self.assertIn("run settings (not executed)", out)
+            self.assertIn("target: local", out)
+
+    def test_preview_detailed_lists_jobs(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = self._make_jobs(Path(d))
+            out = _preview_jobs_yaml(jobs, detailed=True)
+            self.assertIn("expanded jobs:", out)
+            self.assertIn("fireYear", out)
+
+    def test_main_returns_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            jobs = self._make_jobs(Path(d))
+            self.assertEqual(jobs_main([str(jobs)]), 0)
+
+    def test_main_missing_data_file_returns_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "grid.yaml").write_text(TestGridAwareJobsYaml.GRID_YAML)
+            # no .jshd files created -> resolution should fail
+            jobs = tmp / "jobs.yaml"
+            jobs.write_text("grid: grid.yaml\nscenario: ssp245\n")
+            self.assertEqual(jobs_main([str(jobs)]), 1)
 
 
 if __name__ == '__main__':
