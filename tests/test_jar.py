@@ -218,5 +218,48 @@ class TestConvenienceFunctions(unittest.TestCase):
             self.assertEqual(result, local_jar)
 
 
+class TestJarCli(unittest.TestCase):
+    """Tests for the `python -m joshpy.jar` CLI."""
+
+    def _result(self, **kw):
+        defaults = dict(
+            jar_path=Path("x.jar"), success=True, was_updated=False,
+            old_hash=None, new_hash=None, old_version="1.0", new_version="1.0",
+            error=None,
+        )
+        defaults.update(kw)
+        return DownloadResult(**defaults)
+
+    def test_help_exits_zero(self):
+        from joshpy.jar.__main__ import main
+        with self.assertRaises(SystemExit) as cm:
+            main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_success_returns_zero(self):
+        from joshpy.jar.__main__ import main
+        fake = {
+            JarMode.PROD: self._result(was_updated=True, old_version="1.0", new_version="1.1"),
+            JarMode.DEV: self._result(was_updated=False, new_version="2.0"),
+        }
+        with patch("joshpy.jar.__main__.download_jars", return_value=fake) as dj:
+            rc = main([])
+        self.assertEqual(rc, 0)
+        dj.assert_called_once()
+
+    def test_force_flag_forwarded(self):
+        from joshpy.jar.__main__ import main
+        with patch("joshpy.jar.__main__.download_jars", return_value={}) as dj:
+            main(["--force"])
+        self.assertTrue(dj.call_args.kwargs["force"])
+
+    def test_failed_download_returns_one(self):
+        from joshpy.jar.__main__ import main
+        fake = {JarMode.PROD: self._result(success=False, error="boom")}
+        with patch("joshpy.jar.__main__.download_jars", return_value=fake):
+            rc = main([])
+        self.assertEqual(rc, 1)
+
+
 if __name__ == '__main__':
     unittest.main()

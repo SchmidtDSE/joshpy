@@ -904,3 +904,63 @@ def unbottle(
                 file_mappings=file_mappings,
             )
         ]
+
+
+# --- CLI: ``python -m joshpy.bottle`` ---------------------------------------
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: create a reproducible bottle archive from a registry run.
+
+    Usage::
+
+        python -m joshpy.bottle <registry.duckdb> <label_or_hash> \\
+            [--omit-jshd] [--output-dir DIR] [--jar-mode {DEV,PROD,LOCAL}]
+
+    Mirrors the ``python -m joshpy.{inspect,debug,jfr}`` module-CLI convention so
+    downstream projects don't need a wrapper script.
+    """
+    import argparse
+
+    from joshpy.cli import JoshCLI
+    from joshpy.jar import JarMode
+    from joshpy.registry import RunRegistry
+
+    parser = argparse.ArgumentParser(
+        prog="python -m joshpy.bottle",
+        description="Create a reproducible bottle archive from a registry run.",
+    )
+    parser.add_argument("registry", type=Path, help="Path to the DuckDB registry.")
+    parser.add_argument("label_or_hash", help="Run label or run_hash to bottle.")
+    parser.add_argument(
+        "--omit-jshd", action="store_true", help="Exclude .jshd data files."
+    )
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("bottles"), help="Output directory."
+    )
+    parser.add_argument(
+        "--jar-mode", default="DEV", choices=[m.name for m in JarMode]
+    )
+    args = parser.parse_args(argv)
+
+    if not args.registry.exists():
+        print(f"Registry not found: {args.registry}", file=sys.stderr)
+        return 1
+
+    registry = RunRegistry(str(args.registry))
+    try:
+        archive = registry.bottle(
+            label_or_hash=args.label_or_hash,
+            output_dir=args.output_dir,
+            cli=JoshCLI(josh_jar=JarMode[args.jar_mode]),
+            omit_jshd=args.omit_jshd,
+        )
+    finally:
+        registry.close()
+
+    print(f"Bottle created: {archive}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

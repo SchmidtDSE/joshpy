@@ -46,8 +46,10 @@ JAR_URLS = {
 }
 
 # Default jar directory (relative to joshpy package, i.e., repo root)
-# This ensures JARs are always downloaded to the same location regardless of cwd
-_PACKAGE_DIR = Path(__file__).parent
+# This ensures JARs are always downloaded to the same location regardless of cwd.
+# This module lives at joshpy/jar/_core.py, so the joshpy package dir is two
+# parents up; DEFAULT_JAR_DIR is its sibling `jar/` at the repo root.
+_PACKAGE_DIR = Path(__file__).parent.parent
 DEFAULT_JAR_DIR = _PACKAGE_DIR.parent / "jar"
 
 # Default jar filenames
