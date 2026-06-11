@@ -296,6 +296,138 @@ class GridSpec:
                 labels=labels,
             )
 
+    def _referenced_axes(self, template_path: str) -> list[str]:
+        """Variant axis names referenced as ``{axis}`` in a template path."""
+        return [ax for ax in self.variants if "{" + ax + "}" in template_path]
+
+    def to_summary_dict(self) -> dict[str, Any]:
+        """Structured overview of the grid for display/inspection.
+
+        Captures geometry, variant axes (values + default), and the external-data
+        inventory with each file's resolved path(s) and whether they exist on
+        disk. Templated files are expanded across the variant values they
+        reference, so you can see exactly which preprocessed `.jshd` files are
+        available. Pure read-only (only stats files for existence).
+
+        Returns:
+            A JSON-serializable dict (see :meth:`describe` for a human view).
+        """
+        files_out: list[dict[str, Any]] = []
+        for josh_name, info in sorted(self.files.items()):
+            units = info.get("units", "")
+            if "template_path" in info:
+                template = info["template_path"]
+                axes = self._referenced_axes(template)
+                defaults = {k: v["default"] for k, v in self.variants.items()}
+                value_lists = [self.variants[ax]["values"] for ax in axes]
+                instances: list[dict[str, Any]] = []
+                for combo in itertools.product(*value_lists):
+                    resolved_vars = {**defaults}
+                    for ax, val in zip(axes, combo, strict=True):
+                        resolved_vars[ax] = val
+                    path = (self.output_dir / template.format(**resolved_vars)).resolve()
+                    instances.append(
+                        {
+                            "values": dict(zip(axes, combo, strict=True)),
+                            "path": str(path),
+                            "exists": path.exists(),
+                        }
+                    )
+                files_out.append(
+                    {
+                        "name": josh_name,
+                        "units": units,
+                        "kind": "templated",
+                        "template": template,
+                        "axes": axes,
+                        "instances": instances,
+                    }
+                )
+            else:
+                path = (self.output_dir / info["path"]).resolve()
+                files_out.append(
+                    {
+                        "name": josh_name,
+                        "units": units,
+                        "kind": "static",
+                        "path": str(path),
+                        "exists": path.exists(),
+                    }
+                )
+
+        return {
+            "name": self.name,
+            "output_dir": str(self.output_dir),
+            "geometry": {
+                "size_m": self.size_m,
+                "low": list(self.low),
+                "high": list(self.high),
+                "steps": self.steps,
+            },
+            "variants": {
+                ax: {"values": v["values"], "default": v["default"]}
+                for ax, v in sorted(self.variants.items())
+            },
+            "files": files_out,
+        }
+
+    def describe(self) -> str:
+        """Human-readable overview of the grid and its external-data inventory.
+
+        Shows geometry, variant axes, and each external file's on-disk status —
+        handy for confirming what a preprocessed grid actually provides without
+        writing any code. See :meth:`to_summary_dict` for the structured form.
+        """
+        s = self.to_summary_dict()
+        g = s["geometry"]
+        lines: list[str] = []
+        lines.append(f"Grid: {s['name']}   ({s['output_dir']})")
+        lines.append(
+            f"Geometry: {g['size_m']} m cells | "
+            f"{g['low'][0]},{g['low'][1]} -> {g['high'][0]},{g['high'][1]} | "
+            f"{g['steps']} steps"
+        )
+
+        if s["variants"]:
+            lines.append("Variant axes:")
+            for ax, v in s["variants"].items():
+                vals = ", ".join(
+                    f"{x}*" if x == v["default"] else str(x) for x in v["values"]
+                )
+                lines.append(f"  {ax}: [{vals}]")
+            lines.append("  (* = default)")
+        else:
+            lines.append("Variant axes: (none)")
+
+        files = s["files"]
+        n = len(files)
+        lines.append(f"External data ({n} file{'' if n == 1 else 's'}):")
+
+        def _rel(p: str) -> str:
+            try:
+                return str(Path(p).relative_to(s["output_dir"]))
+            except ValueError:
+                return p
+
+        for f in files:
+            units = f"  units={f['units']}" if f["units"] else ""
+            if f["kind"] == "static":
+                status = "OK" if f["exists"] else "MISSING"
+                lines.append(f"  {f['name']:<16} {_rel(f['path']):<34} {status}{units}")
+            else:
+                total = len(f["instances"])
+                present = sum(1 for i in f["instances"] if i["exists"])
+                axes = ",".join(f["axes"]) or "none"
+                lines.append(
+                    f"  {f['name']:<16} {f['template']:<34} "
+                    f"templated[{axes}]: {present}/{total} present{units}"
+                )
+                for inst in f["instances"]:
+                    if not inst["exists"]:
+                        lines.append(f"      MISSING: {_rel(inst['path'])} {inst['values']}")
+
+        return "\n".join(lines)
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> GridSpec:
         """Load a GridSpec from a YAML file.

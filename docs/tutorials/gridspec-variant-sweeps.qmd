@@ -82,6 +82,29 @@ print(f"Pattern values: {grid.variants['pattern']['values']}")
 print(f"Default: {grid.variants['pattern']['default']}")
 ```
 
+### See everything at once
+
+`describe()` prints a full overview -- geometry, variant axes, and the
+external-data inventory, including whether each `.jshd` file exists on disk. It's
+the quickest way to confirm what a preprocessed grid actually provides:
+
+```{python}
+#| label: grid-describe
+print(grid.describe())
+```
+
+The same overview is available from the terminal without writing any Python:
+
+```bash
+python -m joshpy.grid examples/external_data/variant_sweep_grid.yaml
+
+# structured JSON (for scripting)
+python -m joshpy.grid examples/external_data/variant_sweep_grid.yaml --json
+```
+
+`to_summary_dict()` returns that structured form programmatically. The sections
+below break the same information into the individual accessors.
+
 ### Default file mappings
 
 `file_mappings` resolves `template_path` entries using each axis's default value:
