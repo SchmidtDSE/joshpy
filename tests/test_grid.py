@@ -1038,5 +1038,114 @@ class TestGridSpecPreprocessVariant(unittest.TestCase):
             self.assertEqual(config.output, Path(tmpdir) / "tas_ssp245.jshdz")
 
 
+class TestGridSpecDescribe(unittest.TestCase):
+    """Tests for GridSpec.describe() / to_summary_dict()."""
+
+    def _grid(self, tmp: Path) -> GridSpec:
+        (tmp / "cover.jshd").write_text("x")
+        (tmp / "monthly").mkdir(exist_ok=True)
+        (tmp / "monthly" / "tas_ssp245_jan.jshd").write_text("x")  # present
+        # tas_ssp370_jan.jshd intentionally missing
+        (tmp / "grid.yaml").write_text(
+            "name: dev_fine\n"
+            "grid: {size_m: 30, low: [33.9, -116.0], high: [33.91, -116.0], steps: 12}\n"
+            "variants:\n"
+            "  scenario: {values: [ssp245, ssp370], default: ssp245}\n"
+            "files:\n"
+            "  cover: {path: cover.jshd, units: \"\"}\n"
+            "  futureTempJan: {template_path: 'monthly/tas_{scenario}_jan.jshd', units: degC}\n"
+            "  missingStatic: {path: nope.jshd, units: m}\n"
+        )
+        return GridSpec.from_yaml(tmp / "grid.yaml")
+
+    def test_summary_dict_structure(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self._grid(Path(d)).to_summary_dict()
+            self.assertEqual(s["name"], "dev_fine")
+            self.assertEqual(s["geometry"]["size_m"], 30)
+            self.assertEqual(s["geometry"]["steps"], 12)
+            self.assertEqual(s["variants"]["scenario"]["default"], "ssp245")
+            by_name = {f["name"]: f for f in s["files"]}
+            self.assertEqual(by_name["cover"]["kind"], "static")
+            self.assertTrue(by_name["cover"]["exists"])
+            self.assertFalse(by_name["missingStatic"]["exists"])
+
+    def test_summary_templated_expansion_and_existence(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = self._grid(Path(d)).to_summary_dict()
+            tmpl = next(f for f in s["files"] if f["name"] == "futureTempJan")
+            self.assertEqual(tmpl["kind"], "templated")
+            self.assertEqual(tmpl["axes"], ["scenario"])
+            self.assertEqual(len(tmpl["instances"]), 2)  # one per scenario value
+            exists = {i["values"]["scenario"]: i["exists"] for i in tmpl["instances"]}
+            self.assertTrue(exists["ssp245"])
+            self.assertFalse(exists["ssp370"])
+
+    def test_describe_text_includes_key_facts(self):
+        with tempfile.TemporaryDirectory() as d:
+            text = self._grid(Path(d)).describe()
+            self.assertIn("Grid: dev_fine", text)
+            self.assertIn("ssp245*", text)          # default marked
+            self.assertIn("1/2 present", text)       # templated availability
+            self.assertIn("MISSING", text)           # missing files surfaced
+            self.assertIn("cover", text)
+
+    def test_describe_no_variants(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            (tmp / "cover.jshd").write_text("x")
+            (tmp / "grid.yaml").write_text(
+                "name: plain\n"
+                "grid: {size_m: 30, low: [0, 0], high: [1, 1], steps: 5}\n"
+                "files:\n"
+                "  cover: {path: cover.jshd, units: \"\"}\n"
+            )
+            text = GridSpec.from_yaml(tmp / "grid.yaml").describe()
+            self.assertIn("Variant axes: (none)", text)
+
+
+class TestGridCli(unittest.TestCase):
+    """Tests for the `python -m joshpy.grid` CLI."""
+
+    def _write_grid(self, tmp: Path) -> Path:
+        (tmp / "cover.jshd").write_text("x")
+        (tmp / "grid.yaml").write_text(
+            "name: dev_fine\n"
+            "grid: {size_m: 30, low: [0, 0], high: [1, 1], steps: 5}\n"
+            "files:\n"
+            "  cover: {path: cover.jshd, units: \"\"}\n"
+        )
+        return tmp / "grid.yaml"
+
+    def test_help_exits_zero(self):
+        from joshpy.grid.__main__ import main
+        with self.assertRaises(SystemExit) as cm:
+            main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_text_output_returns_zero(self):
+        from joshpy.grid.__main__ import main
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(main([str(self._write_grid(Path(d)))]), 0)
+
+    def test_json_output_is_valid(self):
+        import io
+        import json
+        from contextlib import redirect_stdout
+        from joshpy.grid.__main__ import main
+        with tempfile.TemporaryDirectory() as d:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = main([str(self._write_grid(Path(d))), "--json"])
+            self.assertEqual(rc, 0)
+            payload = json.loads(buf.getvalue())
+            self.assertEqual(payload["name"], "dev_fine")
+
+    def test_missing_file_returns_one(self):
+        from joshpy.grid.__main__ import main
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(main([str(Path(d) / "nope.yaml")]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
