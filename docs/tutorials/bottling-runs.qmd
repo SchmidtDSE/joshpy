@@ -267,6 +267,28 @@ registry.bottle("baseline", cli=cli, omit_jshd=True)
 The `run.sh` still lists all `--data` flags so the recipient knows which files
 to provide. The manifest records the original paths and `"omit_jshd": true`.
 
+## Command-Line Usage
+
+Registry-based bottling is also available from the terminal via the
+`python -m joshpy.bottle` CLI — handy for scripting or filing a quick bug report
+without writing any Python:
+
+```bash
+# Bottle a labeled run from a registry
+python -m joshpy.bottle experiment.duckdb baseline
+
+# Lightweight bottle (skip .jshd data files)
+python -m joshpy.bottle experiment.duckdb baseline --omit-jshd
+
+# Bottle by run_hash, choosing the output dir and JAR mode
+python -m joshpy.bottle experiment.duckdb a1b2c3d4 \
+    --output-dir ./bottles --jar-mode PROD
+```
+
+This wraps `RunRegistry.bottle()`: the positional arguments are the registry
+path and the run label (or `run_hash`); `--omit-jshd`, `--output-dir`, and
+`--jar-mode` mirror the Python keyword arguments.
+
 ## Unpacking a Bottle
 
 Use `unbottle()` to unpack an archive back into a `JobConfig` for use with

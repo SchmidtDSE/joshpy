@@ -837,5 +837,59 @@ class TestBottleBatchMetadata(unittest.TestCase):
             )
 
 
+class TestBottleCli(unittest.TestCase):
+    """Tests for the `python -m joshpy.bottle` CLI."""
+
+    def test_help_exits_zero(self):
+        from joshpy.bottle import main
+        with self.assertRaises(SystemExit) as cm:
+            main(["--help"])
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_missing_registry_returns_one(self):
+        from joshpy.bottle import main
+        with tempfile.TemporaryDirectory() as d:
+            missing = Path(d) / "nope.duckdb"
+            self.assertEqual(main([str(missing), "my-label"]), 1)
+
+    def test_happy_path_bottles_and_closes(self):
+        from joshpy.bottle import main
+        with tempfile.TemporaryDirectory() as d:
+            reg_path = Path(d) / "exp.duckdb"
+            reg_path.write_text("")  # just needs to exist for the CLI guard
+            archive = Path(d) / "bottles" / "my-label.tar.gz"
+
+            mock_registry = MagicMock()
+            mock_registry.bottle.return_value = archive
+
+            with patch("joshpy.registry.RunRegistry", return_value=mock_registry) as RR, \
+                 patch("joshpy.cli.JoshCLI") as JC:
+                rc = main([str(reg_path), "my-label", "--omit-jshd",
+                           "--output-dir", str(Path(d) / "bottles")])
+
+        self.assertEqual(rc, 0)
+        RR.assert_called_once_with(str(reg_path))
+        # bottle() called with the parsed args
+        kwargs = mock_registry.bottle.call_args.kwargs
+        self.assertEqual(kwargs["label_or_hash"], "my-label")
+        self.assertTrue(kwargs["omit_jshd"])
+        # registry is always closed (finally)
+        mock_registry.close.assert_called_once()
+        JC.assert_called_once()
+
+    def test_jar_mode_choice_threaded_to_cli(self):
+        from joshpy.bottle import main
+        from joshpy.jar import JarMode
+        with tempfile.TemporaryDirectory() as d:
+            reg_path = Path(d) / "exp.duckdb"
+            reg_path.write_text("")
+            mock_registry = MagicMock()
+            mock_registry.bottle.return_value = Path(d) / "b.tar.gz"
+            with patch("joshpy.registry.RunRegistry", return_value=mock_registry), \
+                 patch("joshpy.cli.JoshCLI") as JC:
+                main([str(reg_path), "abc123", "--jar-mode", "PROD"])
+            self.assertEqual(JC.call_args.kwargs["josh_jar"], JarMode.PROD)
+
+
 if __name__ == "__main__":
     unittest.main()

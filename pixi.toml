@@ -54,7 +54,7 @@ test-integration = { cmd = "pytest tests/ -v -m integration", depends-on = ["ins
 lint = "ruff check joshpy/"
 typecheck = "mypy joshpy/"
 format = "ruff format joshpy/"
-get-jars = { cmd = "python scripts/get_jars.py", depends-on = ["install"] }
+get-jars = { cmd = "python -m joshpy.jar --force", depends-on = ["install"] }
 debug = { cmd = "python -m joshpy.debug --registry $JOSH_REGISTRY", description = "Debug viewer by label/hash: pixi run debug --label <name>|--run-hash <hash> --summary|--trace ID|--find KW." }
 
 # Configure reticulate to use pixi's Python for Quarto docs rendering

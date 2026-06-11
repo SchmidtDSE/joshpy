@@ -9,9 +9,11 @@ RUN groupadd --gid $USER_GID $USERNAME \
     && mkdir -p /home/$USERNAME/.vscode-server /home/$USERNAME/.pixi-env \
     && chown -R $USERNAME:$USERNAME /home/$USERNAME
 
-# gcloud SDK + kubectl for batch remote targets (K8s, Cloud Run)
+# gcloud SDK + kubectl for batch remote targets (K8s, Cloud Run).
+# ca-certificates is required so curl can verify TLS when fetching the
+# gcloud/kubectl archives over HTTPS — the bullseye-slim base ships without it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY .devcontainer/scripts/on_build/install_gcloud.sh /tmp/install_gcloud.sh

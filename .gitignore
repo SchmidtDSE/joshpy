@@ -1,10 +1,12 @@
 # Pixi env
 .pixi
 
-# Joshsim Jar
+# Joshsim Jar (downloaded artifacts) — but NOT the joshpy.jar source package
 joshsim-fat.jar
 jar/
 **/jar/
+!joshpy/jar/
+!joshpy/jar/**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

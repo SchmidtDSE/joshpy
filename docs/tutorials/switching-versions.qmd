@@ -184,6 +184,25 @@ print(f"Path: {result.jar_path}")
 print(f"Already existed: {not result.was_updated}")
 ```
 
+### Downloading JARs from the Command Line
+
+The same download/refresh is available as a CLI — no Python needed, ideal for a
+CI step or a one-off refresh:
+
+```bash
+# Download or refresh both prod and dev JARs
+python -m joshpy.jar
+
+# Force a re-download even if already up to date
+python -m joshpy.jar --force
+
+# Download into a specific directory
+python -m joshpy.jar --jar-dir ./jars
+```
+
+It reports each mode as `updated`, `up to date`, or `FAILED`, and exits
+non-zero if any download fails — convenient as a pipeline gate.
+
 ### Disabling Auto-Download
 
 For strict environments where you want to fail fast if the version isn't available:
