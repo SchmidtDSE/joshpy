@@ -192,6 +192,8 @@ website:
             - reference/registry.ConfigInfo.qmd
             - reference/registry.RunInfo.qmd
             - reference/registry.RunDetail.qmd
+            - reference/registry.DropSummary.qmd
+            - reference/registry.ConsistencyIssue.qmd
             - reference/registry.DataSummary.qmd
         - section: "Data & Diagnostics"
           contents:
@@ -288,6 +290,8 @@ quartodoc:
         - registry.ConfigInfo
         - registry.RunInfo
         - registry.RunDetail
+        - registry.DropSummary
+        - registry.ConsistencyIssue
         - registry.DataSummary
     
     - title: Cell Data Module

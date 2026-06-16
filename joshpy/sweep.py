@@ -141,7 +141,7 @@ class SweepCollisionError(Exception):
     The static check fires when:
     - the export path template lacks both ``{timestamp}`` and ``{run_hash}``, AND
     - the registry already has runs for one or more jobs in this sweep, AND
-    - the user did not pass ``force=True`` to ``SweepManager.run()``.
+    - the collision policy is ``"fail"`` (the default).
 
     Attributes:
         conflicts: List of ``(job, path_template, prior_runs)`` triples — one
@@ -176,9 +176,10 @@ class SweepCollisionError(Exception):
             "  2. Once batchRemote --custom-tag passthrough lands and joshpy auto-injects\n"
             "     run_hash, use {run_hash} for deterministic per-simulation paths:\n"
             '         exportFiles.patch = "minio://bucket/{run_hash}/output_{replicate}.csv"\n\n'
-            "  3. Drop the prior run(s) from the registry if you intend a fresh re-run.\n\n"
-            "  4. Pass force=True to SweepManager.run() to proceed anyway (you accept\n"
-            "     that subsequent ingest() calls will count duplicate replicates)."
+            "  3. Use collision_policy='pool' to add more replicates (dispatches only\n"
+            "     the number still needed, at fresh non-colliding indices).\n\n"
+            "  4. To redo this config from scratch, registry.drop_run(<hash-or-label>)\n"
+            "     then re-run — drop_run is the one sanctioned way to clear run data."
         )
 
 
@@ -249,7 +250,7 @@ def _check_export_path_safety(
 
 
 # Collision policies for batch-remote sweeps. See SweepManagerBuilder.with_collision_policy.
-COLLISION_POLICIES: tuple[str, ...] = ("fail", "pool", "skip", "overwrite")
+COLLISION_POLICIES: tuple[str, ...] = ("fail", "pool", "skip")
 
 
 class _PartialFormat(dict):
@@ -367,6 +368,88 @@ def _list_existing_replicates_minio(
     return found
 
 
+def _extract_replicate_indices(resolved: str, names: list[str], anchor: str) -> set[int]:
+    """Extract integer replicate indices from *names* matching a resolved template.
+
+    Builds a regex from *resolved* where ``{replicate}`` becomes a ``(\\d+)``
+    capture and any other surviving placeholder becomes a wildcard, anchored on
+    *anchor* (e.g. ``"s3://bucket"`` for MinIO, ``""`` for local paths).
+    """
+    pattern_parts: list[str] = [re.escape(anchor)] if anchor else []
+    cursor = 0
+    placeholder_re = re.compile(r"\{([^{}]+)\}")
+    for m in placeholder_re.finditer(resolved):
+        pattern_parts.append(re.escape(resolved[cursor:m.start()]))
+        pattern_parts.append(r"(\d+)" if m.group(1) == "replicate" else r".*?")
+        cursor = m.end()
+    pattern_parts.append(re.escape(resolved[cursor:]))
+    name_pattern = re.compile("".join(pattern_parts) + r"$")
+
+    found: set[int] = set()
+    for name in names:
+        match = name_pattern.match(name)
+        if match:
+            found.add(int(match.group(1)))
+    return found
+
+
+def _list_existing_replicates_local(
+    export_info: Any,
+    known_vars: dict[str, Any],
+    *,
+    quiet: bool = False,
+) -> set[int]:
+    """List existing local-filesystem outputs and extract replicate indices.
+
+    The local-path counterpart to :func:`_list_existing_replicates_minio`.
+    Returns an empty set under the same conditions (no ``{replicate}``,
+    ``{timestamp}`` isolation, or a listing error).
+    """
+    import glob as _glob
+
+    try:
+        resolved = export_info.path.format_map(_PartialFormat(known_vars))
+    except (IndexError, ValueError):
+        return set()
+
+    if "{replicate}" not in resolved or "{timestamp}" in resolved:
+        return set()
+
+    glob_resolved = re.sub(r"\{[^{}]+\}", "*", resolved)
+    try:
+        names = _glob.glob(glob_resolved)
+    except Exception as e:
+        if not quiet:
+            print(f"  [POLICY] local glob failed ({e}); treating as no prior outputs.")
+        return set()
+
+    return _extract_replicate_indices(resolved, names, anchor="")
+
+
+def list_output_replicates(
+    cli: JoshCLI,
+    registry: RunRegistry,
+    export_info: Any,
+    known_vars: dict[str, Any],
+    *,
+    quiet: bool = False,
+) -> set[int]:
+    """Storage-agnostic listing of replicate indices present in a run's outputs.
+
+    Dispatches to the MinIO or local-filesystem lister based on the export
+    protocol. Returns the set of replicate indices found, or an empty set when
+    the layout can't be enumerated (single-file output, ``{timestamp}``
+    isolation, or a listing error) — callers treat empty as "fall back to the
+    requested replicate range".
+    """
+    protocol = getattr(export_info, "protocol", "") or ""
+    if protocol == "minio":
+        return _list_existing_replicates_minio(
+            cli, registry, export_info, known_vars, quiet=quiet
+        )
+    return _list_existing_replicates_local(export_info, known_vars, quiet=quiet)
+
+
 @dataclass
 class _CollisionAction:
     """Outcome of applying a collision policy to an existing-replicates set.
@@ -394,27 +477,28 @@ def _apply_collision_policy(
 ) -> _CollisionAction:
     """Compute the dispatch plan for a job given policy + pre-existing state.
 
+    The replicate index is a collision-avoidance tag, not a meaningful
+    coordinate — what matters is the *count* of replicates. ``pool`` therefore
+    reconciles by count: dispatch the *number* still needed at fresh,
+    non-colliding indices.
+
     Policies:
     - ``"fail"`` (default) — if any prior replicates exist, return ``action="fail"``.
       The caller converts this into :class:`SweepCollisionError`. This path is
-      primarily reached through :func:`_check_export_path_safety` (Item 6);
-      include here so the code path is symmetric.
-    - ``"pool"`` — fill the gap between existing and requested. Dispatches
-      replicates ``max(existing)+1 .. n_requested-1`` at an offset. If already
-      complete (``max(existing)+1 >= n_requested``), returns ``action="skip"``.
+      primarily reached through :func:`_check_export_path_safety`; included here
+      so the code path is symmetric.
+    - ``"pool"`` — reconcile to ``n_requested`` by count. ``need = n_requested -
+      len(existing)``; dispatch ``need`` fresh replicates starting at
+      ``max(existing)+1`` (a non-colliding offset). If already at/above the
+      target (``need <= 0``), returns ``action="skip"``. Sparse existing sets
+      like ``{1,4,5}`` are fine — only the count matters.
     - ``"skip"`` — idempotent: if *any* prior replicate exists, return
       ``action="skip"`` (treat as complete for CI re-runs). Otherwise dispatch
       normally.
-    - ``"overwrite"`` — always dispatch ``0..n_requested-1`` over whatever's
-      there. MinIO PUT replaces existing files at the same paths. NOTE: when
-      the new dispatch is *smaller* than the existing run, replicates beyond
-      ``n_requested-1`` remain as orphans — joshpy currently has no MinIO
-      delete primitive to clean them up. Caller must accept this or use
-      ``{timestamp}`` paths if cleanliness matters.
 
     Args:
         policy: One of :data:`COLLISION_POLICIES`.
-        existing: Pre-existing replicate indices on MinIO.
+        existing: Pre-existing replicate indices (from :func:`list_output_replicates`).
         n_requested: Total replicates the user asked for (``job.replicates``).
 
     Returns:
@@ -425,19 +509,13 @@ def _apply_collision_policy(
     """
     if policy not in COLLISION_POLICIES:
         raise ValueError(
-            f"Unknown collision policy {policy!r}; must be one of {COLLISION_POLICIES}"
+            f"Unknown collision policy {policy!r}; must be one of {COLLISION_POLICIES}. "
+            f"('overwrite'/force were removed — they can't keep the registry in sync "
+            f"with re-run outputs. To add replicates use 'pool'; to redo a config, "
+            f"drop_run() it then re-run.)"
         )
 
     existing_fs = frozenset(existing)
-
-    # "overwrite" always dispatches 0..N-1, ignoring whatever's there.
-    if policy == "overwrite":
-        return _CollisionAction(
-            action="dispatch",
-            replicate_start=0,
-            replicates=n_requested,
-            existing=existing_fs,
-        )
 
     if not existing_fs:
         return _CollisionAction(
@@ -447,22 +525,22 @@ def _apply_collision_policy(
             existing=existing_fs,
         )
 
-    max_existing = max(existing_fs)
-
     if policy == "fail":
         return _CollisionAction(action="fail", existing=existing_fs)
 
     if policy == "skip":
         return _CollisionAction(action="skip", existing=existing_fs)
 
-    # policy == "pool"
-    k = max_existing + 1
-    if k >= n_requested:
+    # policy == "pool": reconcile by count. Dispatch the number still needed
+    # at a fresh, non-colliding offset (max+1). Replicate identity is the index;
+    # the gap structure of `existing` is irrelevant — only the count matters.
+    need = n_requested - len(existing_fs)
+    if need <= 0:
         return _CollisionAction(action="skip", existing=existing_fs)
     return _CollisionAction(
         action="dispatch",
-        replicate_start=k,
-        replicates=n_requested - k,
+        replicate_start=max(existing_fs) + 1,
+        replicates=need,
         existing=existing_fs,
     )
 
@@ -568,8 +646,15 @@ def load_job_results(
     loader = CellDataLoader(registry)
     total_rows = 0
     simulation = job.simulation
+    # Skip replicate indices already loaded (idempotent re-ingest). Local JAR
+    # runs index 0..N-1, so the requested range is the right candidate set.
+    already_loaded = registry.loaded_replicates(job.run_hash)
 
     for rep in range(job.replicates):
+        if rep in already_loaded:
+            if not quiet:
+                print(f"  Replicate {rep}: already loaded, skipping")
+            continue
         # Build template variables from job parameters and custom tags
         template_vars = {
             "simulation": simulation,
@@ -658,11 +743,22 @@ def _load_job_results_minio(
         custom_tags=dict(job.custom_tags),
     )
 
+    candidate = list_output_replicates(
+        cli, registry, export_info,
+        known_vars={
+            **job.parameters, **job.custom_tags,
+            "run_hash": job.run_hash, "simulation": job.simulation,
+            **({"label": job.label} if job.label else {}),
+        },
+        quiet=quiet,
+    )
+
     return _load_ingest_replicates(
         registry, export_paths, export_info.path,
         is_minio=True, download=False, bucket=bucket, dl_dir=dl_dir,
         meta=meta, run_id=run_id,
         export_type=export_type, quiet=quiet,
+        candidate_replicates=candidate,
     )
 
 
@@ -792,6 +888,7 @@ def recover_sweep_results(
             print(f"  Jobs not yet executed (no run in registry): {jobs_not_in_registry}")
         print(f"  Total rows loaded: {total_rows}")
 
+    _report_consistency(registry, [job.run_hash for job in job_set], quiet=quiet)
     return total_rows
 
 
@@ -969,8 +1066,16 @@ def _load_ingest_replicates(
     run_id: str,
     export_type: str,
     quiet: bool,
+    candidate_replicates: set[int] | None = None,
 ) -> int:
-    """Load CSVs for each replicate into the registry."""
+    """Load CSVs for each replicate into the registry.
+
+    Iterates ``candidate_replicates`` (the replicate indices actually present in
+    storage, e.g. from :func:`list_output_replicates`) when provided, else falls
+    back to ``range(meta.total_replicates)``. Replicate indices already loaded
+    for this run_hash are skipped, so re-ingesting is idempotent (the replicate
+    index is the dedup identity).
+    """
     loader = CellDataLoader(registry)
     total_rows = 0
     loaded = 0
@@ -986,7 +1091,20 @@ def _load_ingest_replicates(
     if meta.label:
         template_vars_base["label"] = meta.label
 
-    for rep in range(meta.total_replicates):
+    # Replicate indices to attempt: actual outputs when enumerable, else the
+    # requested range. Skip any already loaded (idempotent re-ingest).
+    if candidate_replicates:
+        indices: list[int] = sorted(candidate_replicates)
+    else:
+        indices = list(range(meta.total_replicates))
+    already_loaded = registry.loaded_replicates(meta.run_hash)
+
+    for rep in indices:
+        if rep in already_loaded:
+            skipped += 1
+            if not quiet:
+                print(f"  Replicate {rep}: already loaded, skipping")
+            continue
         template_vars = {**template_vars_base, "replicate": rep}
 
         try:
@@ -1036,6 +1154,27 @@ def _load_ingest_replicates(
         print(f"\nDone: {total_rows:,} rows loaded ({loaded} replicates, {skipped} skipped)")
 
     return total_rows
+
+
+def _report_consistency(
+    registry: RunRegistry,
+    run_hashes: list[str] | None,
+    *,
+    quiet: bool = False,
+) -> None:
+    """Run the registry consistency check at a workflow boundary and warn.
+
+    Surfaces run<->analysis drift (duplicate replicates, data without a config,
+    ran-but-not-ingested) right after ingest, so problems are visible where they
+    arise rather than silently corrupting later analysis. Non-fatal: prints to
+    stdout unless *quiet*.
+    """
+    if quiet:
+        return
+    targets: list[str | None] = list(dict.fromkeys(run_hashes)) if run_hashes else [None]
+    for h in targets:
+        for issue in registry.check_consistency(h):
+            print(f"  [consistency:{issue.severity}] {issue.kind}: {issue.detail}")
 
 
 def ingest_results(
@@ -1127,12 +1266,26 @@ def ingest_results(
 
         run_id = registry._resolve_run_id_for_hash(meta.run_hash)
 
-        return _load_ingest_replicates(
+        candidate = list_output_replicates(
+            cli, registry, export_info,
+            known_vars={
+                **(meta.config.parameters or {}),
+                **(meta.custom_tags or {}),
+                "run_hash": meta.run_hash, "simulation": meta.simulation,
+                **({"label": meta.label} if meta.label else {}),
+            },
+            quiet=quiet,
+        )
+
+        total_rows = _load_ingest_replicates(
             registry, export_paths, path_template,
             is_minio=is_minio, download=download, bucket=bucket,
             dl_dir=dl_dir, meta=meta, run_id=run_id,
             export_type=export_type, quiet=quiet,
+            candidate_replicates=candidate,
         )
+        _report_consistency(registry, [meta.run_hash], quiet=quiet)
+        return total_rows
     finally:
         if temp_josh:
             Path(temp_josh).unlink(missing_ok=True)
@@ -1304,15 +1457,17 @@ class SweepManager:
             enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
             stream_output: If True, stream JAR stdout/stderr to the terminal
                 in real time while still capturing them in CLIResult.
-            force: If True, bypass the static collision check that raises
-                ``SweepCollisionError`` when a batch-remote sweep would
-                silently overwrite prior MinIO outputs. Default False.
+            force: Removed. Passing ``force=True`` now raises ``ValueError``.
+                The old behavior aliased ``collision_policy="overwrite"``, which
+                couldn't keep the registry in sync with re-run outputs. To add
+                replicates use ``collision_policy="pool"``; to redo a config,
+                ``registry.drop_run(...)`` it then re-run.
             collision_policy: Override the builder-configured collision policy
                 for this call. One of :data:`COLLISION_POLICIES`: ``"fail"``
-                (default) triggers the static check; ``"pool"`` fills the gap
-                between existing and requested replicates via
-                ``replicate_start``; ``"skip"`` is idempotent (no-op if any
-                prior replicates exist).
+                (default) triggers the static check; ``"pool"`` reconciles by
+                count, dispatching only the *number* of replicates still needed
+                at fresh indices; ``"skip"`` is idempotent (no-op if any prior
+                replicates exist).
 
         Returns:
             SweepResult for batch strategies, AdaptiveSweepResult for adaptive.
@@ -1357,15 +1512,22 @@ class SweepManager:
                 f"must be one of {COLLISION_POLICIES}"
             )
 
-        # force=True is the legacy "dispatch over whatever's there" escape hatch.
-        # Translate it into collision_policy="overwrite" so it bypasses BOTH
-        # the static check (Item 6) AND the runtime listing check (Item 5).
+        # force=True was the "dispatch over whatever's there" escape hatch
+        # (collision_policy="overwrite"). Both were removed: overwriting outputs
+        # can't keep the registry in sync with what was re-run (ingest is
+        # idempotent per replicate index). To add replicates use "pool"; to redo
+        # a config, drop_run() it then re-run.
         if force:
-            collision_policy = "overwrite"
+            raise ValueError(
+                "force=True (and the 'overwrite' policy) were removed: overwriting "
+                "outputs can't be kept in sync with the registry. To add replicates "
+                "use collision_policy='pool'; to redo a config, registry.drop_run(...) "
+                "it then re-run."
+            )
 
         # Pre-dispatch static collision check. Only fires for policy="fail"
-        # (the default) — "pool" / "skip" / "overwrite" do their own runtime
-        # handling at dispatch time inside run_sweep. dry_run bypasses.
+        # (the default) — "pool" / "skip" do their own runtime handling at
+        # dispatch time inside run_sweep. dry_run bypasses.
         if (
             batch_remote
             and not dry_run
@@ -1893,18 +2055,19 @@ class SweepManagerBuilder:
                   ``{timestamp}`` and ``{run_hash}`` and any job's ``run_hash``
                   already has runs in the registry. Equivalent to the static
                   check; safest default.
-                - ``"pool"`` — list existing MinIO objects and dispatch only
-                  the missing replicates via
-                  :attr:`BatchRemoteConfig.replicate_start`. Enables
-                  "grow a sweep" workflows: first run N=5 succeeds, re-run
-                  with N=10 only dispatches replicates 5..9.
-                - ``"skip"`` — idempotent: if *any* matching MinIO object
-                  exists, skip the dispatch entirely. Useful for CI reruns.
-                - ``"overwrite"`` — always dispatch replicates 0..N-1 over
-                  whatever's there; MinIO PUT replaces files at matching
-                  paths. Note: shrinking sweeps (old N=10, new N=5) leaves
-                  orphans 5..9 since joshpy has no MinIO delete primitive.
-                  Use ``{timestamp}`` paths when orphan-cleanliness matters.
+                - ``"pool"`` — reconcile by count: list existing outputs and
+                  dispatch only the *number* still needed (``target - have``) at
+                  fresh, non-colliding indices via
+                  :attr:`BatchRemoteConfig.replicate_start`. Enables "grow a
+                  sweep": first run N=5 succeeds, re-run with N=10 dispatches 5
+                  more. Sparse existing sets are fine — only the count matters.
+                - ``"skip"`` — idempotent: if *any* matching output exists, skip
+                  the dispatch entirely. Useful for CI reruns.
+
+        ``"overwrite"`` and ``force=True`` were removed: overwriting outputs
+        can't be kept in sync with the registry (ingestion is idempotent per
+        replicate index). To redo a config, :meth:`RunRegistry.drop_run` it then
+        re-run — the one sanctioned way to clear run data.
 
         Returns:
             Self for chaining.

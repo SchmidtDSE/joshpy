@@ -594,11 +594,26 @@ def format_run_info(registry: RunRegistry, label_or_hash: str) -> str:
     else:
         lines.append("  (none)")
 
-    # Replicates (from cell_data, the source of truth for pooled runs)
+    # Replicates (from cell_data, the source of truth). The index is a
+    # collision-avoidance tag, so show the present set when it's sparse.
     rep_count = detail.replicate_count
     if rep_count > 0:
         lines.append("")
-        lines.append(f"Replicates: {rep_count}")
+        indices = sorted(detail.replicates)
+        is_contiguous = indices == list(range(rep_count))
+        if is_contiguous:
+            lines.append(f"Replicates: {rep_count}")
+        else:
+            shown = ", ".join(str(i) for i in indices)
+            lines.append(f"Replicates: {rep_count} present (indices: {shown})")
+
+    # Consistency: surface any run<->analysis drift for this run.
+    issues = registry.check_consistency(run_hash)
+    if issues:
+        lines.append("")
+        lines.append("Consistency:")
+        for issue in issues:
+            lines.append(f"  [{issue.severity}] {issue.kind}: {issue.detail}")
 
     # Runs
     runs = detail.runs

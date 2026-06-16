@@ -415,6 +415,58 @@ for name, path in mappings.items():
     print(f"  {name}: {path}")
 ```
 
+## Re-running, Pooling, and Idempotency
+
+The registry treats a run's **replicate index as a collision-avoidance tag, not
+a meaningful coordinate** — what matters is how many replicates you have. This
+makes re-running safe and predictable:
+
+- **Ingestion is idempotent.** Re-ingesting outputs already loaded is a no-op;
+  a replicate index already in the registry is skipped rather than duplicated.
+- **`get_replicate_count()` counts distinct replicate indices** — the source of
+  truth for "how many do I have". `loaded_replicates()` returns the actual set.
+
+```{python}
+#| label: pooling-count
+# Normally ingest() loads these; insert a few directly for illustration.
+run_id = registry.get_runs_for_hash("abc123def456")[0].run_id
+for rep in (0, 1, 2):
+    registry.conn.execute(
+        "INSERT INTO cell_data (run_id, run_hash, step, replicate) VALUES (?, ?, ?, ?)",
+        [run_id, "abc123def456", 0, rep],
+    )
+
+print("replicates present:", sorted(registry.loaded_replicates("low_growth")))
+print("replicate count:   ", registry.get_replicate_count("low_growth"))
+```
+
+**Pooling grows a sweep by count.** With `collision_policy="pool"`, re-running a
+sweep with a higher target dispatches only the *number* still needed
+(`target - have`) at fresh, non-colliding indices — so re-running with the same
+target is a no-op, and a larger target tops up the difference.
+
+**Parity guard.** `check_consistency()` surfaces run↔analysis drift — duplicate
+replicates, data without a config, or runs that succeeded but were never
+ingested. It runs automatically after `ingest()`; you can also call it directly:
+
+```{python}
+#| label: pooling-consistency
+# high_growth has completed runs but no ingested data yet.
+for issue in registry.check_consistency():
+    print(f"[{issue.severity}] {issue.kind}: {issue.detail}")
+```
+
+**`drop_run()` is the one sanctioned way to mutate run data.** Every other
+registry write is append-only or metadata. Use it to clear a run before redoing
+a config from scratch (rather than pooling more replicates onto bad outputs):
+
+```{python}
+#| label: pooling-drop-run
+summary = registry.drop_run("high_growth")
+print(f"Dropped {summary.run_hash}: {summary.total} rows "
+      f"across {len(summary.rows)} tables")
+```
+
 ## Cleanup
 
 ```{python}
