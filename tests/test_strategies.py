@@ -777,6 +777,128 @@ class TestSweepExecutionError(unittest.TestCase):
         self.assertIn("Exit code: 255", str(error))
         self.assertIn("signal 127", str(error).lower())  # 255 - 128 = 127
 
+    def test_jar_error_lifted_into_diagnostic(self):
+        """The JAR's real error line should become the diagnostic, not the
+        generic exit-code message."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 1  # would otherwise map to "General error"
+        result.stderr = (
+            "java.lang.IllegalArgumentException: "
+            "Config value not found: sweep_config.mastYearIntervalTYPO\n"
+            "\tat org.joshsim.lang.interpret.machine.Foo.lambda$pushConfig$7(Foo.java:1)\n"
+            "\t... 59 more"
+        )
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=0, succeeded_before=0
+        )
+
+        self.assertIn("Config value not found: sweep_config.mastYearIntervalTYPO", error.diagnostic)
+        self.assertNotEqual(error.diagnostic, "General error")
+        # The exit-code interpretation is still available separately.
+        self.assertEqual(error.exit_code_diagnostic, "General error")
+        # Full stderr is preserved in the message.
+        self.assertIn("59 more", str(error))
+
+    def test_batch_remote_failure_lifted_not_missing_arg(self):
+        """A 'batchRemote failed' line should surface instead of the misleading
+        'Missing required argument' for exit code 100."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 100  # maps to "Missing required argument"
+        result.stderr = "batchRemote failed: Access denied. (exit code 100)"
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=0, succeeded_before=0
+        )
+
+        self.assertEqual(error.diagnostic, "batchRemote failed: Access denied. (exit code 100)")
+        self.assertEqual(error.exit_code_diagnostic, "Missing required argument")
+
+    def test_falls_back_to_exit_code_diagnostic_when_stderr_unhelpful(self):
+        """When stderr is empty or only stack frames, fall back to the
+        exit-code-based diagnostic."""
+        from joshpy.strategies import SweepExecutionError
+        from unittest.mock import MagicMock
+
+        job = MagicMock()
+        job.parameters = {"x": 10}
+        job.run_hash = "abc123"
+
+        result = MagicMock()
+        result.exit_code = 1
+        result.stderr = ""
+
+        error = SweepExecutionError(
+            job=job, result=result, trial_num=0, succeeded_before=0
+        )
+        self.assertEqual(error.diagnostic, "General error")
+
+
+class TestExtractJarError(unittest.TestCase):
+    """Tests for extract_jar_error helper."""
+
+    def test_lifts_java_exception_line(self):
+        from joshpy.strategies import extract_jar_error
+
+        trace = (
+            "java.lang.IllegalArgumentException: Config value not found: foo\n"
+            "\tat org.joshsim.Foo.bar(Foo.java:1)\n"
+            "\t... 59 more"
+        )
+        self.assertEqual(
+            extract_jar_error(trace),
+            "java.lang.IllegalArgumentException: Config value not found: foo",
+        )
+
+    def test_lifts_caused_by_exception(self):
+        from joshpy.strategies import extract_jar_error
+
+        trace = "Caused by: java.io.IOException: connection reset\n\tat Foo.bar(Foo.java:1)"
+        self.assertEqual(
+            extract_jar_error(trace), "java.io.IOException: connection reset"
+        )
+
+    def test_lifts_failed_line(self):
+        from joshpy.strategies import extract_jar_error
+
+        self.assertEqual(
+            extract_jar_error("batchRemote failed: Access denied. (exit code 100)"),
+            "batchRemote failed: Access denied. (exit code 100)",
+        )
+
+    def test_returns_none_for_empty(self):
+        from joshpy.strategies import extract_jar_error
+
+        self.assertIsNone(extract_jar_error(""))
+        self.assertIsNone(extract_jar_error(None))
+
+    def test_returns_none_for_frames_only(self):
+        from joshpy.strategies import extract_jar_error
+
+        self.assertIsNone(
+            extract_jar_error("\tat Foo.bar(Foo.java:1)\n\t... 3 more")
+        )
+
+    def test_first_non_frame_line_fallback(self):
+        from joshpy.strategies import extract_jar_error
+
+        trace = "Something went wrong\n\tat Foo.bar(Foo.java:1)"
+        self.assertEqual(extract_jar_error(trace), "Something went wrong")
+
 
 class TestGetExitCodeDiagnostic(unittest.TestCase):
     """Tests for get_exit_code_diagnostic function."""

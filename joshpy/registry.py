@@ -64,6 +64,16 @@ except ImportError:
     HAS_PYDANTIC = False
 
 
+class RegistryBusyError(RuntimeError):
+    """Raised when the DuckDB registry file is locked by another process.
+
+    DuckDB is single-writer: a second process opening the same registry file
+    while another holds the write lock would otherwise surface a raw, low-level
+    ``duckdb.IOException``. This typed error lets consumers catch one named
+    exception instead of pattern-matching DuckDB's message string.
+    """
+
+
 def _check_duckdb() -> None:
     """Raise ImportError if duckdb is not available."""
     if not HAS_DUCKDB:
@@ -564,7 +574,17 @@ class RunRegistry:
         _check_duckdb()
         if self._conn is None:
             db_str = str(self.db_path)
-            self._conn = duckdb.connect(db_str)
+            try:
+                self._conn = duckdb.connect(db_str)
+            except duckdb.IOException as e:
+                msg = str(e)
+                if "lock" in msg.lower():
+                    raise RegistryBusyError(
+                        f"Registry '{db_str}' is locked by another process — wait "
+                        f"for it to finish, or use a different registry path. "
+                        f"(DuckDB: {msg.splitlines()[0]})"
+                    ) from e
+                raise
             self._init_schema()
             self._migrate_schema()
             if self.enable_spatial:
