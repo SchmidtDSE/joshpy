@@ -2101,12 +2101,14 @@ class RunRegistry:
             ("job_configs", "DELETE FROM job_configs WHERE run_hash = ?", [run_hash]),
         ]
 
-        # Deletes run child-first and auto-commit per statement. DuckDB does not
-        # see a referencing table's deletes within the *same* explicit
-        # transaction (a documented foreign-key limitation), so wrapping these in
-        # one BEGIN/COMMIT would raise a constraint error. Child-first ordering
-        # keeps each step valid; a partial failure (rare) can be finished by
-        # re-running drop_run.
+        # DuckDB foreign keys are check-only — it rejects ON DELETE CASCADE
+        # ("FOREIGN KEY constraints cannot use CASCADE, SET NULL or SET DEFAULT"),
+        # so there's no DB-level cascade to lean on; we delete child-first by hand.
+        # Deletes also auto-commit per statement: DuckDB doesn't see a referencing
+        # table's deletes within the *same* explicit transaction (a documented FK
+        # limitation), so one BEGIN/COMMIT would raise a constraint error.
+        # Child-first ordering keeps each step valid; a partial failure (rare) can
+        # be finished by re-running drop_run.
         rows: dict[str, int] = {}
         for table, _del, params in deletes:
             where = _del.split("WHERE", 1)[1]

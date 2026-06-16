@@ -443,9 +443,7 @@ print("replicate count:   ", registry.get_replicate_count("low_growth"))
 **Pooling grows a sweep by count.** With `collision_policy="pool"`, re-running a
 sweep with a higher target dispatches only the *number* still needed
 (`target - have`) at fresh, non-colliding indices — so re-running with the same
-target is a no-op, and a larger target tops up the difference. (The `overwrite`
-policy and `force=True` were removed: overwriting outputs can't be kept in sync
-with the registry.)
+target is a no-op, and a larger target tops up the difference.
 
 **Parity guard.** `check_consistency()` surfaces run↔analysis drift — duplicate
 replicates, data without a config, or runs that succeeded but were never
