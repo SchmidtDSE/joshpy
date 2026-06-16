@@ -1616,6 +1616,63 @@ class TestInspectTextDiff(unittest.TestCase):
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestRegistryDescribeMethods(unittest.TestCase):
+    """Tests for the describe_*() convenience wrappers on RunRegistry."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(
+            config=_make_config(), experiment_name="describe_demo"
+        )
+        self.registry.register_run(
+            self.session_id, "hash_aaa111", "/sim.josh",
+            "maxGrowth = 5 meters", None, {"maxGrowth": 5},
+        )
+        self.registry.label_run("hash_aaa111", "baseline")
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_describe_labels_matches_format_labels(self):
+        from joshpy.inspect import format_labels
+
+        self.assertEqual(
+            self.registry.describe_labels(), format_labels(self.registry)
+        )
+        self.assertIn("baseline", self.registry.describe_labels())
+
+    def test_describe_sessions_matches_format_sessions(self):
+        from joshpy.inspect import format_sessions
+
+        self.assertEqual(
+            self.registry.describe_sessions(), format_sessions(self.registry)
+        )
+        self.assertIn("describe_demo", self.registry.describe_sessions())
+
+    def test_describe_run_matches_format_run_info(self):
+        from joshpy.inspect import format_run_info
+
+        self.assertEqual(
+            self.registry.describe_run("baseline"),
+            format_run_info(self.registry, "baseline"),
+        )
+        self.assertIn("maxGrowth", self.registry.describe_run("baseline"))
+
+    def test_describe_run_missing_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.describe_run("nonexistent")
+
+    def test_describe_summary_matches_format_summary(self):
+        from joshpy.inspect import format_summary
+
+        self.assertEqual(
+            self.registry.describe_summary(), format_summary(self.registry)
+        )
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
 class TestGitHash(unittest.TestCase):
     """Tests for git hash capture in session metadata."""
 

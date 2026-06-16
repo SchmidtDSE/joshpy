@@ -1655,6 +1655,64 @@ class RunRegistry:
 
         return open_josh_diff(self, label_or_hash_1, label_or_hash_2, ide=ide)
 
+    # ========== Describe (human-readable summaries) ==========
+
+    def describe_labels(self) -> str:
+        """Human-readable listing of all labeled runs.
+
+        Convenience wrapper around :func:`joshpy.inspect.format_labels`.
+
+        Returns:
+            A formatted table of labels with run_hash and creation time.
+        """
+        from joshpy.inspect import format_labels
+
+        return format_labels(self)
+
+    def describe_sessions(self) -> str:
+        """Human-readable listing of all sweep sessions.
+
+        Convenience wrapper around :func:`joshpy.inspect.format_sessions`.
+
+        Returns:
+            A formatted table of sessions with experiment name, status, and
+            run counts.
+        """
+        from joshpy.inspect import format_sessions
+
+        return format_sessions(self)
+
+    def describe_run(self, label_or_hash: str) -> str:
+        """Human-readable detail for a single run.
+
+        Convenience wrapper around :func:`joshpy.inspect.format_run_info`.
+
+        Args:
+            label_or_hash: Label or run_hash of the run to describe.
+
+        Returns:
+            A multi-section detail string (parameters, data files, replicates,
+            and per-run results).
+
+        Raises:
+            KeyError: If the label or hash is not found.
+        """
+        from joshpy.inspect import format_run_info
+
+        return format_run_info(self, label_or_hash)
+
+    def describe_summary(self) -> str:
+        """Human-readable overview of everything in the registry.
+
+        Convenience wrapper around :func:`joshpy.inspect.format_summary`.
+
+        Returns:
+            A high-level data summary for the whole registry.
+        """
+        from joshpy.inspect import format_summary
+
+        return format_summary(self)
+
     # ========== Bottle ==========
 
     def bottle(

@@ -106,54 +106,55 @@ print(f"Registered 2 runs: low_growth, high_growth")
 ## Querying the Registry
 
 Before viewing or diffing runs, you often need to know what's in the registry.
-The `joshpy.inspect` module provides four query utilities that work from both
-Python and the command line -- no interactive session required.
+The registry exposes four `describe_*()` methods that return human-readable
+summaries -- the same output the CLI produces, available directly on the
+registry object so you don't have to import anything.
+
+::: {.callout-note}
+Each `describe_*()` method is a thin wrapper around the matching
+`joshpy.inspect.format_*()` function (`describe_labels` →
+`format_labels`, and so on). Use whichever reads better in your code; the free
+functions remain available if you prefer to import them.
+:::
 
 ### Listing Labels
 
 Labels are the human-readable names assigned to run configurations. Use
-`format_labels()` to see what's available:
+`describe_labels()` to see what's available:
 
 ```{python}
-#| label: format-labels
-from joshpy.inspect import format_labels
-
-print(format_labels(registry))
+#| label: describe-labels
+print(registry.describe_labels())
 ```
 
 ### Listing Sessions
 
-A session groups the configs from a single sweep. Use `format_sessions()` to
+A session groups the configs from a single sweep. Use `describe_sessions()` to
 see all sessions with their experiment name, status, and run counts:
 
 ```{python}
-#| label: format-sessions
-from joshpy.inspect import format_sessions
-
-print(format_sessions(registry))
+#| label: describe-sessions
+print(registry.describe_sessions())
 ```
 
 ### Run Details
 
-Use `format_run_info()` to see full details for a specific run -- parameters,
+Use `describe_run()` to see full details for a specific run -- parameters,
 data files, and replicate results:
 
 ```{python}
-#| label: format-run-info
-from joshpy.inspect import format_run_info
-
-print(format_run_info(registry, "low_growth"))
+#| label: describe-run
+print(registry.describe_run("low_growth"))
 ```
 
 ### Registry Summary
 
-Use `format_summary()` for a high-level overview of everything in the registry:
+Use `describe_summary()` for a high-level overview of everything in the
+registry:
 
 ```{python}
-#| label: format-summary
-from joshpy.inspect import format_summary
-
-print(format_summary(registry))
+#| label: describe-summary
+print(registry.describe_summary())
 ```
 
 ### From the Command Line
