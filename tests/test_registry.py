@@ -1616,6 +1616,136 @@ class TestInspectTextDiff(unittest.TestCase):
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestRegistryDescribeMethods(unittest.TestCase):
+    """Tests for the describe_*() convenience wrappers on RunRegistry."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(
+            config=_make_config(), experiment_name="describe_demo"
+        )
+        self.registry.register_run(
+            self.session_id, "hash_aaa111", "/sim.josh",
+            "maxGrowth = 5 meters", None, {"maxGrowth": 5},
+        )
+        self.registry.label_run("hash_aaa111", "baseline")
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_describe_labels_matches_format_labels(self):
+        from joshpy.inspect import format_labels
+
+        self.assertEqual(
+            self.registry.describe_labels(), format_labels(self.registry)
+        )
+        self.assertIn("baseline", self.registry.describe_labels())
+
+    def test_describe_sessions_matches_format_sessions(self):
+        from joshpy.inspect import format_sessions
+
+        self.assertEqual(
+            self.registry.describe_sessions(), format_sessions(self.registry)
+        )
+        self.assertIn("describe_demo", self.registry.describe_sessions())
+
+    def test_describe_run_matches_format_run_info(self):
+        from joshpy.inspect import format_run_info
+
+        self.assertEqual(
+            self.registry.describe_run("baseline"),
+            format_run_info(self.registry, "baseline"),
+        )
+        self.assertIn("maxGrowth", self.registry.describe_run("baseline"))
+
+    def test_describe_run_missing_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.describe_run("nonexistent")
+
+    def test_describe_summary_matches_format_summary(self):
+        from joshpy.inspect import format_summary
+
+        self.assertEqual(
+            self.registry.describe_summary(), format_summary(self.registry)
+        )
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestGetRunInfo(unittest.TestCase):
+    """Tests for the structured get_run_info() / RunDetail aggregate."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(
+            config=_make_config(), experiment_name="run_info_demo"
+        )
+        self.registry.register_run(
+            self.session_id, "hash_aaa111", "/sim.josh",
+            "maxGrowth = 5 meters",
+            {"soil": {"path": "/data/soil.jshd", "hash": "abc"}},
+            {"maxGrowth": 5},
+        )
+        self.registry.label_run("hash_aaa111", "baseline")
+        # Two completed runs (one ok, one failed) plus one pending.
+        ok = self.registry.start_run(
+            run_hash="hash_aaa111", session_id=self.session_id,
+            replicate=0, output_path="out/0.csv",
+        )
+        self.registry.complete_run(ok, exit_code=0)
+        bad = self.registry.start_run(
+            run_hash="hash_aaa111", session_id=self.session_id,
+            replicate=1, output_path="out/1.csv",
+        )
+        self.registry.complete_run(bad, exit_code=1)
+        self.registry.start_run(
+            run_hash="hash_aaa111", session_id=self.session_id,
+            replicate=2, output_path="out/2.csv",
+        )  # left pending (no complete_run)
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_returns_run_detail_with_config_and_runs(self):
+        from joshpy.registry import ConfigInfo, RunDetail
+
+        detail = self.registry.get_run_info("baseline")
+        self.assertIsInstance(detail, RunDetail)
+        self.assertIsInstance(detail.config, ConfigInfo)
+        self.assertEqual(detail.run_hash, "hash_aaa111")
+        self.assertEqual(detail.label, "baseline")
+        self.assertEqual(detail.parameters, {"maxGrowth": 5})
+        self.assertEqual(len(detail.runs), 3)
+
+    def test_resolves_by_hash_too(self):
+        detail = self.registry.get_run_info("hash_aaa111")
+        self.assertEqual(detail.label, "baseline")
+
+    def test_status_counts(self):
+        detail = self.registry.get_run_info("baseline")
+        self.assertEqual(detail.succeeded, 1)
+        self.assertEqual(detail.failed, 1)
+        self.assertEqual(detail.pending, 1)
+
+    def test_missing_run_raises_keyerror(self):
+        with self.assertRaises(KeyError):
+            self.registry.get_run_info("nonexistent")
+
+    def test_describe_run_is_consistent_with_get_run_info(self):
+        """describe_run should report the same status counts get_run_info exposes."""
+        detail = self.registry.get_run_info("baseline")
+        text = self.registry.describe_run("baseline")
+        self.assertIn(
+            f"Runs: {detail.succeeded} succeeded, "
+            f"{detail.failed} failed, {detail.pending} pending",
+            text,
+        )
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
 class TestGitHash(unittest.TestCase):
     """Tests for git hash capture in session metadata."""
 
