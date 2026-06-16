@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import importlib
 import itertools
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -126,6 +127,63 @@ EXIT_CODE_DIAGNOSTICS: dict[int, tuple[str, str]] = {
 }
 
 
+# Regex for a Java exception header line, e.g.
+#   java.lang.IllegalArgumentException: Config value not found: sweep_config.foo
+#   Caused by: java.io.IOException: connection reset
+_JAVA_EXCEPTION_RE = re.compile(
+    r"^(?:Caused by: )?(?P<cls>[\w.$]+(?:Exception|Error)): (?P<msg>.+)$"
+)
+# Regex for joshpy/JAR "<something> failed: <reason>" lines, e.g.
+#   batchRemote failed: Access denied. (exit code 100)
+_FAILED_RE = re.compile(r"^\s*\w+ failed: .+", re.IGNORECASE)
+
+
+def extract_jar_error(stderr: str) -> str | None:
+    """Extract the single most meaningful line from JAR stderr.
+
+    JAR failures dump a Java stack trace where the genuinely useful line (the
+    exception message) is buried under dozens of stack frames. This lifts that
+    line out so it can be surfaced as a diagnostic.
+
+    Args:
+        stderr: Raw stderr captured from the JAR subprocess.
+
+    Returns:
+        The most informative line (exception class + message, a "... failed: ..."
+        line, or the first non-frame line), or None if nothing useful is found.
+    """
+    if not stderr:
+        return None
+
+    lines = stderr.splitlines()
+
+    # 1. Prefer an explicit Java exception header (class + message).
+    for line in lines:
+        match = _JAVA_EXCEPTION_RE.match(line.strip())
+        if match:
+            return f"{match.group('cls')}: {match.group('msg')}".strip()
+
+    # 2. Otherwise a "<something> failed: <reason>" line (e.g. batchRemote failed).
+    for line in lines:
+        if _FAILED_RE.match(line):
+            return line.strip()
+
+    # 3. Otherwise the first non-empty line that is not a stack frame.
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if (
+            stripped.startswith("at ")
+            or stripped.startswith("... ")
+            or stripped.startswith("Exception in thread")
+        ):
+            continue
+        return stripped
+
+    return None
+
+
 def get_exit_code_diagnostic(exit_code: int) -> tuple[str, str]:
     """Get human-readable diagnostic for an exit code.
 
@@ -165,7 +223,11 @@ class SweepExecutionError(Exception):
         result: The CLIResult with exit code and stderr.
         trial_num: Zero-indexed trial number that failed.
         succeeded_before: Number of trials that succeeded before this failure.
-        diagnostic: Human-readable description of the exit code.
+        diagnostic: Human-readable description of the failure. Set to the JAR's
+            actual error line (lifted from stderr) when available, otherwise the
+            exit-code-based description.
+        exit_code_diagnostic: The exit-code-based description (always set), kept
+            separately so callers can still see the exit-code interpretation.
         suggestion: Actionable suggestion for resolving the error.
 
     Examples:
@@ -190,8 +252,13 @@ class SweepExecutionError(Exception):
         self.trial_num = trial_num
         self.succeeded_before = succeeded_before
 
-        # Get human-readable diagnostic
-        self.diagnostic, self.suggestion = get_exit_code_diagnostic(result.exit_code)
+        # Get human-readable diagnostic. Prefer the JAR's actual error line
+        # (lifted out of the stack trace) over the generic exit-code guess,
+        # which can be misleading when the JAR reuses exit codes.
+        code_diagnostic, self.suggestion = get_exit_code_diagnostic(result.exit_code)
+        self.exit_code_diagnostic = code_diagnostic
+        jar_error = extract_jar_error(getattr(result, "stderr", "") or "")
+        self.diagnostic = jar_error or code_diagnostic
 
         # Build informative message
         message = (

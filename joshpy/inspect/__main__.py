@@ -9,6 +9,7 @@ Usage::
     python -m joshpy.inspect registry.duckdb --view baseline
     python -m joshpy.inspect registry.duckdb --view baseline --export-only
     python -m joshpy.inspect registry.duckdb --diff baseline high_growth
+    python -m joshpy.inspect registry.duckdb --diff baseline high_growth --print
     python -m joshpy.inspect registry.duckdb --diff baseline high_growth --export-only
     python -m joshpy.inspect registry.duckdb --diff baseline high_growth --ide cursor
     python -m joshpy.inspect registry.duckdb --view baseline --type josh
@@ -83,6 +84,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Export file(s) without opening an IDE.",
     )
     parser.add_argument(
+        "--print",
+        dest="print_diff",
+        action="store_true",
+        help="Print a unified text diff to stdout (works headless; no IDE). "
+        "Applies to --diff only.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
@@ -107,6 +115,8 @@ def main() -> int:
         open_josh_diff,
         open_josh_view,
         open_view,
+        text_diff,
+        text_josh_diff,
         view_config,
         view_josh,
     )
@@ -135,6 +145,12 @@ def main() -> int:
                     registry, args.view, args.ide, args.output_dir
                 )
                 print(f"Exported: {path}")
+            elif args.print_diff:
+                diff = text_josh_diff(registry, args.diff[0], args.diff[1])
+                if diff:
+                    print(diff, end="" if diff.endswith("\n") else "\n")
+                else:
+                    print("(no differences)", file=sys.stderr)
             elif args.export_only:
                 path1, path2 = export_josh_pair(
                     registry, args.diff[0], args.diff[1], args.output_dir
@@ -156,6 +172,12 @@ def main() -> int:
                     registry, args.view, args.ide, args.output_dir
                 )
                 print(f"Exported: {path}")
+            elif args.print_diff:
+                diff = text_diff(registry, args.diff[0], args.diff[1])
+                if diff:
+                    print(diff, end="" if diff.endswith("\n") else "\n")
+                else:
+                    print("(no differences)", file=sys.stderr)
             elif args.export_only:
                 path1, path2 = export_pair(
                     registry, args.diff[0], args.diff[1], args.output_dir

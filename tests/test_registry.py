@@ -1564,6 +1564,58 @@ class TestLabelSystem(unittest.TestCase):
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestInspectTextDiff(unittest.TestCase):
+    """Tests for the headless --print text-diff mode of joshpy.inspect."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(config=_make_config())
+        self.registry.register_run(
+            self.session_id, "hash_aaa111", "/sim.josh",
+            "survivalProbAdult = 85 %\ngrowthRate = 1.2\n", None, {"param": 10},
+        )
+        self.registry.register_run(
+            self.session_id, "hash_bbb222", "/sim.josh",
+            "survivalProbAdult = 90 %\ngrowthRate = 1.2\n", None, {"param": 20},
+        )
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_text_diff_produces_unified_diff(self):
+        from joshpy.inspect._core import text_diff
+
+        diff = text_diff(self.registry, "hash_aaa111", "hash_bbb222")
+        self.assertIn("---", diff)
+        self.assertIn("+++", diff)
+        self.assertIn("@@", diff)
+        self.assertIn("-survivalProbAdult = 85 %", diff)
+        self.assertIn("+survivalProbAdult = 90 %", diff)
+
+    def test_text_diff_uses_labels_in_headers(self):
+        from joshpy.inspect._core import text_diff
+
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run("hash_bbb222", "high_survival")
+        diff = text_diff(self.registry, "baseline", "high_survival")
+        self.assertIn("--- baseline", diff)
+        self.assertIn("+++ high_survival", diff)
+
+    def test_text_diff_identical_is_empty(self):
+        from joshpy.inspect._core import text_diff
+
+        self.assertEqual(text_diff(self.registry, "hash_aaa111", "hash_aaa111"), "")
+
+    def test_text_diff_missing_run_raises(self):
+        from joshpy.inspect._core import text_diff
+
+        with self.assertRaises(KeyError):
+            text_diff(self.registry, "hash_aaa111", "nonexistent")
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
 class TestGitHash(unittest.TestCase):
     """Tests for git hash capture in session metadata."""
 
@@ -1927,6 +1979,58 @@ class TestPooledRunsInspect(unittest.TestCase):
 
         output = format_run_info(self.registry, "growth_5")
         self.assertIn("Replicates: 5", output)
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestRegistryBusyError(unittest.TestCase):
+    """Tests for the typed lock error on a concurrently-held registry."""
+
+    def test_locked_registry_raises_registry_busy_error(self):
+        """Opening a registry locked by another process should raise a typed,
+        actionable RegistryBusyError rather than a raw DuckDB IOException."""
+        import os
+        import subprocess
+        import sys
+        import time
+
+        from joshpy.registry import RegistryBusyError, RunRegistry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "busy.duckdb")
+            # Hold a write lock from a separate process (DuckDB is single-writer
+            # across processes; same-process connections are shared).
+            holder = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import duckdb, time, sys; "
+                    "c = duckdb.connect(sys.argv[1]); "
+                    "c.execute('CREATE TABLE t(x INTEGER)'); "
+                    "time.sleep(15)",
+                    db_path,
+                ]
+            )
+            try:
+                # Wait for the holder to acquire the lock.
+                deadline = time.monotonic() + 10
+                while not os.path.exists(db_path) and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                time.sleep(1.0)
+
+                with self.assertRaises(RegistryBusyError) as ctx:
+                    RunRegistry(db_path)
+                msg = str(ctx.exception)
+                self.assertIn("locked by another process", msg)
+                self.assertIn(db_path, msg)
+            finally:
+                holder.terminate()
+                holder.wait()
+
+    def test_registry_busy_error_is_runtime_error(self):
+        """RegistryBusyError should subclass RuntimeError for easy catching."""
+        from joshpy.registry import RegistryBusyError
+
+        self.assertTrue(issubclass(RegistryBusyError, RuntimeError))
 
 
 if __name__ == "__main__":

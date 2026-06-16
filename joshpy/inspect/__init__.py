@@ -27,6 +27,8 @@ from joshpy.inspect._core import (  # noqa: F401
     open_josh_diff,
     open_josh_view,
     open_view,
+    text_diff,
+    text_josh_diff,
     view_config,
     view_josh,
 )

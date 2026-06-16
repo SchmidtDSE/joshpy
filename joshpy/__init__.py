@@ -132,6 +132,7 @@ except ImportError:
 try:
     from joshpy.registry import (
         RunRegistry,
+        RegistryBusyError,
         RegistryCallback,
         SessionInfo,
         ConfigInfo,
@@ -274,6 +275,7 @@ __all__ = [
     "cv_objective",
     # Registry (optional)
     "RunRegistry",
+    "RegistryBusyError",
     "RegistryCallback",
     "SessionInfo",
     "ConfigInfo",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import shutil
 import subprocess
 import tempfile
@@ -190,6 +191,33 @@ def export_pair(
     return path1, path2
 
 
+def text_diff(
+    registry: RunRegistry,
+    label_or_hash_1: str,
+    label_or_hash_2: str,
+) -> str:
+    """Produce a unified text diff of two runs' stored configs.
+
+    Works headless (terminal, CI, SSH) — no IDE required.
+
+    Args:
+        registry: RunRegistry instance.
+        label_or_hash_1: First run label or run_hash.
+        label_or_hash_2: Second run label or run_hash.
+
+    Returns:
+        Unified diff as a string (empty if the two configs are identical).
+
+    Raises:
+        KeyError: If a label or hash is not found in the registry.
+    """
+    a = view_config(registry, label_or_hash_1).splitlines(keepends=True)
+    b = view_config(registry, label_or_hash_2).splitlines(keepends=True)
+    return "".join(
+        difflib.unified_diff(a, b, fromfile=label_or_hash_1, tofile=label_or_hash_2)
+    )
+
+
 def open_diff(
     registry: RunRegistry,
     label_or_hash_1: str,
@@ -356,6 +384,33 @@ def export_josh_pair(
     path1 = registry.export_josh(label_or_hash_1, out)
     path2 = registry.export_josh(label_or_hash_2, out)
     return path1, path2
+
+
+def text_josh_diff(
+    registry: RunRegistry,
+    label_or_hash_1: str,
+    label_or_hash_2: str,
+) -> str:
+    """Produce a unified text diff of two runs' stored josh sources.
+
+    Works headless (terminal, CI, SSH) — no IDE required.
+
+    Args:
+        registry: RunRegistry instance.
+        label_or_hash_1: First run label or run_hash.
+        label_or_hash_2: Second run label or run_hash.
+
+    Returns:
+        Unified diff as a string (empty if the two sources are identical).
+
+    Raises:
+        KeyError: If a label or hash is not found, or josh content is not stored.
+    """
+    a = view_josh(registry, label_or_hash_1).splitlines(keepends=True)
+    b = view_josh(registry, label_or_hash_2).splitlines(keepends=True)
+    return "".join(
+        difflib.unified_diff(a, b, fromfile=label_or_hash_1, tofile=label_or_hash_2)
+    )
 
 
 def open_josh_diff(
