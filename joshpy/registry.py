@@ -368,6 +368,60 @@ class RunInfo:
 
 
 @dataclass
+class RunDetail:
+    """Aggregated detail for a single run.
+
+    Combines a run's stored configuration, its recorded executions, and its
+    replicate count into one structured object. This is the data-layer
+    counterpart to :meth:`RunRegistry.describe_run` (which renders the same
+    information as a human-readable string); use :meth:`RunRegistry.get_run_info`
+    to obtain one.
+
+    Attributes:
+        config: The run's stored configuration (parameters, file mappings,
+            josh path, label, ...).
+        runs: All recorded executions for this run (typically one per replicate
+            attempt). May be empty if no runs have been recorded yet.
+        replicate_count: Distinct replicate count from ``cell_data`` -- the
+            source of truth for pooled runs.
+    """
+
+    config: ConfigInfo
+    runs: list[RunInfo]
+    replicate_count: int
+
+    @property
+    def run_hash(self) -> str:
+        """The run's hash (delegates to :attr:`config`)."""
+        return self.config.run_hash
+
+    @property
+    def label(self) -> str | None:
+        """The run's label, if any (delegates to :attr:`config`)."""
+        return self.config.label
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        """The run's parameter values (delegates to :attr:`config`)."""
+        return self.config.parameters
+
+    @property
+    def succeeded(self) -> int:
+        """Number of recorded runs that exited successfully (exit code 0)."""
+        return sum(1 for r in self.runs if r.exit_code == 0)
+
+    @property
+    def failed(self) -> int:
+        """Number of recorded runs that exited with a non-zero code."""
+        return sum(1 for r in self.runs if r.exit_code is not None and r.exit_code != 0)
+
+    @property
+    def pending(self) -> int:
+        """Number of recorded runs with no exit code yet (still running)."""
+        return sum(1 for r in self.runs if r.exit_code is None)
+
+
+@dataclass
 class ColumnStats:
     """Statistics for a single column in cell_data.
 
@@ -1906,6 +1960,41 @@ class RunRegistry:
             [run_hash],
         ).fetchone()
         return result[0] if result else 0
+
+    def get_run_info(self, label_or_hash: str) -> RunDetail:
+        """Get aggregated structured detail for a single run.
+
+        Combines :meth:`get_config_by_hash`, :meth:`get_runs_for_hash`, and
+        :meth:`get_replicate_count` into one :class:`RunDetail`. This is the
+        structured, data-layer counterpart to :meth:`describe_run`, which formats
+        this same information as a human-readable string.
+
+        Args:
+            label_or_hash: Label or run_hash of the run.
+
+        Returns:
+            A :class:`RunDetail` aggregating the config, recorded runs, and
+            replicate count.
+
+        Raises:
+            KeyError: If the label or hash is not found.
+
+        Examples:
+            >>> detail = registry.get_run_info("baseline")
+            >>> detail.parameters
+            {'survivalProbAdult': 85}
+            >>> detail.succeeded, detail.failed, detail.pending
+            (3, 0, 0)
+        """
+        run_hash = self._resolve_label_or_hash(label_or_hash)
+        config = self.get_config_by_hash(run_hash)
+        # _resolve_label_or_hash guarantees a config exists for this hash.
+        assert config is not None
+        return RunDetail(
+            config=config,
+            runs=self.get_runs_for_hash(run_hash),
+            replicate_count=self.get_replicate_count(run_hash),
+        )
 
     # ========== Output Tracking ==========
 

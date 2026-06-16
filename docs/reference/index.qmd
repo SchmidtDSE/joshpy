@@ -56,6 +56,7 @@ DuckDB-backed experiment tracking
 | [registry.SessionInfo](registry.SessionInfo.qmd#joshpy.registry.SessionInfo) | Information about a sweep session. |
 | [registry.ConfigInfo](registry.ConfigInfo.qmd#joshpy.registry.ConfigInfo) | Information about a job configuration. |
 | [registry.RunInfo](registry.RunInfo.qmd#joshpy.registry.RunInfo) | Information about a job run. |
+| [registry.RunDetail](registry.RunDetail.qmd#joshpy.registry.RunDetail) | Aggregated detail for a single run. |
 | [registry.DataSummary](registry.DataSummary.qmd#joshpy.registry.DataSummary) | Summary of data loaded in the registry. |
 
 ## Cell Data Module

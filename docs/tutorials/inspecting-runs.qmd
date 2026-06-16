@@ -147,6 +147,24 @@ data files, and replicate results:
 print(registry.describe_run("low_growth"))
 ```
 
+When you need the underlying data rather than a formatted string -- for example
+to drive your own logic or reporting -- use `get_run_info()`, which returns a
+structured `RunDetail` (the data-layer counterpart to `describe_run()`):
+
+```{python}
+#| label: get-run-info
+detail = registry.get_run_info("low_growth")
+
+print("hash:      ", detail.run_hash)
+print("label:     ", detail.label)
+print("parameters:", detail.parameters)
+print("replicates:", detail.replicate_count)
+print("status:    ", detail.succeeded, "ok /", detail.failed, "failed /", detail.pending, "pending")
+```
+
+`detail.config` is the full `ConfigInfo` and `detail.runs` is the list of
+recorded `RunInfo` executions, so you can inspect everything programmatically.
+
 ### Registry Summary
 
 Use `describe_summary()` for a high-level overview of everything in the

@@ -552,10 +552,11 @@ def format_run_info(registry: RunRegistry, label_or_hash: str) -> str:
     Raises:
         KeyError: If the label or hash is not found in the registry.
     """
-    run_hash = _resolve_label(registry, label_or_hash)
-    config = registry.get_config_by_hash(run_hash)
-    if config is None:
-        raise KeyError(f"No run found for '{label_or_hash}'")
+    # get_run_info aggregates config + runs + replicate count and raises
+    # KeyError if the run is not found.
+    detail = registry.get_run_info(label_or_hash)
+    config = detail.config
+    run_hash = detail.run_hash
 
     # Header
     if config.label:
@@ -594,21 +595,21 @@ def format_run_info(registry: RunRegistry, label_or_hash: str) -> str:
         lines.append("  (none)")
 
     # Replicates (from cell_data, the source of truth for pooled runs)
-    rep_count = registry.get_replicate_count(run_hash)
+    rep_count = detail.replicate_count
     if rep_count > 0:
         lines.append("")
         lines.append(f"Replicates: {rep_count}")
 
     # Runs
-    runs = registry.get_runs_for_hash(run_hash)
+    runs = detail.runs
     lines.append("")
     if not runs:
         lines.append("Runs: (none recorded)")
     else:
-        succeeded = sum(1 for r in runs if r.exit_code is not None and r.exit_code == 0)
-        failed = sum(1 for r in runs if r.exit_code is not None and r.exit_code != 0)
-        pending = sum(1 for r in runs if r.exit_code is None)
-        lines.append(f"Runs: {succeeded} succeeded, {failed} failed, {pending} pending")
+        lines.append(
+            f"Runs: {detail.succeeded} succeeded, "
+            f"{detail.failed} failed, {detail.pending} pending"
+        )
 
         run_rows: list[list[str]] = []
         for r in runs:
