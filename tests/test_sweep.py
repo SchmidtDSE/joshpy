@@ -318,6 +318,66 @@ class TestRecoverSweepResults(unittest.TestCase):
 
             registry.close()
 
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_skips_already_loaded_replicates(self, mock_loader_class):
+        """Idempotent ingest: a replicate index already in cell_data is skipped."""
+        mock_cli = MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for i in range(2):
+                (Path(tmpdir) / f"output_{i}.csv").write_text(
+                    f"step,replicate,value\n0,{i},42\n"
+                )
+
+            mock_job = MagicMock()
+            mock_job.source_path = Path("/path/to/sim.josh")
+            mock_job.simulation = "Main"
+            mock_job.run_hash = "abc123def456"
+            mock_job.replicates = 2
+            mock_job.parameters = {}
+            mock_job.custom_tags = {}
+
+            mock_job_set = MagicMock()
+            mock_job_set.__iter__ = lambda self: iter([mock_job])
+            mock_job_set.jobs = [mock_job]
+
+            mock_export_paths = MagicMock()
+            mock_export_paths.resolve_path.side_effect = (
+                lambda template, **kw: Path(tmpdir) / f"output_{kw['replicate']}.csv"
+            )
+            mock_cli.inspect_exports.return_value = mock_export_paths
+
+            from joshpy.registry import RunRegistry
+            registry = RunRegistry(":memory:")
+            session_id = registry.create_session(
+                JobConfig(simulation="TestSim"), experiment_name="test"
+            )
+            registry.register_run(
+                session_id=session_id, run_hash="abc123def456",
+                josh_path="/path/to/sim.josh", config_content="c",
+                file_mappings=None, parameters={},
+            )
+            run_id = registry.start_run(run_hash="abc123def456", session_id=session_id)
+
+            # Pre-seed replicate 0 as already loaded.
+            registry.conn.execute(
+                "INSERT INTO cell_data (run_id, run_hash, step, replicate) VALUES (?, ?, ?, ?)",
+                [run_id, "abc123def456", 0, 0],
+            )
+
+            mock_loader = MagicMock()
+            mock_loader.load_csv.return_value = 5
+            mock_loader_class.return_value = mock_loader
+
+            recover_sweep_results(
+                cli=mock_cli, job_set=mock_job_set, registry=registry,
+                run_ids={"abc123def456": run_id}, quiet=True,
+            )
+
+            # Only replicate 1 should be loaded; replicate 0 was skipped.
+            self.assertEqual(mock_loader.load_csv.call_count, 1)
+            registry.close()
+
 
 class TestSweepManagerBuilder(unittest.TestCase):
     """Tests for SweepManagerBuilder class."""
@@ -1326,8 +1386,10 @@ class TestIngestResults(unittest.TestCase):
              patch.dict("os.environ", env):
             rows = ingest_results(mock_cli, registry, "test-label", quiet=True)
 
-            # Should have configured S3
-            mock_configure.assert_called_once()
+            # Should have configured S3 (now also configured for the
+            # replicate-listing pass that precedes ingest, so it may be called
+            # more than once — both with the same endpoint).
+            mock_configure.assert_called()
             call_args = mock_configure.call_args
             self.assertEqual(call_args[0][1], "storage.example.com")
 
@@ -1967,7 +2029,8 @@ class TestStaticCollisionCheck(unittest.TestCase):
             self.assertIn("hashAAA111", msg)
             self.assertIn("{timestamp}", msg)
             self.assertIn("{run_hash}", msg)
-            self.assertIn("force=True", msg)
+            self.assertIn("drop_run", msg)
+            self.assertIn("pool", msg)
 
     def test_cache_populated_and_reused(self):
         """Multiple jobs sharing (source, simulation) call inspect_exports once."""
@@ -2056,15 +2119,17 @@ class TestStaticCollisionCheck(unittest.TestCase):
                 manager.run(quiet=True)
 
     @patch("joshpy.sweep.run_sweep")
-    def test_run_force_true_bypasses(self, mock_run_sweep):
-        """force=True bypasses the collision check."""
+    def test_run_force_true_removed_raises(self, mock_run_sweep):
+        """force=True was removed; it now raises ValueError with guidance."""
         mock_run_sweep.return_value = MagicMock(
             succeeded=1, failed=0, run_ids={}, total_rows=0,
         )
         with tempfile.TemporaryDirectory() as tmp:
             manager, _cli = self._build_manager_with_batch_remote(Path(tmp))
-            manager.run(force=True, quiet=True)
-            mock_run_sweep.assert_called_once()
+            with self.assertRaises(ValueError) as ctx:
+                manager.run(force=True, quiet=True)
+            self.assertIn("drop_run", str(ctx.exception))
+            mock_run_sweep.assert_not_called()
 
     @patch("joshpy.sweep.run_sweep")
     def test_run_dry_run_bypasses(self, mock_run_sweep):
@@ -2150,15 +2215,27 @@ class TestApplyCollisionPolicy(unittest.TestCase):
         action = _apply_collision_policy("pool", {0, 1, 2, 3, 4, 5}, n_requested=5)
         self.assertEqual(action.action, "skip")
 
-    def test_pool_sparse_existing_uses_max(self):
-        """Pool uses max(existing)+1, not count(existing), as the offset."""
+    def test_pool_is_count_based_not_gap_fill(self):
+        """Pool reconciles by count: dispatch (target - have) at a fresh offset.
+
+        Sparse {1,4,5} with target 5: have=3, need=2, dispatched at max+1=6.
+        The gap structure is irrelevant — only the count matters.
+        """
         from joshpy.sweep import _apply_collision_policy
 
-        # {0, 7} — max is 7, so next is 8
+        action = _apply_collision_policy("pool", {1, 4, 5}, n_requested=5)
+        self.assertEqual(action.action, "dispatch")
+        self.assertEqual(action.replicate_start, 6)
+        self.assertEqual(action.replicates, 2)
+
+    def test_pool_sparse_dispatches_by_count(self):
+        """{0, 7} with target 10: have=2, need=8, fresh indices start at max+1=8."""
+        from joshpy.sweep import _apply_collision_policy
+
         action = _apply_collision_policy("pool", {0, 7}, n_requested=10)
         self.assertEqual(action.action, "dispatch")
         self.assertEqual(action.replicate_start, 8)
-        self.assertEqual(action.replicates, 2)
+        self.assertEqual(action.replicates, 8)  # 10 - 2 have
 
     def test_unknown_policy_raises(self):
         from joshpy.sweep import _apply_collision_policy
@@ -2166,32 +2243,14 @@ class TestApplyCollisionPolicy(unittest.TestCase):
         with self.assertRaises(ValueError):
             _apply_collision_policy("replace", set(), n_requested=5)
 
-    def test_overwrite_with_existing_dispatches_full(self):
-        """overwrite ignores prior outputs and dispatches 0..N-1 over them."""
-        from joshpy.sweep import _apply_collision_policy
+    def test_overwrite_policy_removed(self):
+        """'overwrite' was removed; it now raises with guidance."""
+        from joshpy.sweep import _apply_collision_policy, COLLISION_POLICIES
 
-        action = _apply_collision_policy("overwrite", {0, 1, 2}, n_requested=5)
-        self.assertEqual(action.action, "dispatch")
-        self.assertEqual(action.replicate_start, 0)
-        self.assertEqual(action.replicates, 5)
-
-    def test_overwrite_with_empty_dispatches_full(self):
-        from joshpy.sweep import _apply_collision_policy
-
-        action = _apply_collision_policy("overwrite", set(), n_requested=5)
-        self.assertEqual(action.action, "dispatch")
-        self.assertEqual(action.replicate_start, 0)
-        self.assertEqual(action.replicates, 5)
-
-    def test_overwrite_shrinking_sweep_leaves_orphans(self):
-        """Shrinking sweep (old=10, new=5): dispatch only 0..4; 5..9 stay orphaned."""
-        from joshpy.sweep import _apply_collision_policy
-
-        action = _apply_collision_policy("overwrite", set(range(10)), n_requested=5)
-        self.assertEqual(action.action, "dispatch")
-        self.assertEqual(action.replicates, 5)
-        # The action doesn't track orphans — that's a known limitation,
-        # documented in with_collision_policy() docstring.
+        self.assertNotIn("overwrite", COLLISION_POLICIES)
+        with self.assertRaises(ValueError) as ctx:
+            _apply_collision_policy("overwrite", {0, 1, 2}, n_requested=5)
+        self.assertIn("drop_run", str(ctx.exception))
 
 
 class TestListExistingReplicatesMinio(unittest.TestCase):
@@ -2347,15 +2406,17 @@ class TestCollisionPolicyBuilder(unittest.TestCase):
         self.assertIn("destroy-all", str(ctx.exception))
         self.assertIn("must be one of", str(ctx.exception))
 
-    def test_with_collision_policy_accepts_overwrite(self):
+    def test_with_collision_policy_rejects_overwrite(self):
+        """'overwrite' was removed; the builder rejects it with guidance."""
         from joshpy.jobs import JobConfig
         from joshpy.sweep import SweepManagerBuilder
 
         config = JobConfig(
             source_path=Path("/fake.josh"), simulation="Main", replicates=1,
         )
-        builder = SweepManagerBuilder(config).with_collision_policy("overwrite")
-        self.assertEqual(builder._collision_policy, "overwrite")
+        with self.assertRaises(ValueError) as ctx:
+            SweepManagerBuilder(config).with_collision_policy("overwrite")
+        self.assertIn("overwrite", str(ctx.exception))
 
     def test_builder_default_propagates_to_manager(self):
         from joshpy.jobs import JobConfig

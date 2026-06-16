@@ -383,12 +383,16 @@ class RunDetail:
         runs: All recorded executions for this run (typically one per replicate
             attempt). May be empty if no runs have been recorded yet.
         replicate_count: Distinct replicate count from ``cell_data`` -- the
-            source of truth for pooled runs.
+            source of truth for how many replicates are loaded.
+        replicates: The set of replicate indices present in ``cell_data``. The
+            index is a collision-avoidance tag, so this set may be sparse (e.g.
+            ``{1, 4, 5}``); only its size is meaningful.
     """
 
     config: ConfigInfo
     runs: list[RunInfo]
     replicate_count: int
+    replicates: set[int] = field(default_factory=set)
 
     @property
     def run_hash(self) -> str:
@@ -419,6 +423,45 @@ class RunDetail:
     def pending(self) -> int:
         """Number of recorded runs with no exit code yet (still running)."""
         return sum(1 for r in self.runs if r.exit_code is None)
+
+
+@dataclass
+class DropSummary:
+    """Rows removed by :meth:`RunRegistry.drop_run`, per table.
+
+    Attributes:
+        run_hash: The run hash that was dropped.
+        label: The label that was dropped (if the run was labeled).
+        rows: Mapping of table name -> number of rows deleted.
+    """
+
+    run_hash: str
+    label: str | None
+    rows: dict[str, int]
+
+    @property
+    def total(self) -> int:
+        """Total rows deleted across all tables."""
+        return sum(self.rows.values())
+
+
+@dataclass
+class ConsistencyIssue:
+    """A run<->analysis consistency problem found by :meth:`RunRegistry.check_consistency`.
+
+    Attributes:
+        kind: Machine-readable issue type (e.g. ``"duplicate_replicate"``,
+            ``"data_without_config"``, ``"orphan_cell_data"``, ``"ran_not_ingested"``).
+        run_hash: The run hash the issue concerns (if applicable).
+        detail: Human-readable description.
+        severity: ``"error"`` (data integrity) or ``"warning"`` (informational,
+            e.g. ran-but-not-ingested).
+    """
+
+    kind: str
+    run_hash: str | None
+    detail: str
+    severity: str = "warning"
 
 
 @dataclass
@@ -1941,9 +1984,12 @@ class RunRegistry:
         rather than from job_runs metadata. Returns 0 if no data has been
         loaded yet.
 
-        Counts distinct (run_id, replicate) pairs rather than just distinct
-        replicate values, because pooled runs may reuse replicate numbers
-        across different CLI invocations.
+        The replicate index is the identity of a replicate: counting distinct
+        ``replicate`` values gives the number of replicates loaded for this run,
+        regardless of which execution (run_id) produced each one. Pooled runs
+        dispatch fresh, non-colliding indices, so distinct replicate == total
+        replicates; re-ingesting an already-loaded index is a no-op (see
+        :meth:`loaded_replicates`).
 
         Args:
             run_hash: The run hash to count replicates for.
@@ -1952,14 +1998,29 @@ class RunRegistry:
             Number of distinct replicates in cell_data.
         """
         result = self.conn.execute(
-            """
-            SELECT COUNT(*) FROM (
-                SELECT DISTINCT run_id, replicate FROM cell_data WHERE run_hash = ?
-            )
-            """,
+            "SELECT COUNT(DISTINCT replicate) FROM cell_data WHERE run_hash = ?",
             [run_hash],
         ).fetchone()
         return result[0] if result else 0
+
+    def loaded_replicates(self, run_hash: str) -> set[int]:
+        """Return the set of replicate indices already loaded for a run hash.
+
+        The single source of truth for "what's already ingested". Ingestion
+        skips any replicate index already in this set (idempotent re-ingest);
+        the replicate index is the dedup identity.
+
+        Args:
+            run_hash: The run hash to inspect.
+
+        Returns:
+            Set of distinct replicate indices present in cell_data.
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT replicate FROM cell_data WHERE run_hash = ?",
+            [run_hash],
+        ).fetchall()
+        return {row[0] for row in rows}
 
     def get_run_info(self, label_or_hash: str) -> RunDetail:
         """Get aggregated structured detail for a single run.
@@ -1990,11 +2051,172 @@ class RunRegistry:
         config = self.get_config_by_hash(run_hash)
         # _resolve_label_or_hash guarantees a config exists for this hash.
         assert config is not None
+        replicates = self.loaded_replicates(run_hash)
         return RunDetail(
             config=config,
             runs=self.get_runs_for_hash(run_hash),
-            replicate_count=self.get_replicate_count(run_hash),
+            replicate_count=len(replicates),
+            replicates=replicates,
         )
+
+    def drop_run(self, label_or_hash: str) -> DropSummary:
+        """Delete all registry state for a run, so its config can be redone.
+
+        **This is the only operation that deletes or replaces existing run data.**
+        All other registry writes are append-only (runs, cell_data) or metadata
+        (labels, session status). Use this to clear a run before re-running it
+        from scratch — e.g. when a sweep's outputs are bad and you want a clean
+        slate rather than pooling more replicates onto them.
+
+        Removes, in foreign-key order, everything tied to the run's hash:
+        ``cell_data``, ``run_outputs``, ``job_runs``, ``config_parameters``,
+        ``session_configs``, and the ``job_configs`` row (including its label).
+        The owning session row is left intact (it may hold other runs).
+
+        Args:
+            label_or_hash: Label or run_hash of the run to drop.
+
+        Returns:
+            A :class:`DropSummary` with per-table deleted-row counts.
+
+        Raises:
+            KeyError: If the label or hash is not found.
+        """
+        run_hash = self._resolve_label_or_hash(label_or_hash)
+        config = self.get_config_by_hash(run_hash)
+        label = config.label if config is not None else None
+
+        # Child -> parent order (DuckDB enforces foreign keys on delete).
+        deletes: list[tuple[str, str, list[Any]]] = [
+            ("cell_data", "DELETE FROM cell_data WHERE run_hash = ?", [run_hash]),
+            (
+                "run_outputs",
+                "DELETE FROM run_outputs WHERE run_id IN "
+                "(SELECT run_id FROM job_runs WHERE run_hash = ?)",
+                [run_hash],
+            ),
+            ("job_runs", "DELETE FROM job_runs WHERE run_hash = ?", [run_hash]),
+            ("config_parameters", "DELETE FROM config_parameters WHERE run_hash = ?", [run_hash]),
+            ("session_configs", "DELETE FROM session_configs WHERE run_hash = ?", [run_hash]),
+            ("job_configs", "DELETE FROM job_configs WHERE run_hash = ?", [run_hash]),
+        ]
+
+        # Deletes run child-first and auto-commit per statement. DuckDB does not
+        # see a referencing table's deletes within the *same* explicit
+        # transaction (a documented foreign-key limitation), so wrapping these in
+        # one BEGIN/COMMIT would raise a constraint error. Child-first ordering
+        # keeps each step valid; a partial failure (rare) can be finished by
+        # re-running drop_run.
+        rows: dict[str, int] = {}
+        for table, _del, params in deletes:
+            where = _del.split("WHERE", 1)[1]
+            count = self._conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {where}", params
+            ).fetchone()
+            rows[table] = count[0] if count else 0
+            self._conn.execute(_del, params)
+
+        return DropSummary(run_hash=run_hash, label=label, rows=rows)
+
+    def check_consistency(
+        self,
+        run_hash: str | None = None,
+        *,
+        strict: bool = False,
+    ) -> list[ConsistencyIssue]:
+        """Detect run<->analysis drift between the execution and data tables.
+
+        Guards the principle that the registry (analysis) must reflect what
+        running produced. Checks (scoped to *run_hash* if given, else all runs):
+
+        - ``data_without_config`` — ``cell_data`` for a run_hash with no
+          ``job_configs`` row (orphaned data; **error**).
+        - ``orphan_cell_data`` — ``cell_data`` whose ``run_id`` is absent from
+          ``job_runs`` (the FK should prevent this; **error** if seen).
+        - ``duplicate_replicate`` — a ``(run_hash, replicate)`` present under more
+          than one ``run_id`` (row inflation from a pre-fix re-ingest; **error**).
+        - ``ran_not_ingested`` — a run_hash with a succeeded ``job_runs`` row but
+          no ``cell_data`` (ran but results never loaded; **warning**).
+
+        Args:
+            run_hash: Limit the check to one run, or None for the whole registry.
+            strict: If True, raise ``RuntimeError`` when any issue is found.
+
+        Returns:
+            A list of :class:`ConsistencyIssue` (empty if consistent).
+
+        Raises:
+            RuntimeError: If *strict* and any issue is found.
+        """
+        and_c_hash = " AND c.run_hash = ?" if run_hash else ""
+        and_hash = " AND run_hash = ?" if run_hash else ""
+        hash_param: list[Any] = [run_hash] if run_hash else []
+        issues: list[ConsistencyIssue] = []
+
+        # data_without_config
+        rows = self._conn.execute(
+            "SELECT DISTINCT c.run_hash FROM cell_data c "
+            "LEFT JOIN job_configs j ON c.run_hash = j.run_hash "
+            f"WHERE j.run_hash IS NULL{and_c_hash}",
+            hash_param,
+        ).fetchall()
+        for (h,) in rows:
+            issues.append(ConsistencyIssue(
+                "data_without_config", h,
+                f"cell_data exists for run_hash {h} but it has no job_configs row.",
+                "error",
+            ))
+
+        # orphan_cell_data
+        rows = self._conn.execute(
+            "SELECT DISTINCT c.run_hash FROM cell_data c "
+            "LEFT JOIN job_runs r ON c.run_id = r.run_id "
+            f"WHERE r.run_id IS NULL{and_c_hash}",
+            hash_param,
+        ).fetchall()
+        for (h,) in rows:
+            issues.append(ConsistencyIssue(
+                "orphan_cell_data", h,
+                f"cell_data for run_hash {h} references a run_id absent from job_runs.",
+                "error",
+            ))
+
+        # duplicate_replicate: (run_hash, replicate) under >1 run_id
+        rows = self._conn.execute(
+            "SELECT run_hash, replicate, COUNT(DISTINCT run_id) AS n "
+            "FROM cell_data "
+            f"WHERE TRUE{and_hash} "
+            "GROUP BY run_hash, replicate HAVING COUNT(DISTINCT run_id) > 1",
+            hash_param,
+        ).fetchall()
+        for h, rep, n in rows:
+            issues.append(ConsistencyIssue(
+                "duplicate_replicate", h,
+                f"run_hash {h} replicate {rep} loaded under {n} run_ids "
+                f"(row inflation — drop_run() and re-ingest to fix).",
+                "error",
+            ))
+
+        # ran_not_ingested: succeeded run with no cell_data
+        rows = self._conn.execute(
+            "SELECT DISTINCT r.run_hash FROM job_runs r "
+            "WHERE r.exit_code = 0"
+            f"{(' AND r.run_hash = ?' if run_hash else '')} "
+            "AND NOT EXISTS (SELECT 1 FROM cell_data c WHERE c.run_hash = r.run_hash)",
+            hash_param,
+        ).fetchall()
+        for (h,) in rows:
+            issues.append(ConsistencyIssue(
+                "ran_not_ingested", h,
+                f"run_hash {h} has a succeeded run but no ingested cell_data "
+                f"(run ahead of analysis — ingest results).",
+                "warning",
+            ))
+
+        if strict and issues:
+            summary = "\n".join(f"  [{i.severity}] {i.kind}: {i.detail}" for i in issues)
+            raise RuntimeError(f"Registry consistency check failed:\n{summary}")
+        return issues
 
     # ========== Output Tracking ==========
 

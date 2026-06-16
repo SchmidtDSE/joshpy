@@ -1746,6 +1746,150 @@ class TestGetRunInfo(unittest.TestCase):
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestIdempotentReplicateState(unittest.TestCase):
+    """loaded_replicates / distinct-replicate count (the dedup identity)."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.sid = self.registry.create_session(
+            config=_make_config(), experiment_name="e"
+        )
+        self.registry.register_run(
+            self.sid, "h1", "/s.josh", "c", None, {"x": 1}
+        )
+        self.rid = self.registry.start_run(run_hash="h1", session_id=self.sid)
+
+    def tearDown(self):
+        self.registry.close()
+
+    def _add_cell(self, replicate, run_id=None):
+        self.registry.conn.execute(
+            "INSERT INTO cell_data (run_id, run_hash, step, replicate) VALUES (?, ?, ?, ?)",
+            [run_id or self.rid, "h1", 0, replicate],
+        )
+
+    def test_loaded_replicates_returns_present_set(self):
+        for rep in (1, 4, 5):
+            self._add_cell(rep)
+        self.assertEqual(self.registry.loaded_replicates("h1"), {1, 4, 5})
+        self.assertEqual(self.registry.get_replicate_count("h1"), 3)
+
+    def test_distinct_replicate_count_ignores_run_id(self):
+        """A replicate loaded twice (two run_ids) counts once — index is identity."""
+        rid2 = self.registry.start_run(run_hash="h1", session_id=self.sid)
+        self._add_cell(0, self.rid)
+        self._add_cell(0, rid2)  # same index, different run_id (would-be dup)
+        self.assertEqual(self.registry.get_replicate_count("h1"), 1)
+        self.assertEqual(self.registry.loaded_replicates("h1"), {0})
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestDropRun(unittest.TestCase):
+    """drop_run — the sole sanctioned mutation of run data."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.sid = self.registry.create_session(
+            config=_make_config(), experiment_name="e"
+        )
+        self.registry.register_run(self.sid, "h1", "/s.josh", "c", None, {"x": 1})
+        self.registry.label_run("h1", "baseline")
+        rid = self.registry.start_run(run_hash="h1", session_id=self.sid)
+        self.registry.complete_run(rid, exit_code=0)
+        self.registry.register_output(rid, "csv", "/out/0.csv")
+        for rep in range(3):
+            self.registry.conn.execute(
+                "INSERT INTO cell_data (run_id, run_hash, step, replicate) VALUES (?, ?, ?, ?)",
+                [rid, "h1", 0, rep],
+            )
+
+    def tearDown(self):
+        self.registry.close()
+
+    def _count(self, table):
+        return self.registry.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+    def test_drop_run_clears_all_tables(self):
+        summary = self.registry.drop_run("baseline")
+        self.assertEqual(summary.run_hash, "h1")
+        self.assertEqual(summary.label, "baseline")
+        self.assertEqual(summary.total, 3 + 1 + 1 + 1 + 1 + 1)  # cell+output+run+params+sesscfg+config
+        for table in (
+            "cell_data", "run_outputs", "job_runs",
+            "config_parameters", "session_configs", "job_configs",
+        ):
+            self.assertEqual(self._count(table), 0, table)
+        # Session row is preserved.
+        self.assertEqual(self._count("sweep_sessions"), 1)
+
+    def test_drop_run_allows_clean_reregistration(self):
+        self.registry.drop_run("h1")
+        # Re-register the same hash cleanly.
+        self.registry.register_run(self.sid, "h1", "/s.josh", "c", None, {"x": 1})
+        self.assertIsNotNone(self.registry.get_config_by_hash("h1"))
+
+    def test_drop_run_missing_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.drop_run("nonexistent")
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestCheckConsistency(unittest.TestCase):
+    """check_consistency — run<->analysis drift guards."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        self.sid = self.registry.create_session(
+            config=_make_config(), experiment_name="e"
+        )
+        self.registry.register_run(self.sid, "h1", "/s.josh", "c", None, {"x": 1})
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_clean_registry_has_no_issues(self):
+        rid = self.registry.start_run(run_hash="h1", session_id=self.sid)
+        self.registry.complete_run(rid, exit_code=0)
+        self.registry.conn.execute(
+            "INSERT INTO cell_data (run_id, run_hash, step, replicate) VALUES (?, ?, ?, ?)",
+            [rid, "h1", 0, 0],
+        )
+        self.assertEqual(self.registry.check_consistency("h1"), [])
+
+    def test_duplicate_replicate_flagged(self):
+        rid = self.registry.start_run(run_hash="h1", session_id=self.sid)
+        rid2 = self.registry.start_run(run_hash="h1", session_id=self.sid)
+        for r in (rid, rid2):
+            self.registry.conn.execute(
+                "INSERT INTO cell_data (run_id, run_hash, step, replicate) VALUES (?, ?, ?, ?)",
+                [r, "h1", 0, 0],
+            )
+        issues = self.registry.check_consistency("h1")
+        kinds = {i.kind for i in issues}
+        self.assertIn("duplicate_replicate", kinds)
+        self.assertTrue(any(i.severity == "error" for i in issues))
+
+    def test_ran_not_ingested_flagged(self):
+        rid = self.registry.start_run(run_hash="h1", session_id=self.sid)
+        self.registry.complete_run(rid, exit_code=0)
+        # No cell_data ingested.
+        issues = self.registry.check_consistency("h1")
+        self.assertIn("ran_not_ingested", {i.kind for i in issues})
+
+    def test_strict_raises_on_issue(self):
+        rid = self.registry.start_run(run_hash="h1", session_id=self.sid)
+        self.registry.complete_run(rid, exit_code=0)
+        with self.assertRaises(RuntimeError):
+            self.registry.check_consistency("h1", strict=True)
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
 class TestGitHash(unittest.TestCase):
     """Tests for git hash capture in session metadata."""
 
