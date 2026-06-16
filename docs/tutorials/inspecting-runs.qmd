@@ -230,7 +230,18 @@ print(f"--- {path2.name} ---")
 print(path2.read_text())
 ```
 
-To open an interactive diff in VS Code or Cursor:
+For a quick textual comparison that works anywhere -- terminal, notebook, CI,
+or over SSH -- use `text_diff`, which returns a unified diff of the two stored
+configs:
+
+```{python}
+#| label: text-diff-config
+from joshpy.inspect import text_diff
+
+print(text_diff(registry, "low_growth", "high_growth"), end="")
+```
+
+To open an interactive side-by-side diff in VS Code or Cursor instead:
 
 ```python
 # Opens side-by-side diff in VS Code
@@ -260,6 +271,15 @@ print(source[:200], "...")
 ```python
 # Opens side-by-side diff of josh sources in VS Code
 registry.compare_josh("low_growth", "high_growth")
+```
+
+For a headless textual comparison, use `text_josh_diff` (the josh-source
+counterpart to `text_diff`):
+
+```python
+from joshpy.inspect import text_josh_diff
+
+print(text_josh_diff(registry, "low_growth", "high_growth"), end="")
 ```
 
 ::: {.callout-note}
@@ -293,6 +313,17 @@ python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth
 python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --type josh --ide cursor
 ```
 
+To print a unified text diff to stdout instead of launching an IDE -- useful on
+a headless machine, in CI, or over SSH -- add `--print`:
+
+```bash
+# Print a config diff to the terminal (no IDE required)
+python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --print
+
+# Print a josh source diff
+python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --type josh --print
+```
+
 ### Export Only
 
 Use `--export-only` to write files without opening an IDE:
@@ -317,6 +348,7 @@ python -m joshpy.inspect experiment.duckdb --diff low_growth high_growth --type 
 | `--diff RUN1 RUN2` | Diff two runs |
 | `--type {config,josh}` | What to view/diff (default: `config`) |
 | `--ide {vscode,cursor}` | IDE for viewing/diffing (default: `vscode`) |
+| `--print` | Print a unified text diff to stdout (works headless; `--diff` only) |
 | `--export-only` | Write files without opening IDE |
 | `--output-dir DIR` | Directory for exported files (default: system temp) |
 
