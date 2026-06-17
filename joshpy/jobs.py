@@ -1901,14 +1901,53 @@ def run_sweep(
                 print(f"[{i + 1}/{total_jobs}] Running ({mode}): {job.parameters}")
 
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
-            if batch_remote:
-                from joshpy.batch_orchestrator import assemble_batch_workdir
-                from joshpy.cli import CLIResult, StageToMinioConfig
-                from joshpy.sweep import (
-                    SweepCollisionError,
-                    _apply_collision_policy,
-                    _list_existing_replicates_minio,
+
+            from joshpy.cli import CLIResult
+            from joshpy.sweep import (
+                SweepCollisionError,
+                resolve_collision_action,
+                warn_partial_backfill_unsupported,
+            )
+
+            mode = "batch-remote" if batch_remote else ("remote" if remote else "local")
+
+            # Collision policy, evaluated uniformly across dispatch modes. 'fail'
+            # is enforced only for batch-remote (its silent-overwrite footgun);
+            # 'skip'/'pool' apply to local and Josh Cloud too. Evaluate only when
+            # it can change behavior, to avoid an extra inspect_exports on the
+            # default local path.
+            action = None
+            patch_info = None
+            if batch_remote or collision_policy in ("skip", "pool"):
+                action, patch_info = resolve_collision_action(
+                    cli, job, registry, collision_policy, quiet=quiet,
                 )
+
+            if action is not None and action.action == "fail" and batch_remote:
+                raise SweepCollisionError(
+                    [(job, patch_info.path if patch_info else "?", list(action.existing))]
+                )
+
+            if action is not None and action.action == "skip":
+                if not quiet:
+                    print(
+                        f"  [POLICY] Skipping {mode} dispatch: {len(action.existing)} "
+                        f"existing replicate(s) already cover {job.replicates} requested."
+                    )
+                import json as _json
+                result = CLIResult(
+                    exit_code=0,
+                    stdout=_json.dumps({
+                        "skipped": True,
+                        "reason": "collision_policy",
+                        "existing": sorted(action.existing),
+                    }),
+                    stderr="",
+                    command=[mode, "(skipped by collision policy)"],
+                )
+            elif batch_remote:
+                from joshpy.batch_orchestrator import assemble_batch_workdir
+                from joshpy.cli import StageToMinioConfig
 
                 assert target is not None  # validated above
                 assert sweep_workdir is not None  # allocated when batch_remote=True
@@ -1922,100 +1961,43 @@ def run_sweep(
                     "stage_prefix_root": _stage_prefix_root,
                 }
 
-                # Collision policy: list existing outputs, compute dispatch plan.
-                # Registry lookup for export paths uses the cli-side inspect + glob.
-                action = None
-                patch_info = None
-                try:
-                    from joshpy.cli import InspectExportsConfig
-                    # source_path required for batch dispatch — to_batch_remote_config
-                    # raises if None, so skip the policy eval on that path.
-                    if job.source_path is None:
-                        raise RuntimeError("source_path required for batch dispatch")
-                    exports = cli.inspect_exports(
-                        InspectExportsConfig(
-                            script=job.source_path, simulation=job.simulation,
-                        )
-                    )
-                    patch_info = exports.export_files.get("patch") if exports else None
-                    if (
-                        patch_info is not None
-                        and patch_info.protocol == "minio"
-                        and registry is not None
-                    ):
-                        existing = _list_existing_replicates_minio(
-                            cli, registry, patch_info,
-                            known_vars={
-                                **job.parameters,
-                                **job.custom_tags,
-                                "run_hash": job.run_hash,
-                                "simulation": job.simulation,
-                            },
-                            quiet=quiet,
-                        )
-                        action = _apply_collision_policy(
-                            collision_policy, existing, job.replicates,
-                        )
-                except Exception as e:
-                    if not quiet:
-                        print(
-                            f"  [POLICY] Could not evaluate {collision_policy!r}: "
-                            f"{e}; dispatching in full."
-                        )
+                # Honor the pool offset/count; full dispatch otherwise.
+                dispatch_start = (
+                    action.replicate_start if (action and action.action == "dispatch") else 0
+                )
+                dispatch_count = (
+                    action.replicates if (action and action.action == "dispatch") else job.replicates
+                )
 
-                if action is not None and action.action == "fail":
-                    raise SweepCollisionError(
-                        [(job, patch_info.path if patch_info else "?",
-                          list(action.existing))]
-                    )
-
-                if action is not None and action.action == "skip":
-                    if not quiet:
-                        print(
-                            f"  [POLICY] Skipping dispatch: {len(action.existing)} "
-                            f"existing replicates already cover {job.replicates} requested."
-                        )
-                    import json as _json
-                    result = CLIResult(
-                        exit_code=0,
-                        stdout=_json.dumps({
-                            "skipped": True,
-                            "reason": "collision_policy",
-                            "existing": sorted(action.existing),
-                        }),
-                        stderr="",
-                        command=["batchRemote", "(skipped by collision policy)"],
-                    )
+                job_dir = assemble_batch_workdir(job, sweep_workdir)
+                stage_result = cli.stage_to_minio(
+                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
+                )
+                if not stage_result.success:
+                    result = stage_result
                 else:
-                    # Dispatch path: stage + dispatch, honoring pool offset/count.
-                    dispatch_start = action.replicate_start if action else 0
-                    dispatch_count = (
-                        action.replicates if action else job.replicates
+                    br_config = to_batch_remote_config(
+                        job, target, per_job_prefix,
+                        no_wait=batch_no_wait,
+                        poll_interval=poll_interval if batch_no_wait else None,
+                        timeout=batch_timeout,
+                        require_prestaged=True,
+                        replicate_start=dispatch_start,
+                        replicate_count=dispatch_count,
                     )
-
-                    job_dir = assemble_batch_workdir(job, sweep_workdir)
-                    stage_result = cli.stage_to_minio(
-                        StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
+                    result = cli.batch_remote(
+                        br_config, jfr=job_jfr, stream_output=stream_output,
                     )
-                    if not stage_result.success:
-                        result = stage_result
-                    else:
-                        br_config = to_batch_remote_config(
-                            job, target, per_job_prefix,
-                            no_wait=batch_no_wait,
-                            poll_interval=poll_interval if batch_no_wait else None,
-                            timeout=batch_timeout,
-                            require_prestaged=True,
-                            replicate_start=dispatch_start,
-                            replicate_count=dispatch_count,
-                        )
-                        result = cli.batch_remote(
-                            br_config, jfr=job_jfr, stream_output=stream_output,
-                        )
             elif remote:
+                # Josh Cloud can't offset replicate indices yet (REPLICATE_BACKFILL.md);
+                # a partial pool top-up re-runs the full target (ingest dedups).
+                warn_partial_backfill_unsupported(action, job, mode, quiet=quiet)
                 run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
             else:
+                # Local runs can't offset replicate indices yet (REPLICATE_BACKFILL.md);
+                # a partial pool top-up re-runs the full target (ingest dedups).
+                warn_partial_backfill_unsupported(action, job, mode, quiet=quiet)
                 run_config = to_run_config(job, enable_profiler=enable_profiler)
                 result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
 

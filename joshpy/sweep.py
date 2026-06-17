@@ -545,6 +545,86 @@ def _apply_collision_policy(
     )
 
 
+def resolve_collision_action(
+    cli: JoshCLI,
+    job: Any,  # ExpandedJob
+    registry: RunRegistry | None,
+    collision_policy: str,
+    *,
+    quiet: bool = False,
+) -> tuple[_CollisionAction | None, Any]:
+    """Evaluate a collision policy for a job, independent of dispatch mode.
+
+    Inspects the job's export paths, lists existing output replicates (MinIO or
+    local filesystem via :func:`list_output_replicates`), and applies the policy.
+    Shared by local, Josh Cloud, and batch-remote dispatch so the same
+    ``fail``/``pool``/``skip`` semantics apply everywhere.
+
+    Returns ``(action, patch_info)``. ``action`` is None when the policy can't be
+    evaluated (no registry, no source_path, no patch export, or a listing error),
+    which callers treat as "dispatch in full".
+    """
+    if registry is None or job.source_path is None:
+        return None, None
+    try:
+        from joshpy.cli import InspectExportsConfig
+
+        exports = cli.inspect_exports(
+            InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+        )
+        patch_info = exports.export_files.get("patch") if exports else None
+        if patch_info is None:
+            return None, None
+        existing = list_output_replicates(
+            cli, registry, patch_info,
+            known_vars={
+                **job.parameters,
+                **job.custom_tags,
+                "run_hash": job.run_hash,
+                "simulation": job.simulation,
+                **({"label": job.label} if getattr(job, "label", None) else {}),
+            },
+            quiet=quiet,
+        )
+        action = _apply_collision_policy(collision_policy, existing, job.replicates)
+        return action, patch_info
+    except Exception as e:
+        if not quiet:
+            print(
+                f"  [POLICY] Could not evaluate {collision_policy!r}: {e}; "
+                f"dispatching in full."
+            )
+        return None, None
+
+
+def warn_partial_backfill_unsupported(
+    action: _CollisionAction | None,
+    job: Any,  # ExpandedJob
+    mode: str,
+    *,
+    quiet: bool = False,
+) -> None:
+    """Warn when a pool top-up can't offset replicate indices on a non-batch path.
+
+    Local and Josh Cloud ``run``/``runRemote`` don't accept a replicate offset,
+    so a partial ``pool`` top-up re-runs the full target; only the missing
+    replicates are actually ingested (idempotent), but the recompute is wasted.
+    See ``REPLICATE_BACKFILL.md`` for the JAR work that would let these paths
+    dispatch only the missing replicate indices.
+    """
+    if quiet or action is None or action.action != "dispatch":
+        return
+    if action.replicate_start <= 0:
+        return  # full dispatch (nothing pre-existing) — no waste
+    need = job.replicates - len(action.existing)
+    print(
+        f"  [POLICY] pool: {len(action.existing)} present, {need} needed — {mode} "
+        f"can't offset replicate indices yet, so re-running the full target "
+        f"({job.replicates}); only missing replicates are ingested. "
+        f"See REPLICATE_BACKFILL.md."
+    )
+
+
 def _wait_for_file(path: Path, config: LoadConfig) -> bool:
     """Wait for file to exist and settle.
 
