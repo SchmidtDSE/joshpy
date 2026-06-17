@@ -1,5 +1,16 @@
 # Replicate backfill: what joshpy needs from the Josh JAR
 
+> **Status: DELIVERED.** The JAR side shipped in
+> [josh#461](https://github.com/SchmidtDSE/josh/pull/461) (`--replicate-indices`
+> on `run`/`runRemote`/`batchRemote` + the MCP `run_simulation` tool, plus a fix
+> for the silently-dropped `runRemote --replicate-start`). The joshpy side is now
+> wired up: `pool` **gap-fills** the missing indices via `--replicate-indices` on
+> every dispatch path, and the local/cloud "can't offset → re-run full target"
+> fallback has been removed. Seeding was resolved as proposed below — the
+> replicate index is a **label** (no per-`(seed, index)` reproducibility); a
+> backfilled index is a valid independent draw, so dense numbering is bookkeeping,
+> not a reproducibility guarantee. This document is kept as the design record.
+
 ## TL;DR
 
 joshpy can now reconcile a sweep to a target replicate count idempotently, and

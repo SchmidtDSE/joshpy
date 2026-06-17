@@ -1249,7 +1249,12 @@ class JobExpander:
         )
 
 
-def to_run_config(job: ExpandedJob, *, enable_profiler: bool = False) -> RunConfig:
+def to_run_config(
+    job: ExpandedJob,
+    *,
+    enable_profiler: bool = False,
+    replicate_indices: list[int] | None = None,
+) -> RunConfig:
     """Convert an ExpandedJob to a RunConfig for CLI execution.
 
     This helper function bridges the job expansion system with the CLI layer,
@@ -1287,6 +1292,7 @@ def to_run_config(job: ExpandedJob, *, enable_profiler: bool = False) -> RunConf
         script=job.source_path,
         simulation=job.simulation,
         replicates=job.replicates,
+        replicate_indices=replicate_indices,
         data=data,
         custom_tags=job.custom_tags,
         crs=job.crs,
@@ -1301,6 +1307,8 @@ def to_run_remote_config(
     job: ExpandedJob,
     api_key: str | None = None,
     endpoint: str | None = None,
+    *,
+    replicate_indices: list[int] | None = None,
 ) -> RunRemoteConfig:
     """Convert an ExpandedJob to a RunRemoteConfig for remote execution.
 
@@ -1345,6 +1353,7 @@ def to_run_remote_config(
         simulation=job.simulation,
         api_key=api_key,
         replicates=job.replicates,
+        replicate_indices=replicate_indices,
         endpoint=endpoint,
         data=data,
         custom_tags=job.custom_tags,
@@ -1362,6 +1371,7 @@ def to_batch_remote_config(
     require_prestaged: bool = True,
     replicate_start: int = 0,
     replicate_count: int | None = None,
+    replicate_indices: list[int] | None = None,
 ) -> BatchRemoteConfig:
     """Convert an ExpandedJob to a BatchRemoteConfig for batch remote execution.
 
@@ -1396,9 +1406,11 @@ def to_batch_remote_config(
             the pool collision policy to append replicates K..K+N-1 onto an
             existing MinIO prefix instead of overwriting 0..N-1.
         replicate_count: Override the dispatch replicate count. When ``None``
-            (the default), uses ``job.replicates``. Pool-collision dispatches
-            set this to the remaining count (``total - replicate_start``) so
-            pods run exactly the missing indices.
+            (the default), uses ``job.replicates``.
+        replicate_indices: Explicit, possibly non-contiguous replicate indices to
+            dispatch (``--replicate-indices``). Set by the pool collision policy
+            to backfill exactly the missing indices; supersedes
+            ``replicate_start``/``replicate_count``.
 
     Returns:
         BatchRemoteConfig ready for use with JoshCLI.batch_remote().
@@ -1424,6 +1436,7 @@ def to_batch_remote_config(
         require_prestaged=require_prestaged,
         custom_tags=dict(job.custom_tags),
         replicate_start=replicate_start,
+        replicate_indices=replicate_indices,
     )
 
 
@@ -1903,11 +1916,7 @@ def run_sweep(
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
 
             from joshpy.cli import CLIResult
-            from joshpy.sweep import (
-                SweepCollisionError,
-                resolve_collision_action,
-                warn_partial_backfill_unsupported,
-            )
+            from joshpy.sweep import SweepCollisionError, resolve_collision_action
 
             mode = "batch-remote" if batch_remote else ("remote" if remote else "local")
 
@@ -1961,7 +1970,11 @@ def run_sweep(
                     "stage_prefix_root": _stage_prefix_root,
                 }
 
-                # Honor the pool offset/count; full dispatch otherwise.
+                # pool backfills exactly the missing indices (--replicate-indices);
+                # otherwise a plain full/offset dispatch.
+                dispatch_indices = (
+                    action.replicate_indices if (action and action.action == "dispatch") else None
+                )
                 dispatch_start = (
                     action.replicate_start if (action and action.action == "dispatch") else 0
                 )
@@ -1984,21 +1997,30 @@ def run_sweep(
                         require_prestaged=True,
                         replicate_start=dispatch_start,
                         replicate_count=dispatch_count,
+                        replicate_indices=dispatch_indices,
                     )
                     result = cli.batch_remote(
                         br_config, jfr=job_jfr, stream_output=stream_output,
                     )
             elif remote:
-                # Josh Cloud can't offset replicate indices yet (REPLICATE_BACKFILL.md);
-                # a partial pool top-up re-runs the full target (ingest dedups).
-                warn_partial_backfill_unsupported(action, job, mode, quiet=quiet)
-                run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
+                # pool dispatches exactly the missing indices via --replicate-indices.
+                dispatch_indices = (
+                    action.replicate_indices if (action and action.action == "dispatch") else None
+                )
+                run_config = to_run_remote_config(
+                    job, api_key=api_key, endpoint=endpoint,
+                    replicate_indices=dispatch_indices,
+                )
                 result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
             else:
-                # Local runs can't offset replicate indices yet (REPLICATE_BACKFILL.md);
-                # a partial pool top-up re-runs the full target (ingest dedups).
-                warn_partial_backfill_unsupported(action, job, mode, quiet=quiet)
-                run_config = to_run_config(job, enable_profiler=enable_profiler)
+                # pool dispatches exactly the missing indices via --replicate-indices.
+                dispatch_indices = (
+                    action.replicate_indices if (action and action.action == "dispatch") else None
+                )
+                run_config = to_run_config(
+                    job, enable_profiler=enable_profiler,
+                    replicate_indices=dispatch_indices,
+                )
                 result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
 
             # Async batch dispatch: parse job_id, defer result tracking

@@ -160,6 +160,7 @@ class RunConfig:
     script: Path
     simulation: str
     replicates: int = 1
+    replicate_indices: list[int] | None = None
     data: dict[str, Path] = field(default_factory=dict)
     custom_tags: dict[str, str] = field(default_factory=dict)
     crs: str | None = None
@@ -196,6 +197,7 @@ class RunRemoteConfig:
     simulation: str
     api_key: str | None = None
     replicates: int = 1
+    replicate_indices: list[int] | None = None
     endpoint: str | None = None
     data: dict[str, Path] = field(default_factory=dict)
     custom_tags: dict[str, str] = field(default_factory=dict)
@@ -493,8 +495,10 @@ class BatchRemoteConfig:
             for deterministic per-simulation paths.
         replicate_start: Offset added to each pod's replicate index. When K,
             pods run as replicates K..K+replicates-1 (instead of 0..replicates-1).
-            Used by the pool collision policy to append new replicates to an
-            existing MinIO prefix without overwriting prior CSVs.
+        replicate_indices: Explicit, possibly non-contiguous replicate indices to
+            run (``--replicate-indices=3,7,8``). When set, supersedes
+            ``replicates``/``replicate_start`` — used by the pool collision policy
+            to backfill exactly the missing replicate indices.
     """
 
     simulation: str
@@ -507,6 +511,7 @@ class BatchRemoteConfig:
     require_prestaged: bool = False
     custom_tags: dict[str, str] = field(default_factory=dict)
     replicate_start: int = 0
+    replicate_indices: list[int] | None = None
 
 
 @dataclass(frozen=True)
@@ -902,8 +907,18 @@ class JoshCLI:
             f"--minio-prefix={config.minio_prefix}",
         ]
 
-        if config.replicates > 1:
-            args.append(f"--replicates={config.replicates}")
+        # --replicate-indices supersedes --replicates/--replicate-start (the JAR
+        # treats them as mutually exclusive).
+        if config.replicate_indices is not None:
+            args.append(
+                "--replicate-indices="
+                + ",".join(str(i) for i in config.replicate_indices)
+            )
+        else:
+            if config.replicates > 1:
+                args.append(f"--replicates={config.replicates}")
+            if config.replicate_start > 0:
+                args.append(f"--replicate-start={config.replicate_start}")
         if config.no_wait:
             args.append("--no-wait")
         if config.poll_interval is not None:
@@ -912,8 +927,6 @@ class JoshCLI:
             args.append(f"--timeout={config.timeout}")
         if config.require_prestaged:
             args.append("--require-prestaged")
-        if config.replicate_start > 0:
-            args.append(f"--replicate-start={config.replicate_start}")
         for name, value in config.custom_tags.items():
             args.extend(["--custom-tag", f"{name}={value}"])
 
@@ -1103,8 +1116,14 @@ class JoshCLI:
         """
         args = ["run", str(config.script.resolve()), config.simulation]
 
-        # Replicates
-        if config.replicates > 1:
+        # Replicates. --replicate-indices supersedes --replicates (mutually
+        # exclusive in the JAR); used for non-contiguous backfill.
+        if config.replicate_indices is not None:
+            args.append(
+                "--replicate-indices="
+                + ",".join(str(i) for i in config.replicate_indices)
+            )
+        elif config.replicates > 1:
             args.extend(["--replicates", str(config.replicates)])
 
         # Data files
@@ -1169,8 +1188,14 @@ class JoshCLI:
         if config.api_key is not None:
             args.extend(["--api-key", config.api_key])
 
-        # Replicates
-        if config.replicates > 1:
+        # Replicates. --replicate-indices supersedes --replicates (mutually
+        # exclusive in the JAR); used for non-contiguous backfill.
+        if config.replicate_indices is not None:
+            args.append(
+                "--replicate-indices="
+                + ",".join(str(i) for i in config.replicate_indices)
+            )
+        elif config.replicates > 1:
             args.extend(["--replicates", str(config.replicates)])
 
         # Endpoint
