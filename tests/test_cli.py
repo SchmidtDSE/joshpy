@@ -431,6 +431,25 @@ class TestJoshCLI(unittest.TestCase):
         self.assertEqual(cmd[replicates_idx + 1], "5")
 
     @patch("subprocess.run")
+    def test_run_with_replicate_indices(self, mock_run):
+        """run() emits --replicate-indices and omits --replicates when set."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            replicates=10,
+            replicate_indices=[3, 7, 8],
+        )
+
+        cli.run(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--replicate-indices=3,7,8", cmd)
+        self.assertNotIn("--replicates", cmd)
+
+    @patch("subprocess.run")
     def test_run_with_data_files(self, mock_run):
         """run() should include --data flags for data files."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -560,6 +579,25 @@ class TestJoshCLI(unittest.TestCase):
         self.assertIn("test-key", cmd)
         self.assertIn("--replicates", cmd)
         self.assertIn("3", cmd)
+
+    @patch("subprocess.run")
+    def test_run_remote_with_replicate_indices(self, mock_run):
+        """runRemote() emits --replicate-indices and omits --replicates when set."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = RunRemoteConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            replicates=10,
+            replicate_indices=[3, 7, 8],
+        )
+
+        cli.run_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--replicate-indices=3,7,8", cmd)
+        self.assertNotIn("--replicates", cmd)
 
     @patch("subprocess.run")
     def test_preprocess_netcdf(self, mock_run):
@@ -1735,6 +1773,30 @@ class TestBatchRemote(unittest.TestCase):
 
         cmd = mock_run.call_args[0][0]
         self.assertIn("--replicates=5", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_replicate_indices(self, mock_run, _mock_jar):
+        """batch_remote() emits --replicate-indices and omits --replicates/-start."""
+        from joshpy.cli import BatchRemoteConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = BatchRemoteConfig(
+            simulation="Main",
+            target="gke-test",
+            minio_prefix="sweeps/test/",
+            replicates=5,
+            replicate_start=2,
+            replicate_indices=[3, 7, 8],
+        )
+        cli.batch_remote(config)
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--replicate-indices=3,7,8", cmd)
+        self.assertNotIn("--replicates=5", cmd)
+        self.assertFalse(any(c.startswith("--replicate-start") for c in cmd))
 
     @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
     @patch("subprocess.run")
