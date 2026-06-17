@@ -2634,5 +2634,87 @@ class TestCollisionPolicyInRunSweep(unittest.TestCase):
                 )
 
 
+class TestCollisionPolicyLocalDispatch(unittest.TestCase):
+    """Collision policy applies to local dispatch, not just batch-remote (Layer 1)."""
+
+    def _setup(self, tmp: Path, existing_indices, target, run_hash="hashLocal"):
+        from joshpy.jobs import ExpandedJob
+        from joshpy.cli import CLIResult, ExportFileInfo, ExportPaths
+
+        src = tmp / "sim.josh"
+        src.write_text("start simulation Main\nend simulation\n")
+        outdir = tmp / "out"
+        outdir.mkdir()
+        for i in existing_indices:
+            (outdir / f"output_{i}.csv").write_text(f"step,replicate\n0,{i}\n")
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=tmp / "config.jshc",
+            config_name="config.jshc",
+            run_hash=run_hash,
+            parameters={},
+            simulation="Main",
+            replicates=target,
+            source_path=src,
+            custom_tags={"run_hash": run_hash},
+        )
+        job_set = MagicMock(
+            total_jobs=1, total_replicates=target,
+            __iter__=lambda self: iter([job]),
+        )
+        cli = MagicMock()
+        cli.run.return_value = CLIResult(
+            exit_code=0, stdout="", stderr="", command=["run"],
+        )
+        cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw=f"file://{outdir}/output_{{replicate}}.csv",
+                    protocol="file", host="",
+                    path=f"{outdir}/output_{{replicate}}.csv", file_type="csv",
+                ),
+            },
+            debug_files={},
+        )
+        return cli, job_set, MagicMock()
+
+    def _run(self, cli, job_set, registry, **kw):
+        from joshpy.jobs import run_sweep
+        run_sweep(
+            cli, job_set, registry=registry, session_id="s1",
+            quiet=True, manage_status=False, **kw,
+        )
+
+    def test_local_pool_complete_skips_recompute(self):
+        """pool with the target already met → no local re-run (the waste fix)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), range(10), 10)
+            self._run(cli, job_set, reg, collision_policy="pool")
+            cli.run.assert_not_called()
+
+    def test_local_skip_policy_skips(self):
+        """skip with any existing replicate → no local re-run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), [0, 1, 2], 10)
+            self._run(cli, job_set, reg, collision_policy="skip")
+            cli.run.assert_not_called()
+
+    def test_local_pool_partial_runs_full(self):
+        """pool top-up can't offset locally yet → full re-run (ingest dedups)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), [0, 1, 2], 10)
+            self._run(cli, job_set, reg, collision_policy="pool")
+            cli.run.assert_called_once()
+
+    def test_local_fail_default_does_not_block(self):
+        """Default 'fail' is not enforced on local (no behavior change there)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), [0, 1, 2], 10)
+            self._run(cli, job_set, reg)  # default policy = fail
+            cli.run.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
