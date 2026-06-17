@@ -457,16 +457,20 @@ class _CollisionAction:
     Attributes:
         action: ``"dispatch"`` (proceed with dispatch), ``"skip"`` (no-op),
             or ``"fail"`` (raise — caller turns this into SweepCollisionError).
-        replicate_start: Offset for the batch-remote dispatch (ignored unless
-            action == "dispatch").
+        replicate_start: Offset for a contiguous dispatch (ignored unless
+            action == "dispatch" and replicate_indices is None).
         replicates: Number of replicates to dispatch (ignored unless
             action == "dispatch").
-        existing: The pre-existing replicate indices observed on MinIO.
+        replicate_indices: Explicit replicate indices to dispatch. Set by ``pool``
+            to backfill exactly the missing indices (dense ``0..N-1``); None means
+            a plain contiguous ``[replicate_start, replicate_start+replicates)``.
+        existing: The pre-existing replicate indices observed in storage.
     """
 
     action: str
     replicate_start: int = 0
     replicates: int = 0
+    replicate_indices: list[int] | None = None
     existing: frozenset[int] = field(default_factory=frozenset)
 
 
@@ -477,21 +481,21 @@ def _apply_collision_policy(
 ) -> _CollisionAction:
     """Compute the dispatch plan for a job given policy + pre-existing state.
 
-    The replicate index is a collision-avoidance tag, not a meaningful
-    coordinate — what matters is the *count* of replicates. ``pool`` therefore
-    reconciles by count: dispatch the *number* still needed at fresh,
-    non-colliding indices.
+    ``pool`` reconciles to a **dense** ``0..n_requested-1`` replicate set by
+    backfilling exactly the missing indices (the JAR accepts an explicit index
+    list via ``--replicate-indices``). The replicate index is the identity, so
+    "20 replicates" means indices 0..19 are present.
 
     Policies:
     - ``"fail"`` (default) — if any prior replicates exist, return ``action="fail"``.
       The caller converts this into :class:`SweepCollisionError`. This path is
       primarily reached through :func:`_check_export_path_safety`; included here
       so the code path is symmetric.
-    - ``"pool"`` — reconcile to ``n_requested`` by count. ``need = n_requested -
-      len(existing)``; dispatch ``need`` fresh replicates starting at
-      ``max(existing)+1`` (a non-colliding offset). If already at/above the
-      target (``need <= 0``), returns ``action="skip"``. Sparse existing sets
-      like ``{1,4,5}`` are fine — only the count matters.
+    - ``"pool"`` — gap-fill to the target. ``missing = sorted(set(range(
+      n_requested)) - existing)``; dispatch exactly those indices
+      (``replicate_indices``). If nothing is missing (``0..n_requested-1`` all
+      present), returns ``action="skip"``. A lost interior replicate is refilled
+      at its own index, keeping the set dense.
     - ``"skip"`` — idempotent: if *any* prior replicate exists, return
       ``action="skip"`` (treat as complete for CI re-runs). Otherwise dispatch
       normally.
@@ -531,18 +535,70 @@ def _apply_collision_policy(
     if policy == "skip":
         return _CollisionAction(action="skip", existing=existing_fs)
 
-    # policy == "pool": reconcile by count. Dispatch the number still needed
-    # at a fresh, non-colliding offset (max+1). Replicate identity is the index;
-    # the gap structure of `existing` is irrelevant — only the count matters.
-    need = n_requested - len(existing_fs)
-    if need <= 0:
+    # policy == "pool": gap-fill to a dense 0..n_requested-1 set. Dispatch
+    # exactly the missing indices (the JAR runs them via --replicate-indices).
+    missing = sorted(set(range(n_requested)) - existing_fs)
+    if not missing:
         return _CollisionAction(action="skip", existing=existing_fs)
     return _CollisionAction(
         action="dispatch",
-        replicate_start=max(existing_fs) + 1,
-        replicates=need,
+        replicate_start=missing[0],
+        replicates=len(missing),
+        replicate_indices=missing,
         existing=existing_fs,
     )
+
+
+def resolve_collision_action(
+    cli: JoshCLI,
+    job: Any,  # ExpandedJob
+    registry: RunRegistry | None,
+    collision_policy: str,
+    *,
+    quiet: bool = False,
+) -> tuple[_CollisionAction | None, Any]:
+    """Evaluate a collision policy for a job, independent of dispatch mode.
+
+    Inspects the job's export paths, lists existing output replicates (MinIO or
+    local filesystem via :func:`list_output_replicates`), and applies the policy.
+    Shared by local, Josh Cloud, and batch-remote dispatch so the same
+    ``fail``/``pool``/``skip`` semantics apply everywhere.
+
+    Returns ``(action, patch_info)``. ``action`` is None when the policy can't be
+    evaluated (no registry, no source_path, no patch export, or a listing error),
+    which callers treat as "dispatch in full".
+    """
+    if registry is None or job.source_path is None:
+        return None, None
+    try:
+        from joshpy.cli import InspectExportsConfig
+
+        exports = cli.inspect_exports(
+            InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+        )
+        patch_info = exports.export_files.get("patch") if exports else None
+        if patch_info is None:
+            return None, None
+        existing = list_output_replicates(
+            cli, registry, patch_info,
+            known_vars={
+                **job.parameters,
+                **job.custom_tags,
+                "run_hash": job.run_hash,
+                "simulation": job.simulation,
+                **({"label": job.label} if getattr(job, "label", None) else {}),
+            },
+            quiet=quiet,
+        )
+        action = _apply_collision_policy(collision_policy, existing, job.replicates)
+        return action, patch_info
+    except Exception as e:
+        if not quiet:
+            print(
+                f"  [POLICY] Could not evaluate {collision_policy!r}: {e}; "
+                f"dispatching in full."
+            )
+        return None, None
 
 
 def _wait_for_file(path: Path, config: LoadConfig) -> bool:

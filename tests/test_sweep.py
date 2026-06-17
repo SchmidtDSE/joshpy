@@ -2215,27 +2215,26 @@ class TestApplyCollisionPolicy(unittest.TestCase):
         action = _apply_collision_policy("pool", {0, 1, 2, 3, 4, 5}, n_requested=5)
         self.assertEqual(action.action, "skip")
 
-    def test_pool_is_count_based_not_gap_fill(self):
-        """Pool reconciles by count: dispatch (target - have) at a fresh offset.
+    def test_pool_gap_fills_missing_indices(self):
+        """Pool backfills exactly the holes in 0..N-1 (dense numbering).
 
-        Sparse {1,4,5} with target 5: have=3, need=2, dispatched at max+1=6.
-        The gap structure is irrelevant — only the count matters.
+        {1,4,5} with target 5: missing 0..4 are {0,2,3} → dispatch those indices.
         """
         from joshpy.sweep import _apply_collision_policy
 
         action = _apply_collision_policy("pool", {1, 4, 5}, n_requested=5)
         self.assertEqual(action.action, "dispatch")
-        self.assertEqual(action.replicate_start, 6)
-        self.assertEqual(action.replicates, 2)
+        self.assertEqual(action.replicate_indices, [0, 2, 3])
+        self.assertEqual(action.replicates, 3)
 
-    def test_pool_sparse_dispatches_by_count(self):
-        """{0, 7} with target 10: have=2, need=8, fresh indices start at max+1=8."""
+    def test_pool_sparse_backfills_all_holes(self):
+        """{0, 7} with target 10: dispatch every missing index in 0..9."""
         from joshpy.sweep import _apply_collision_policy
 
         action = _apply_collision_policy("pool", {0, 7}, n_requested=10)
         self.assertEqual(action.action, "dispatch")
-        self.assertEqual(action.replicate_start, 8)
-        self.assertEqual(action.replicates, 8)  # 10 - 2 have
+        self.assertEqual(action.replicate_indices, [1, 2, 3, 4, 5, 6, 8, 9])
+        self.assertEqual(action.replicates, 8)
 
     def test_unknown_policy_raises(self):
         from joshpy.sweep import _apply_collision_policy
@@ -2510,9 +2509,9 @@ class TestCollisionPolicyInRunSweep(unittest.TestCase):
             # stage_to_minio and batch_remote called once each (we dispatched the gap)
             cli.stage_to_minio.assert_called_once()
             cli.batch_remote.assert_called_once()
-            # The BatchRemoteConfig should have replicate_start=5, replicates=5
+            # Gap-fill: dispatch exactly the missing indices 5..9.
             br_config = cli.batch_remote.call_args[0][0]
-            self.assertEqual(br_config.replicate_start, 5)
+            self.assertEqual(br_config.replicate_indices, [5, 6, 7, 8, 9])
             self.assertEqual(br_config.replicates, 5)
 
     @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
@@ -2632,6 +2631,90 @@ class TestCollisionPolicyInRunSweep(unittest.TestCase):
                     quiet=True,
                     manage_status=False,
                 )
+
+
+class TestCollisionPolicyLocalDispatch(unittest.TestCase):
+    """Collision policy applies to local dispatch, not just batch-remote (Layer 1)."""
+
+    def _setup(self, tmp: Path, existing_indices, target, run_hash="hashLocal"):
+        from joshpy.jobs import ExpandedJob
+        from joshpy.cli import CLIResult, ExportFileInfo, ExportPaths
+
+        src = tmp / "sim.josh"
+        src.write_text("start simulation Main\nend simulation\n")
+        outdir = tmp / "out"
+        outdir.mkdir()
+        for i in existing_indices:
+            (outdir / f"output_{i}.csv").write_text(f"step,replicate\n0,{i}\n")
+
+        job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=tmp / "config.jshc",
+            config_name="config.jshc",
+            run_hash=run_hash,
+            parameters={},
+            simulation="Main",
+            replicates=target,
+            source_path=src,
+            custom_tags={"run_hash": run_hash},
+        )
+        job_set = MagicMock(
+            total_jobs=1, total_replicates=target,
+            __iter__=lambda self: iter([job]),
+        )
+        cli = MagicMock()
+        cli.run.return_value = CLIResult(
+            exit_code=0, stdout="", stderr="", command=["run"],
+        )
+        cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw=f"file://{outdir}/output_{{replicate}}.csv",
+                    protocol="file", host="",
+                    path=f"{outdir}/output_{{replicate}}.csv", file_type="csv",
+                ),
+            },
+            debug_files={},
+        )
+        return cli, job_set, MagicMock()
+
+    def _run(self, cli, job_set, registry, **kw):
+        from joshpy.jobs import run_sweep
+        run_sweep(
+            cli, job_set, registry=registry, session_id="s1",
+            quiet=True, manage_status=False, **kw,
+        )
+
+    def test_local_pool_complete_skips_recompute(self):
+        """pool with the target already met → no local re-run (the waste fix)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), range(10), 10)
+            self._run(cli, job_set, reg, collision_policy="pool")
+            cli.run.assert_not_called()
+
+    def test_local_skip_policy_skips(self):
+        """skip with any existing replicate → no local re-run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), [0, 1, 2], 10)
+            self._run(cli, job_set, reg, collision_policy="skip")
+            cli.run.assert_not_called()
+
+    def test_local_pool_partial_dispatches_missing_indices(self):
+        """pool top-up dispatches exactly the missing indices locally (gap-fill)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), [0, 1, 2], 10)
+            self._run(cli, job_set, reg, collision_policy="pool")
+            cli.run.assert_called_once()
+            run_config = cli.run.call_args[0][0]
+            self.assertEqual(run_config.replicate_indices, [3, 4, 5, 6, 7, 8, 9])
+
+    def test_local_fail_default_does_not_block(self):
+        """Default 'fail' is not enforced on local (no behavior change there)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            cli, job_set, reg = self._setup(Path(tmp), [0, 1, 2], 10)
+            self._run(cli, job_set, reg)  # default policy = fail
+            cli.run.assert_called_once()
 
 
 if __name__ == "__main__":

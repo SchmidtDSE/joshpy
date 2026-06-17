@@ -440,10 +440,12 @@ print("replicates present:", sorted(registry.loaded_replicates("low_growth")))
 print("replicate count:   ", registry.get_replicate_count("low_growth"))
 ```
 
-**Pooling grows a sweep by count.** With `collision_policy="pool"`, re-running a
-sweep with a higher target dispatches only the *number* still needed
-(`target - have`) at fresh, non-colliding indices — so re-running with the same
-target is a no-op, and a larger target tops up the difference.
+**Pooling backfills to a dense replicate set.** With `collision_policy="pool"`,
+re-running dispatches exactly the *missing* indices in `0..target-1` — a lost or
+never-run replicate is refilled at its own index, so the set stays dense
+(`target` replicates means indices `0..target-1`). Re-running at the same target
+is a no-op; a larger target fills in the new indices. This works on local, Josh
+Cloud, and batch-remote alike.
 
 **Parity guard.** `check_consistency()` surfaces run↔analysis drift — duplicate
 replicates, data without a config, or runs that succeeded but were never
