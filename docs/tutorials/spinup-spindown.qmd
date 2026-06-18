@@ -1,0 +1,217 @@
+---
+title: "Spin-up / Spin-down"
+description: "Warm a simulation to equilibrium before the observed period, watch recovery after, and control which phases are exported"
+jupyter: python3
+execute:
+  warning: false
+---
+
+## Introduction
+
+Most ecological runs want more than the years for which we have data. A model
+often needs to **warm up** to a stable state before the observed period, and to
+**keep running** afterward to see how the system recovers from a disturbance.
+Josh supports this with two optional phases around the observed window:
+
+- **Spin-up** — runs *before* the observed period, drawing each year's forcing
+  by resampling historical years, so the system settles into equilibrium.
+- **Observed** — the real period, driven 1:1 by the actual data.
+- **Spin-down** — runs *after* the observed period, again resampling historical
+  years, to watch recovery.
+
+The spin-up / spin-down language is **engine-side** — see
+[`SPINUP.md`](https://github.com/SchmidtDSE/josh) in the josh repository for the
+full reference (the `start spinup` / `start spindown` blocks, the
+`sample discrete uniform` form, and how the data year is resampled). This
+tutorial focuses on what changes for you as a joshpy user:
+
+1. **Authoring scenarios** — a plain run and a warmed-up run live side by side in
+   one `.josh` file, selected by name.
+2. **The anchored clock** — `step 0` is always the first observed step, so
+   spin-up steps are **negative** and spin-down steps run past `steps.high`.
+3. **`output_phases`** — choosing which phases get written to the CSV.
+
+::: {.callout-note}
+Spin-up / spin-down requires a josh build that includes the feature. As with the
+other runnable tutorials, this page uses `JarMode.DEV`.
+:::
+
+## The model: two simulations in one file
+
+Because simulations are *named* and selected at run time, spin-up belongs to the
+**scenario**, not to the shared data resources. That makes it natural to keep a
+plain run and a warmed-up run in the same file. Our example defines both `Main`
+(no spin-up) and `MainWithSpinup`:
+
+```{python}
+#| label: show-josh
+from pathlib import Path
+
+josh_source = Path("../../examples/spinup_spindown.josh").read_text()
+print(josh_source)
+```
+
+A few things to note:
+
+- The two simulations share the same grid, steps, and entity logic; only
+  `MainWithSpinup` adds the `start spinup` / `start spindown` blocks.
+- Each block names a `duration` (how long the phase runs) and a `year` (which
+  data year's forcing is felt, resampled each step).
+- The patch exports `meta.phase` and `meta.stepCount` as ordinary variables so we
+  can see the clock in the output. Exporting them is **optional** — the engine
+  doesn't add a `phase` column on its own.
+
+## Running a scenario
+
+You pick the scenario with `RunConfig(simulation=...)`, exactly as for any
+multi-simulation file. First the plain `Main` run:
+
+```{python}
+#| label: run-main
+import pandas as pd
+from joshpy.cli import JoshCLI, RunConfig
+from joshpy.jar import JarMode
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+result = cli.run(RunConfig(
+    script=Path("../../examples/spinup_spindown.josh"),
+    simulation="Main",
+    seed=1,
+))
+if not result.success:
+    raise RuntimeError(f"Simulation failed:\n{result.stderr}")
+
+main_df = pd.read_csv("/tmp/spinup_main.csv")
+print(f"Main: {len(main_df)} rows, steps {main_df['step'].min()}..{main_df['step'].max()}")
+print(main_df.groupby("phase")["step"].agg(["min", "max", "count"]))
+```
+
+`Main` has no phases, so every row is `observed` and steps run `0..10` — the
+familiar behavior.
+
+Now the warmed-up scenario:
+
+```{python}
+#| label: run-spinup
+result = cli.run(RunConfig(
+    script=Path("../../examples/spinup_spindown.josh"),
+    simulation="MainWithSpinup",
+    seed=1,
+))
+if not result.success:
+    raise RuntimeError(f"Simulation failed:\n{result.stderr}")
+
+full_df = pd.read_csv("/tmp/spinup_withspinup.csv")
+print(f"MainWithSpinup: {len(full_df)} rows, "
+      f"steps {full_df['step'].min()}..{full_df['step'].max()}")
+print(full_df.groupby("phase")["step"].agg(["min", "max", "count"]))
+```
+
+## The anchored clock
+
+Notice the `step` range: **−20 … 20**. The step clock is *anchored at the
+observed period* — `step 0` is always the first observed step, regardless of how
+long spin-up is. So:
+
+- **spin-up** counts backward into the negatives (`−20 … −1` here),
+- **observed** is `0 … 10` (the `steps.low`/`steps.high` window),
+- **spin-down** continues past the end (`11 … 20`).
+
+This is the key thing to internalize for analysis: a spun-up run's `step` column
+contains **negative values**, and `step 0` lines up across runs whether or not
+spin-up exists. The `phase` column here is just the `meta.phase` export, which
+maps cleanly to the step ranges:
+
+```{python}
+#| label: phase-boundaries
+boundaries = (
+    full_df.groupby("phase")["step"]
+    .agg(["min", "max"])
+    .reindex(["spinup", "observed", "spindown"])
+)
+print(boundaries)
+```
+
+## Controlling which phases are exported
+
+Spin-up is often throwaway — you want the system warmed up, but you don't
+necessarily want 20 years of warm-up rows in your results. `RunConfig` takes an
+**`output_phases`** option (mirroring `output_steps`) that emits josh's
+`--output-phases` flag. It's a comma-separated subset of
+`spinup,observed,spindown`; unset means **all phases**.
+
+Keep just the observed period:
+
+```{python}
+#| label: phases-observed
+result = cli.run(RunConfig(
+    script=Path("../../examples/spinup_spindown.josh"),
+    simulation="MainWithSpinup",
+    output_phases="observed",
+    seed=1,
+))
+observed_only = pd.read_csv("/tmp/spinup_withspinup.csv")
+print(f"observed only: {len(observed_only)} rows, "
+      f"steps {observed_only['step'].min()}..{observed_only['step'].max()}, "
+      f"phases {sorted(observed_only['phase'].unique())}")
+```
+
+Or keep the observed period plus recovery, dropping the warm-up:
+
+```{python}
+#| label: phases-observed-spindown
+result = cli.run(RunConfig(
+    script=Path("../../examples/spinup_spindown.josh"),
+    simulation="MainWithSpinup",
+    output_phases="observed,spindown",
+    seed=1,
+))
+obs_spin = pd.read_csv("/tmp/spinup_withspinup.csv")
+print(f"observed+spindown: {len(obs_spin)} rows, "
+      f"steps {obs_spin['step'].min()}..{obs_spin['step'].max()}, "
+      f"phases {sorted(obs_spin['phase'].unique())}")
+```
+
+The warm-up still *runs* — its state is the observed run's initial condition —
+but its rows are not written. Filtering happens in the engine, so you save the
+I/O and storage rather than discarding rows after the fact. The same option is
+available wherever `output_steps` is: on `JobConfig` for sweeps, and in bottled
+`run.sh` scripts.
+
+## Implications for analysis
+
+When you ingest a spun-up run into a registry and query it, the spin-up and
+spin-down rows are present unless you filtered them at export. A couple of
+practical notes:
+
+- **`step` can be negative.** The DuckDB `cell_data.step` column is a signed
+  integer, so negatives store and query fine — but aggregate statistics
+  (means, CVs, parameter comparisons) will *include* warm-up and cool-down
+  unless you scope them. The cleanest scoping is `WHERE step BETWEEN 0 AND
+  <steps.high>` (the observed window), or export with `output_phases="observed"`
+  in the first place.
+- **`phase` is a normal variable column.** Because we exported `meta.phase`, it
+  lands in `cell_data` like any other model variable — queryable directly:
+
+```{python}
+#| label: analysis-filter
+# `full_df` still holds the all-phases run; scope it to the observed window two ways.
+by_step = full_df[(full_df["step"] >= 0) & (full_df["step"] <= 10)]
+by_phase = full_df[full_df["phase"] == "observed"]
+print(f"observed window by step:  {len(by_step)} rows")
+print(f"observed window by phase: {len(by_phase)} rows")
+print("equivalent:", len(by_step) == len(by_phase))
+```
+
+Both give the same observed subset — pick whichever reads more clearly in your
+analysis.
+
+## Related
+
+- [Project Organization](project-organization.qmd) — multiple simulations per
+  `.josh` file, of which spin-up scenarios are a natural example.
+- [`SPINUP.md`](https://github.com/SchmidtDSE/josh) (josh repo) — the engine-side
+  language reference for spin-up / spin-down.
+- [Analysis & Visualization](analysis.qmd) — querying `cell_data` with
+  `DiagnosticQueries`.

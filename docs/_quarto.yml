@@ -19,6 +19,7 @@ project:
     - tutorials/complete-example.qmd       # Depends on preprocessing output
     - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
+    - tutorials/spinup-spindown.qmd      # Spin-up / spin-down phases + output_phases
     - tutorials/bottling-runs.qmd        # Reproducibility archives
     - tutorials/debug-inspection.qmd     # Debug output inspection
     - tutorials/jfr-profiling.qmd       # Finding bottlenecks (josh + JFR)
@@ -73,6 +74,8 @@ website:
           - text: "Advanced"
           - text: "Adaptive Sweeps"
             href: tutorials/adaptive-sweep.qmd
+          - text: "Spin-up / Spin-down"
+            href: tutorials/spinup-spindown.qmd
           - text: "Low-Level Components"
             href: tutorials/low-level-components.qmd
           - text: "Bottling Runs"
@@ -135,6 +138,7 @@ website:
         - section: "Advanced"
           contents:
             - tutorials/adaptive-sweep.qmd
+            - tutorials/spinup-spindown.qmd
             - tutorials/low-level-components.qmd
             - tutorials/switching-versions.qmd
             - tutorials/remote-execution.qmd
