@@ -19,11 +19,11 @@ Josh supports this with two optional phases around the observed window:
 - **Spin-down** — runs *after* the observed period, again resampling historical
   years, to watch recovery.
 
-The spin-up / spin-down language is **engine-side** — see
-[`SPINUP.md`](https://github.com/SchmidtDSE/josh) in the josh repository for the
-full reference (the `start spinup` / `start spindown` blocks, the
-`sample discrete uniform` form, and how the data year is resampled). This
-tutorial focuses on what changes for you as a joshpy user:
+The spin-up / spin-down language itself is **engine-side** — the `start spinup` /
+`start spindown` blocks, the `sample discrete uniform` form, and how the data
+year is resampled are part of Josh (see the [Josh documentation](https://joshsim.org)
+for the language reference). This tutorial focuses on what changes for you as a
+joshpy user:
 
 1. **Authoring scenarios** — a plain run and a warmed-up run live side by side in
    one `.josh` file, selected by name.
@@ -211,7 +211,7 @@ analysis.
 
 - [Project Organization](project-organization.qmd) — multiple simulations per
   `.josh` file, of which spin-up scenarios are a natural example.
-- [`SPINUP.md`](https://github.com/SchmidtDSE/josh) (josh repo) — the engine-side
-  language reference for spin-up / spin-down.
+- [Josh documentation](https://joshsim.org) — the engine-side language reference
+  for the spin-up / spin-down blocks.
 - [Analysis & Visualization](analysis.qmd) — querying `cell_data` with
   `DiagnosticQueries`.

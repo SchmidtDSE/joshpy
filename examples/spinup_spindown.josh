@@ -3,8 +3,8 @@
 # Warm up the system to equilibrium for 20 years *before* the observed period
 # (0-10), then keep running for 10 years *after* to watch recovery. Forcing for
 # the warm-up / cool-down years is drawn by resampling observed years, so no new
-# data is needed. The spin-up/spin-down language is engine-side -- see SPINUP.md
-# in the josh repo for the full reference.
+# data is needed. The spin-up/spin-down language is engine-side -- see the Josh
+# documentation at https://joshsim.org for the language reference.
 #
 # Two simulations share one file: a plain `Main` and a warmed-up
 # `MainWithSpinup`. Pick one at run time with RunConfig(simulation=...).
