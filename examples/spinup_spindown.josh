@@ -1,0 +1,100 @@
+# Spin-up / spin-down demo.
+#
+# Warm up the system to equilibrium for 20 years *before* the observed period
+# (0-10), then keep running for 10 years *after* to watch recovery. Forcing for
+# the warm-up / cool-down years is drawn by resampling observed years, so no new
+# data is needed. The spin-up/spin-down language is engine-side -- see SPINUP.md
+# in the josh repo for the full reference.
+#
+# Two simulations share one file: a plain `Main` and a warmed-up
+# `MainWithSpinup`. Pick one at run time with RunConfig(simulation=...).
+
+start simulation Main
+
+  grid.size = 1000 m
+  grid.low = 33.70 degrees latitude, -115.40 degrees longitude
+  grid.high = 33.72 degrees latitude, -115.42 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 years
+  steps.high = 10 years
+
+  exportFiles.patch = "file:///tmp/spinup_main.csv"
+
+end simulation
+
+start simulation MainWithSpinup
+
+  grid.size = 1000 m
+  grid.low = 33.70 degrees latitude, -115.40 degrees longitude
+  grid.high = 33.72 degrees latitude, -115.42 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 years
+  steps.high = 10 years
+
+  start spinup
+    duration = 20 years
+    year = sample discrete uniform from 0 years to 10 years
+  end spinup
+
+  start spindown
+    duration = 10 years
+    year = sample discrete uniform from 5 years to 10 years
+  end spindown
+
+  exportFiles.patch = "file:///tmp/spinup_withspinup.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create 5 count of ForeverTree
+
+  ForeverTree.step = {
+    const alive = prior.ForeverTree[prior.ForeverTree.alive]
+    const offspring = count(prior.ForeverTree[prior.ForeverTree.reproduces])
+    const newTrees = create offspring of ForeverTree
+    return alive | newTrees
+  }
+
+  export.treeCount.step = count(ForeverTree)
+  export.phase.step = meta.phase
+  export.stepCount.step = meta.stepCount
+
+end patch
+
+start organism ForeverTree
+
+  age.init = 0 years
+  age.step = prior.age + 1 year
+
+  mature.step = current.age >= 3 years
+
+  alive.init = true
+  alive.step = {
+    if (current.mature) {
+      const roll = sample uniform from 0.0 to 1.0
+      return roll < 0.85
+    } else {
+      return true
+    }
+  }
+
+  reproduces.init = false
+  reproduces.step = {
+    if (current.mature and current.alive) {
+      const roll = sample uniform from 0.0 to 1.0
+      return roll < 0.3
+    } else {
+      return false
+    }
+  }
+
+end organism
+
+start unit years
+  alias year
+  alias yr
+  alias yrs
+end unit

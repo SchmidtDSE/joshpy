@@ -168,6 +168,17 @@ Use Optuna's Bayesian optimization for intelligent parameter search:
 
 Best for: Finding optimal parameters without exhaustive grid search.
 
+### [Spin-up / Spin-down](spinup-spindown.qmd)
+
+Warm a simulation to equilibrium before the observed period and watch recovery
+after:
+
+- Multiple named simulations (plain vs. warmed-up) in one `.josh` file
+- The phase-anchored clock (negative spin-up steps, `step 0` = first observed)
+- `output_phases` to control which phases are exported
+
+Best for: Models that need to reach equilibrium before the observed data window.
+
 ### [Low-Level Components](low-level-components.qmd)
 
 Use joshpy's individual components directly:
