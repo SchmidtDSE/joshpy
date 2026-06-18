@@ -58,6 +58,31 @@ my-josh-project/
 - **`data/grids/<grid_name>/`** -- All `.jshd` files for a grid, plus a `grid.yaml` manifest.
 - **`experiments/`** -- One `.duckdb` registry per experiment. Named descriptively.
 
+## Multiple Simulations in One File
+
+A single `.josh` file can declare more than one `start simulation` block, each
+with its own name. You select which one to run with `RunConfig(simulation=...)`
+(or `JobConfig(simulation=...)`). The blocks can share the same grid, steps, and
+entity definitions while differing in a few settings — keeping scenarios that
+belong together in one place instead of duplicating a whole model file.
+
+```python
+# Same file, two scenarios:
+cli.run(RunConfig(script=Path("model.josh"), simulation="Main"))
+cli.run(RunConfig(script=Path("model.josh"), simulation="MainWithSpinup"))
+```
+
+The clearest use-case for this is **spin-up / spin-down**: keep a plain run and a
+warmed-up run (with `start spinup` / `start spindown` blocks) side by side, and
+pick one at run time. See the [Spin-up / Spin-down](spinup-spindown.qmd) tutorial
+for a runnable example, including how `output_phases` controls which phases are
+written.
+
+This differs from **model templating** (below): multiple `start simulation`
+blocks are distinct scenarios in *one* file selected by name, whereas a
+`.josh.j2` template renders *one* model many times with different grid/parameter
+values.
+
 ## Grid Specifications (GridSpec)
 
 Each grid permutation is defined by a `grid.yaml` file co-located with its data
