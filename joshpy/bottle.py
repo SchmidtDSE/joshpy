@@ -110,6 +110,7 @@ def _build_run_sh(
     crs: str | None = None,
     use_float64: bool = False,
     output_steps: str | None = None,
+    output_phases: str | None = None,
 ) -> str:
     """Generate the run.sh script content."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -154,6 +155,8 @@ def _build_run_sh(
         cmd_parts.append("--use-float-64")
     if output_steps:
         cmd_parts.append(f"--output-steps {output_steps}")
+    if output_phases:
+        cmd_parts.append(f"--output-phases {output_phases}")
     if seed is not None:
         cmd_parts.append(f"--seed {seed}")
 
@@ -321,6 +324,7 @@ def create_bottle(
             crs=job.crs,
             use_float64=job.use_float64,
             output_steps=job.output_steps,
+            output_phases=job.output_phases,
         )
         run_sh_path = staging / "run.sh"
         run_sh_path.write_text(run_sh)
@@ -668,6 +672,7 @@ def create_sweep_bottle(
                 crs=job.crs,
                 use_float64=job.use_float64,
                 output_steps=job.output_steps,
+                output_phases=job.output_phases,
             )
             run_sh_path = job_dir / "run.sh"
             run_sh_path.write_text(run_sh)

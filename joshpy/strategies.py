@@ -1336,6 +1336,7 @@ def _create_single_job(
         upload_config_path=config.upload_config_path,
         upload_data_path=config.upload_data_path,
         output_steps=config.output_steps,
+        output_phases=config.output_phases,
         seed=config.seed,
         crs=config.crs,
         use_float64=config.use_float64,

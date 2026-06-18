@@ -153,6 +153,9 @@ class RunConfig:
         upload_config: Upload configuration .jshc files to MinIO after completion.
         upload_data: Upload data .jshd files to MinIO after completion.
         output_steps: Step range to output (e.g., "0-10,50,100").
+        output_phases: Phases to output (e.g., "observed", "observed,spindown").
+            Only meaningful for simulations with spinup/spindown blocks; defaults
+            to all phases when unset.
         seed: Random seed for reproducibility.
         enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
     """
@@ -173,6 +176,7 @@ class RunConfig:
     upload_config: bool = False
     upload_data: bool = False
     output_steps: str | None = None
+    output_phases: str | None = None
     seed: int | None = None
     enable_profiler: bool = False
 
@@ -1156,6 +1160,8 @@ class JoshCLI:
             args.append("--upload-data")
         if config.output_steps:
             args.extend(["--output-steps", config.output_steps])
+        if config.output_phases:
+            args.extend(["--output-phases", config.output_phases])
         if config.seed is not None:
             args.extend(["--seed", str(config.seed)])
         if config.enable_profiler:

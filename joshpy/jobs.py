@@ -784,6 +784,8 @@ class JobConfig:
         upload_config_path: Template for uploading config files.
         upload_data_path: Template for uploading data files.
         output_steps: Step range to output (e.g., "0-10,50,100").
+        output_phases: Phases to output (e.g., "observed", "observed,spindown").
+            Defaults to all phases when unset.
         seed: Random seed for reproducibility.
         crs: Coordinate reference system.
         use_float64: Use double precision instead of BigDecimal.
@@ -831,6 +833,7 @@ class JobConfig:
 
     # Additional CLI options
     output_steps: str | None = None
+    output_phases: str | None = None
     seed: int | None = None
     crs: str | None = None
     use_float64: bool = False
@@ -884,6 +887,8 @@ class JobConfig:
             result["upload_data_path"] = self.upload_data_path
         if self.output_steps:
             result["output_steps"] = self.output_steps
+        if self.output_phases:
+            result["output_phases"] = self.output_phases
         if self.seed is not None:
             result["seed"] = self.seed
         if self.crs:
@@ -928,6 +933,8 @@ class JobConfig:
             kwargs["upload_data_path"] = data["upload_data_path"]
         if "output_steps" in data:
             kwargs["output_steps"] = data["output_steps"]
+        if "output_phases" in data:
+            kwargs["output_phases"] = data["output_phases"]
         if "seed" in data:
             kwargs["seed"] = data["seed"]
         if "crs" in data:
@@ -982,6 +989,7 @@ class ExpandedJob:
         upload_config_path: Resolved upload path for config.
         upload_data_path: Resolved upload path for data.
         output_steps: Step range to output.
+        output_phases: Phases to output (defaults to all when unset).
         seed: Random seed.
         crs: Coordinate reference system.
         use_float64: Use double precision.
@@ -1002,6 +1010,7 @@ class ExpandedJob:
     upload_config_path: str | None = None
     upload_data_path: str | None = None
     output_steps: str | None = None
+    output_phases: str | None = None
     seed: int | None = None
     crs: str | None = None
     use_float64: bool = False
@@ -1236,6 +1245,7 @@ class JobExpander:
                 upload_config_path=config.upload_config_path,
                 upload_data_path=config.upload_data_path,
                 output_steps=config.output_steps,
+                output_phases=config.output_phases,
                 seed=config.seed,
                 crs=config.crs,
                 use_float64=config.use_float64,
@@ -1298,6 +1308,7 @@ def to_run_config(
         crs=job.crs,
         use_float64=job.use_float64,
         output_steps=job.output_steps,
+        output_phases=job.output_phases,
         seed=job.seed,
         enable_profiler=enable_profiler,
     )
