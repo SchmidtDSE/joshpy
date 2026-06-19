@@ -1001,8 +1001,13 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
             manager.cleanup()
             manager.close()
 
-    def test_with_label_multi_job_raises(self):
-        """with_label() should raise for multi-job sweeps."""
+    def test_with_label_multi_job_prefixes_run_hash(self):
+        """with_label() on a multi-job sweep stamps a per-job <label>_<run_hash>.
+
+        Each job's {label} must resolve to a unique value so export paths
+        containing {label} don't collide and the JAR never sees an unresolved
+        {label} template variable.
+        """
         config = JobConfig(
             template_string="maxGrowth = {{ maxGrowth }} meters",
             simulation="Main",
@@ -1013,9 +1018,54 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
             ),
         )
 
-        with self.assertRaises(ValueError) as ctx:
-            SweepManagerBuilder(config).with_registry(":memory:").with_label("test").build()
-        self.assertIn("single-job", str(ctx.exception))
+        manager = (
+            SweepManagerBuilder(config)
+            .with_registry(":memory:", experiment_name="test")
+            .with_label("baseline")
+            .build()
+        )
+
+        try:
+            jobs = manager.job_set.jobs
+            self.assertEqual(len(jobs), 3)
+            for job in jobs:
+                expected = f"baseline_{job.run_hash}"
+                self.assertEqual(job.label, expected)
+                self.assertEqual(job.custom_tags.get("label"), expected)
+            # Per-job labels are unique → no export-path collisions.
+            self.assertEqual(len({j.custom_tags["label"] for j in jobs}), 3)
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_sweep_defaults_label_to_sweep_run_hash(self):
+        """Unlabeled sweep jobs default {label} to sweep_<run_hash>."""
+        config = JobConfig(
+            template_string="maxGrowth = {{ maxGrowth }} meters",
+            simulation="Main",
+            sweep=SweepConfig(
+                config_parameters=[
+                    ConfigSweepParameter(name="maxGrowth", values=[10, 20]),
+                ],
+            ),
+        )
+
+        manager = (
+            SweepManagerBuilder(config)
+            .with_registry(":memory:", experiment_name="test")
+            .build()
+        )
+
+        try:
+            jobs = manager.job_set.jobs
+            self.assertEqual(len(jobs), 2)
+            for job in jobs:
+                expected = f"sweep_{job.run_hash}"
+                self.assertEqual(job.label, expected)
+                self.assertEqual(job.custom_tags.get("label"), expected)
+        finally:
+            manager.cleanup()
+            manager.close()
 
     def test_with_label_force(self):
         """with_label(force=True) should reassign an existing label."""
