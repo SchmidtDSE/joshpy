@@ -2018,10 +2018,17 @@ class SweepManagerBuilder:
         force: bool = False,
         on_collision: str | None = None,
     ) -> SweepManagerBuilder:
-        """Set a label for this run (single-job configs only).
+        """Set a label for this run.
 
-        The label is applied at build() time when the job is registered.
-        For multi-job sweeps, raises ValueError at build() time.
+        The label is applied at build() time. For a single-job config the bare
+        label is registered as a unique, queryable handle and used to resolve
+        ``{label}`` in export paths.
+
+        For a multi-job sweep the label becomes a per-job prefix: each job's
+        ``{label}`` resolves to ``<label>_<run_hash>`` so export paths stay
+        collision-free. (Without ``with_label()``, sweep jobs default to
+        ``sweep_<run_hash>``.) Per-job sweep labels are not registered as
+        registry handles — use ``registry.label_run()`` for that.
 
         Args:
             label: Human-readable label for this run.
@@ -2232,25 +2239,40 @@ class SweepManagerBuilder:
                         josh_content=josh_content,
                     )
 
-                # Apply label if set (with_label() takes precedence over
-                # JobConfig.label; both register with the registry and
-                # inject the label as a --custom-tag for export paths).
+                # Inject a label as a --custom-tag so export paths containing
+                # {label} always resolve (with_label() takes precedence over
+                # JobConfig.label).
+                #
+                # A single-job config keeps the bare label and registers it as a
+                # unique, queryable handle in the registry.
+                #
+                # A multi-job sweep cannot share one registry label across N runs
+                # (labels are unique), so each job gets a per-job {label} of the
+                # form "<base>_<run_hash>" — base is the supplied label, or
+                # "sweep" when none was given. This guarantees {label} resolves
+                # (no more cryptic JAR "Unknown template variables: {label}") and
+                # keeps per-job export paths collision-free. Sweep jobs stay
+                # identified in the registry by their swept parameters + run_hash;
+                # use registry.label_run() to attach queryable handles to
+                # individual runs.
                 effective_label = self._label or self._config.label
-                if effective_label is not None:
-                    if len(job_set.jobs) != 1:
-                        raise ValueError(
-                            f"with_label() requires a single-job config, but this "
-                            f"config expands to {len(job_set.jobs)} jobs. Label "
-                            f"individual runs via registry.label_run()."
+                if len(job_set.jobs) == 1:
+                    if effective_label is not None:
+                        job = job_set.jobs[0]
+                        self._registry.label_run(
+                            job.run_hash,
+                            effective_label,
+                            force=self._label_force,
+                            on_collision=self._label_on_collision,
                         )
-                    self._registry.label_run(
-                        job_set.jobs[0].run_hash,
-                        effective_label,
-                        force=self._label_force,
-                        on_collision=self._label_on_collision,
-                    )
-                    job_set.jobs[0].label = effective_label
-                    job_set.jobs[0].custom_tags["label"] = effective_label
+                        job.label = effective_label
+                        job.custom_tags["label"] = effective_label
+                else:
+                    base = effective_label or "sweep"
+                    for job in job_set.jobs:
+                        job_label = f"{base}_{job.run_hash}"
+                        job.label = job_label
+                        job.custom_tags["label"] = job_label
 
         # Register with catalog if configured
         experiment_id = None
