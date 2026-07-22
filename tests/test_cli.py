@@ -1,5 +1,6 @@
 """Unit tests for the cli module."""
 
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1359,6 +1360,112 @@ class TestInspectExportsIntegration(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             cli.inspect_exports(config)
+
+
+class TestFlattenArgs(unittest.TestCase):
+    """Arg-building tests for flatten (mocked execution)."""
+
+    JAR_MODE = JarMode.DEV
+
+    @patch.object(JoshCLI, "_execute")
+    def test_builds_args_with_base_and_output(self, mock_execute):
+        from joshpy.cli import FlattenConfig
+
+        mock_execute.return_value = MagicMock(
+            success=True, exit_code=0, stdout="flat", stderr=""
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text("start simulation Main\nend simulation\n")
+            out = Path(tmp) / "flat.josh"
+            out.write_text("flat")  # _execute is mocked; pre-seed the file it "wrote"
+            cli.flatten(
+                FlattenConfig(entry=entry, output=out, import_base=Path(tmp))
+            )
+
+            args = mock_execute.call_args[0][0]
+            self.assertEqual(args[0], "flatten")
+            self.assertIn("--import-base", args)
+            self.assertIn("--output", args)
+
+    @patch.object(JoshCLI, "_execute")
+    def test_raises_on_failure(self, mock_execute):
+        from joshpy.cli import FlattenConfig
+
+        mock_execute.return_value = MagicMock(
+            success=False, exit_code=3, stdout="", stderr="Cannot find imported file"
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text('import "nope.josh"\n')
+            with self.assertRaises(RuntimeError):
+                cli.flatten(FlattenConfig(entry=entry))
+
+
+class TestFlattenIntegration(unittest.TestCase):
+    """Integration tests for flatten using the DEV jar."""
+
+    JAR_MODE = JarMode.DEV
+    JAVA_PATH = Path(__file__).parent.parent / ".pixi" / "envs" / "default" / "bin" / "java"
+
+    def _cli(self):
+        if not self.JAVA_PATH.exists():
+            self.skipTest(f"Java not found at: {self.JAVA_PATH}")
+        return JoshCLI(josh_jar=self.JAR_MODE, java_path=str(self.JAVA_PATH))
+
+    def _make_model(self, root: Path) -> Path:
+        (root / "overlays").mkdir(parents=True, exist_ok=True)
+        (root / "overlays" / "fire.josh").write_text(
+            "start disturbance Fire\n"
+            "  threshold.init = config example.fireThreshold\n"
+            "end disturbance\n"
+        )
+        entry = root / "model.josh"
+        entry.write_text(
+            'import "overlays/fire.josh"\n\n'
+            "start simulation Main\n"
+            "  grid.size = 10 count\n"
+            "end simulation\n"
+        )
+        return entry
+
+    def test_flatten_inlines_import_to_stdout(self):
+        from joshpy.cli import FlattenConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = self._make_model(Path(tmp))
+            flat = cli.flatten(FlattenConfig(entry=entry))
+
+        # Overlay body inlined; entry body preserved; import statement gone.
+        self.assertIn("start disturbance Fire", flat)
+        self.assertIn("start simulation Main", flat)
+        self.assertNotIn("import ", flat)
+
+    def test_flatten_writes_output_file(self):
+        from joshpy.cli import FlattenConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = self._make_model(Path(tmp))
+            out = Path(tmp) / "flat.josh"
+            flat = cli.flatten(FlattenConfig(entry=entry, output=out))
+
+            self.assertTrue(out.exists())
+            self.assertEqual(flat, out.read_text())
+            self.assertIn("start disturbance Fire", out.read_text())
+
+    def test_flatten_missing_import_raises(self):
+        from joshpy.cli import FlattenConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "bad.josh"
+            entry.write_text('import "nope.josh"\n')
+            with self.assertRaises(RuntimeError):
+                cli.flatten(FlattenConfig(entry=entry))
 
 
 class TestStreamOutput(unittest.TestCase):
