@@ -505,7 +505,6 @@ class TestJoshCLI(unittest.TestCase):
             use_float64=True,
             verbose=True,
             output_steps="0-10",
-            output_phases="observed,spindown",
             seed=42,
         )
 
@@ -522,8 +521,6 @@ class TestJoshCLI(unittest.TestCase):
         self.assertIn("--verbose", cmd)
         self.assertIn("--output-steps", cmd)
         self.assertIn("0-10", cmd)
-        self.assertIn("--output-phases", cmd)
-        self.assertIn("observed,spindown", cmd)
         self.assertIn("--seed", cmd)
         self.assertIn("42", cmd)
 

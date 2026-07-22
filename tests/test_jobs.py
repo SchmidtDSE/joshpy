@@ -471,14 +471,13 @@ class TestJobConfig(unittest.TestCase):
         self.assertEqual(config.replicates, 3)
         self.assertEqual(config.template_string, "var = {{ val }}")
 
-    def test_output_phases_roundtrip(self):
-        """output_phases should survive to_dict/from_dict serialization."""
-        config = JobConfig(output_steps="0-10", output_phases="observed,spindown")
+    def test_output_steps_roundtrip(self):
+        """output_steps should survive to_dict/from_dict serialization."""
+        config = JobConfig(output_steps="0-10,50,100")
         result = config.to_dict()
-        self.assertEqual(result["output_phases"], "observed,spindown")
+        self.assertEqual(result["output_steps"], "0-10,50,100")
         restored = JobConfig.from_dict(result)
-        self.assertEqual(restored.output_phases, "observed,spindown")
-        self.assertEqual(restored.output_steps, "0-10")
+        self.assertEqual(restored.output_steps, "0-10,50,100")
 
     def test_to_yaml_from_yaml_roundtrip(self):
         """YAML serialization should round-trip correctly."""
@@ -929,7 +928,6 @@ class TestToRunConfig(unittest.TestCase):
             crs="EPSG:4326",
             use_float64=True,
             output_steps="0-10",
-            output_phases="observed,spindown",
         )
 
         run_config = to_run_config(job)
@@ -938,7 +936,6 @@ class TestToRunConfig(unittest.TestCase):
         self.assertEqual(run_config.crs, "EPSG:4326")
         self.assertTrue(run_config.use_float64)
         self.assertEqual(run_config.output_steps, "0-10")
-        self.assertEqual(run_config.output_phases, "observed,spindown")
 
     def test_with_file_mappings(self):
         """Job with file mappings should include them in data dict."""

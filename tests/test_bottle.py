@@ -137,13 +137,13 @@ class TestCreateBottle(unittest.TestCase):
 
     @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
     @patch("joshpy.jar.get_jar_hash", return_value="sha256abc123")
-    def test_run_sh_includes_output_phases(self, mock_hash, mock_ver):
+    def test_run_sh_includes_output_steps(self, mock_hash, mock_ver):
         from dataclasses import replace
 
         from joshpy.bottle import create_bottle
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            job = replace(_make_job(tmpdir), output_phases="observed,spindown")
+            job = replace(_make_job(tmpdir), output_steps="0-10,50")
             cli = _make_mock_cli()
 
             out_dir = Path(tmpdir) / "bottles"
@@ -154,7 +154,7 @@ class TestCreateBottle(unittest.TestCase):
                 tar.extractall(extract_dir)
 
             run_sh = (extract_dir / "bottle_abc123def456" / "run.sh").read_text()
-            self.assertIn("--output-phases observed,spindown", run_sh)
+            self.assertIn("--output-steps 0-10,50", run_sh)
 
     @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
     @patch("joshpy.jar.get_jar_hash", return_value="sha256abc123")
