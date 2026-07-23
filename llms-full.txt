@@ -58,7 +58,7 @@ joshpy/
 
 **Always available:**
 - `jar.py`: `JarMode`, `JarManager`, `get_jar`, `download_jars`, `get_jar_hash`, `get_jar_version`
-- `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `NetcdfPreprocessConfig`, `GeotiffPreprocessConfig`, `CsvPreprocessConfig`, `PreprocessConfig` (type alias), `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`
+- `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `NetcdfPreprocessConfig`, `GeotiffPreprocessConfig`, `CsvPreprocessConfig`, `PreprocessConfig` (type alias), `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`, `FlattenConfig`
 - `config_parser.py`: `parse_jshc`, `parse_jshc_content`
 - `jshd.py`: `JshdMetadata`, `JshdData`, `load_jshd`, `plot_jshd`
 - `debug/`: `DebugMessage`, `DebugMessageStore`, `DebugSummary`, `parse_debug_line`, `load_debug_file`, `load_debug_from_script`, `format_message`
@@ -444,6 +444,30 @@ result = cli.inspect_jshd(InspectJshdConfig(
 
 print(f"Value at (10, 20) timestep 0: {result.stdout}")
 ```
+
+### Flattening Imports
+
+Inline a model's `import "..."` statements into a single self-contained `.josh`
+(structural splice; `config foo.bar` references are left verbatim). Useful for
+producing a single-file model; not required for normal runs, where the jar splices
+imports natively from the co-located files:
+
+```python
+from joshpy.cli import JoshCLI, FlattenConfig
+
+cli = JoshCLI()
+
+# Returns the flattened source; also writes it when output= is given.
+flat = cli.flatten(FlattenConfig(
+    entry=Path("model.josh"),
+    output=Path("model.flat.josh"),  # optional; else returned from stdout
+    import_base=Path("model_src"),   # optional resolution root for relative imports
+))
+```
+
+Note: multi-file models are normally driven from `JobConfig.import_files` (see
+JobConfig Options), which materializes the declared import closure alongside the
+entry so the jar resolves imports natively — no flatten step needed.
 
 ### Remote Execution (Josh Cloud)
 
@@ -836,6 +860,7 @@ Note: `parameters` is a deprecated alias for `config_parameters`.
 | `source_path` | Path | Path to .josh source file |
 | `source_template_path` | Path | Path to .josh.j2 Jinja template. Rendered once with template_vars. Mutually exclusive with source_path |
 | `template_vars` | dict[str, Any] | Static template variables rendered into source_template_path and/or template_path. Unlike sweep parameters, these do not vary per job |
+| `import_files` | list[Path] | Auxiliary Josh files the model imports via `import "..."`, declared relative to the entry's source root. `.j2` entries are rendered with template_vars; others copied verbatim. Materialized into the run dir preserving relative layout so the jar resolves imports natively. Must be exactly the import closure (each file is hashed and bottled). Empty = single-file behavior |
 | `simulation` | str | Simulation name (default: "Main") |
 | `replicates` | int | Replicates per job (default: 1) |
 | `sweep` | SweepConfig | Parameter sweep configuration |
@@ -853,12 +878,13 @@ Each expanded job contains:
 job.config_content   # Rendered configuration text
 job.config_path      # Path to written .jshc file
 job.config_name      # Logical name for --data flag
-job.run_hash         # MD5 hash (12 chars) of josh + config + file_mappings
+job.run_hash         # MD5 hash (12 chars) of josh + config + file_mappings + imports
 job.parameters       # Dict of parameter values
 job.simulation       # Simulation name
 job.replicates       # Number of replicates
 job.source_path      # Path to .josh file
 job.file_mappings    # Additional data files
+job.import_files     # Rendered import closure {relative path -> absolute path} (empty for single-file models)
 job.custom_tags      # Tags for CLI (derived from parameters)
 job.output_steps     # Step range to output (optional)
 job.seed             # Random seed (optional)
