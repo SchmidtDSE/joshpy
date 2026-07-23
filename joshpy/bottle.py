@@ -110,7 +110,6 @@ def _build_run_sh(
     crs: str | None = None,
     use_float64: bool = False,
     output_steps: str | None = None,
-    output_phases: str | None = None,
 ) -> str:
     """Generate the run.sh script content."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -155,8 +154,6 @@ def _build_run_sh(
         cmd_parts.append("--use-float-64")
     if output_steps:
         cmd_parts.append(f"--output-steps {output_steps}")
-    if output_phases:
-        cmd_parts.append(f"--output-phases {output_phases}")
     if seed is not None:
         cmd_parts.append(f"--seed {seed}")
 
@@ -206,6 +203,7 @@ def _build_manifest(
         "platform": platform.platform(),
         "original_josh_path": original_josh_path,
         "original_data_paths": original_data_paths or {},
+        "import_files": sorted(job.import_files.keys()) if job else [],
         "git_hash": _get_git_hash(),
         "bottled_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
@@ -265,7 +263,7 @@ def create_bottle(
     try:
         staging.mkdir(parents=True)
 
-        # 1. simulation.josh
+        # 1. simulation.josh (entry) + imported closure at relative paths
         if job.source_path and job.source_path.exists():
             shutil.copy2(job.source_path, staging / "simulation.josh")
         else:
@@ -274,6 +272,12 @@ def create_bottle(
                 f"simulation.josh will be missing from bottle",
                 stacklevel=2,
             )
+        # Imported .josh files: copy preserving relative layout so the entry's
+        # `import "..."` statements resolve at replay exactly as at run time.
+        for rel, abs_path in job.import_files.items():
+            dest = staging / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(abs_path, dest)
 
         # 2. Config file (rendered .jshc)
         config_name = job.config_name
@@ -324,7 +328,6 @@ def create_bottle(
             crs=job.crs,
             use_float64=job.use_float64,
             output_steps=job.output_steps,
-            output_phases=job.output_phases,
         )
         run_sh_path = staging / "run.sh"
         run_sh_path.write_text(run_sh)
@@ -643,9 +646,13 @@ def create_sweep_bottle(
             job_dir = jobs_staging / job.run_hash
             job_dir.mkdir()
 
-            # simulation.josh
+            # simulation.josh (entry) + imported closure at relative paths
             if job.source_path and job.source_path.exists():
                 shutil.copy2(job.source_path, job_dir / "simulation.josh")
+            for rel, abs_path in job.import_files.items():
+                dest = job_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(abs_path, dest)
 
             # Config
             config_name = job.config_name
@@ -672,7 +679,6 @@ def create_sweep_bottle(
                 crs=job.crs,
                 use_float64=job.use_float64,
                 output_steps=job.output_steps,
-                output_phases=job.output_phases,
             )
             run_sh_path = job_dir / "run.sh"
             run_sh_path.write_text(run_sh)
@@ -684,6 +690,7 @@ def create_sweep_bottle(
                 "parameters": job.parameters,
                 "exit_code": cli_result.exit_code,
                 "success": cli_result.success,
+                "import_files": sorted(job.import_files.keys()),
             }
             if not cli_result.success:
                 entry["stderr"] = cli_result.stderr

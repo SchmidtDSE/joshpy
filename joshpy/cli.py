@@ -153,9 +153,6 @@ class RunConfig:
         upload_config: Upload configuration .jshc files to MinIO after completion.
         upload_data: Upload data .jshd files to MinIO after completion.
         output_steps: Step range to output (e.g., "0-10,50,100").
-        output_phases: Phases to output (e.g., "observed", "observed,spindown").
-            Only meaningful for simulations with spinup/spindown blocks; defaults
-            to all phases when unset.
         seed: Random seed for reproducibility.
         enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
     """
@@ -176,7 +173,6 @@ class RunConfig:
     upload_config: bool = False
     upload_data: bool = False
     output_steps: str | None = None
-    output_phases: str | None = None
     seed: int | None = None
     enable_profiler: bool = False
 
@@ -670,6 +666,28 @@ class ExportPaths:
         return Path(resolved)
 
 
+@dataclass(frozen=True)
+class FlattenConfig:
+    """Arguments for 'java -jar joshsim.jar flatten' command.
+
+    Recursively inlines a Josh model's ``import`` statements into a single
+    self-contained script. The splice is purely structural: ``config foo.bar``
+    references are left verbatim (resolved by the engine at run time), so plain
+    overlays keep working.
+
+    Attributes:
+        entry: Path to the entry Josh file to flatten.
+        output: Optional path to write the flattened output to. If None, the
+            flattened content is captured from stdout.
+        import_base: Directory used as the resolution root for the entry file's
+            relative imports. Defaults to the entry file's own directory.
+    """
+
+    entry: Path
+    output: Path | None = None
+    import_base: Path | None = None
+
+
 # -----------------------------------------------------------------------------
 # JoshCLI - The executor class
 # -----------------------------------------------------------------------------
@@ -1160,8 +1178,6 @@ class JoshCLI:
             args.append("--upload-data")
         if config.output_steps:
             args.extend(["--output-steps", config.output_steps])
-        if config.output_phases:
-            args.extend(["--output-phases", config.output_phases])
         if config.seed is not None:
             args.extend(["--seed", str(config.seed)])
         if config.enable_profiler:
@@ -1418,6 +1434,44 @@ class JoshCLI:
                 "disturbance": parse_file_info(data["debugFiles"].get("disturbance")),
             },
         )
+
+    def flatten(
+        self,
+        config: FlattenConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> str:
+        """Inline a Josh model's imports into a single self-contained script.
+
+        Args:
+            config: Flatten configuration (entry file, optional output/base).
+            timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
+
+        Returns:
+            The flattened Josh source as a string. When ``config.output`` is
+            set, the content is also written to that path.
+
+        Raises:
+            RuntimeError: If flatten fails (missing import, import cycle,
+                duplicate entity, or a rejected protocol/absolute import).
+        """
+        args = ["flatten", str(config.entry.resolve())]
+        if config.import_base is not None:
+            args.extend(["--import-base", str(config.import_base.resolve())])
+        if config.output is not None:
+            args.extend(["--output", str(config.output.resolve())])
+
+        result = self._execute(args, timeout=timeout, jfr=jfr)
+
+        if not result.success:
+            raise RuntimeError(
+                f"flatten failed (exit code {result.exit_code}): {result.stderr}"
+            )
+
+        if config.output is not None:
+            return Path(config.output).read_text()
+        return result.stdout
 
     def diagnose_jfr(
         self,
