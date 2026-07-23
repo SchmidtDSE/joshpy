@@ -23,6 +23,7 @@ def assemble_batch_workdir(job: ExpandedJob, workdir: Path) -> Path:
 
         workdir/<run_hash>/
           sim.josh                    # symlink to job.source_path
+          <rel>.josh                  # symlink per imported file (relative layout)
           <job.config_name>.jshc      # unique rendered config for this job (written)
           <name>.jshd                 # symlink per entry in job.file_mappings
 
@@ -52,6 +53,15 @@ def assemble_batch_workdir(job: ExpandedJob, workdir: Path) -> Path:
     os.symlink(job.source_path.resolve(), sim_link)
 
     (target / job.config_name).write_text(job.config_content)
+
+    # Imported .josh closure: preserve relative layout so the entry's
+    # `import "..."` statements resolve against sim.josh's directory (= target).
+    for rel, path in job.import_files.items():
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists() or dest.is_symlink():
+            dest.unlink()
+        os.symlink(Path(path).resolve(), dest)
 
     for name, path in job.file_mappings.items():
         # Preserve whichever suffix the source file actually has (.jshd

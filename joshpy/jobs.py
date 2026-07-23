@@ -127,6 +127,7 @@ def _compute_run_hash(
     file_mappings: dict[str, Path] | None = None,
     *,
     seed: int | None = None,
+    import_files: list[tuple[str, Path]] | None = None,
 ) -> str:
     """Compute hash uniquely identifying a simulation specification.
 
@@ -136,6 +137,8 @@ def _compute_run_hash(
     - Content hashes of all input data files (.jshd, etc.)
     - Random seed, if explicitly set (preserves backward-compatible
       hashes for unseeded runs)
+    - Content of imported Josh files (the declared closure), if any
+      (guarded so single-file models keep their legacy hash)
 
     This provides a complete fingerprint of all inputs to a simulation,
     ensuring that runs with different input data get different hashes.
@@ -193,6 +196,16 @@ def _compute_run_hash(
     if seed is not None:
         hasher.update(b"seed=")
         hasher.update(str(seed).encode("utf-8"))
+
+    # 5. Imported Josh files (the declared closure), sorted by relative path.
+    #    Guarded: absent/empty leaves the hash byte-identical to a single-file
+    #    model, so existing registries are preserved.
+    if import_files:
+        for rel, path in sorted(import_files, key=lambda t: t[0]):
+            if not path.exists():
+                raise FileNotFoundError(f"Imported Josh file not found: {path}")
+            hasher.update(rel.encode("utf-8"))
+            hasher.update(_hash_file(path).encode("utf-8"))
 
     return hasher.hexdigest()[:12]
 
@@ -779,6 +792,14 @@ class JobConfig:
         template_vars: Static template variables rendered into source_template_path
             and/or template_path. Unlike sweep parameters, these do not vary
             per job — they produce a single rendered file.
+        import_files: Auxiliary Josh files the model imports via ``import "..."``.
+            Declared relative to the entry's source root (the parent of
+            source_template_path or source_path). ``.j2`` entries are rendered
+            with template_vars (``.j2`` stripped); others are copied verbatim.
+            All are materialized into the run dir preserving relative layout so
+            the jar resolves imports natively. Must be exactly the import
+            closure — every rendered file is hashed and bottled. Empty (default)
+            preserves single-file behavior.
         file_mappings: Map of data file names to paths.
         upload_source_path: Template for uploading source files.
         upload_config_path: Template for uploading config files.
@@ -813,6 +834,13 @@ class JobConfig:
     # Josh source templating (mutually exclusive with source_path)
     source_template_path: Path | None = None
     template_vars: dict[str, Any] = field(default_factory=dict)
+
+    # Auxiliary Josh files the model imports (josh `import "..."`), declared
+    # relative to the entry's source root. Rendered/copied into the run dir
+    # preserving relative layout so the jar splices them natively. Must be the
+    # exact import closure (each file is hashed and bottled). Empty => today's
+    # single-file behavior.
+    import_files: list[Path] = field(default_factory=list)
 
     # Parameter sweep config (optional)
     sweep: SweepConfig | None = None
@@ -850,6 +878,11 @@ class JobConfig:
                 "Only one of source_path or source_template_path may be provided"
             )
 
+        if self.import_files and self.source_path is None and self.source_template_path is None:
+            raise ValueError(
+                "import_files requires an entry model (source_path or source_template_path)"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization."""
         result: dict[str, Any] = {}
@@ -872,6 +905,8 @@ class JobConfig:
             result["source_template_path"] = str(self.source_template_path)
         if self.template_vars:
             result["template_vars"] = self.template_vars
+        if self.import_files:
+            result["import_files"] = [str(p) for p in self.import_files]
         if self.sweep:
             result["sweep"] = self.sweep.to_dict()
         if self.file_mappings:
@@ -916,6 +951,8 @@ class JobConfig:
             kwargs["source_template_path"] = Path(data["source_template_path"])
         if "template_vars" in data:
             kwargs["template_vars"] = data["template_vars"]
+        if "import_files" in data:
+            kwargs["import_files"] = [Path(p) for p in data["import_files"]]
         if "sweep" in data:
             kwargs["sweep"] = SweepConfig.from_dict(data["sweep"])
         if "file_mappings" in data:
@@ -977,6 +1014,9 @@ class ExpandedJob:
         replicates: Number of replicates.
         source_path: Path to .josh source file.
         file_mappings: Data file mappings.
+        import_files: Rendered import closure as {relative path -> rendered
+            absolute path}, co-located with source_path. Empty for single-file
+            models. Bottling copies these preserving relative layout.
         custom_tags: Tags for CLI (derived from parameters).
         upload_source_path: Resolved upload path for source.
         upload_config_path: Resolved upload path for config.
@@ -996,6 +1036,7 @@ class ExpandedJob:
     replicates: int
     source_path: Path | None = None
     file_mappings: dict[str, Path] = field(default_factory=dict)
+    import_files: dict[str, Path] = field(default_factory=dict)
     custom_tags: dict[str, str] = field(default_factory=dict)
     label: str | None = None
     upload_source_path: str | None = None
@@ -1118,6 +1159,66 @@ class JobExpander:
             rendered_josh_path.write_text(rendered_josh)
             effective_source_path = rendered_josh_path
 
+        # Materialize the declared import closure (josh `import "..."`) alongside
+        # the entry so the jar resolves imports natively. Rendered once, shared
+        # across sweep combinations. Empty import_files => single-file behavior.
+        import_manifest: list[tuple[str, Path]] = []
+        if config.import_files:
+            source_root = (
+                config.source_template_path.parent
+                if config.source_template_path
+                else config.source_path.parent  # type: ignore[union-attr]
+            )
+            # For a plain (non-templated) entry, co-locate it in output_dir too so
+            # the whole collection lives together and relative imports resolve.
+            if config.source_template_path is None and config.source_path is not None:
+                entry_dest = output_dir / config.source_path.name
+                if entry_dest != config.source_path:
+                    shutil.copy2(config.source_path, entry_dest)
+                effective_source_path = entry_dest
+
+            seen_rel: set[str] = set()
+            for rel in config.import_files:
+                src = rel if rel.is_absolute() else source_root / rel
+                mirror_rel = Path(rel)
+                if rel.is_absolute():
+                    try:
+                        mirror_rel = Path(src).relative_to(source_root)
+                    except ValueError as exc:
+                        raise ValueError(
+                            f"import_files entry {rel} is outside the source root "
+                            f"{source_root}"
+                        ) from exc
+                if not src.exists():
+                    raise FileNotFoundError(
+                        f"Imported file not found: {src} (declared as '{rel}')"
+                    )
+                # Render .j2 overlays with template_vars; copy others verbatim.
+                if mirror_rel.suffix == ".j2":
+                    mirror_rel = mirror_rel.with_suffix("")  # strip .j2
+                    dest = output_dir / mirror_rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    overlay_env = Environment(
+                        loader=FileSystemLoader(str(src.parent)), autoescape=False
+                    )
+                    dest.write_text(
+                        overlay_env.get_template(src.name).render(**config.template_vars)
+                    )
+                else:
+                    dest = output_dir / mirror_rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+
+                rel_key = str(mirror_rel)
+                if rel_key in seen_rel:
+                    raise ValueError(f"Duplicate import_files mirror path: {rel_key}")
+                if dest == effective_source_path:
+                    raise ValueError(
+                        f"import_files entry {rel} collides with the entry model"
+                    )
+                seen_rel.add(rel_key)
+                import_manifest.append((rel_key, dest))
+
         # Load config template or raw config
         template = None
         raw_config_content: str | None = None
@@ -1203,6 +1304,7 @@ class JobExpander:
                 config_content=rendered,
                 file_mappings=file_mappings if file_mappings else None,
                 seed=config.seed,
+                import_files=import_manifest if import_manifest else None,
             )
 
             # Add run_hash as a custom tag
@@ -1230,6 +1332,7 @@ class JobExpander:
                 replicates=config.replicates,
                 source_path=effective_source_path,
                 file_mappings=file_mappings,
+                import_files=dict(import_manifest),
                 custom_tags=custom_tags,
                 label=config.label,
                 upload_source_path=config.upload_source_path,

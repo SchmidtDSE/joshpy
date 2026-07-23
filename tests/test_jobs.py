@@ -2885,5 +2885,105 @@ class TestRunSweepBatchRemote(unittest.TestCase):
             self.assertEqual(result.failed, 0)
 
 
+class TestImportFiles(unittest.TestCase):
+    """Tests for import_files (the declared import closure)."""
+
+    def _write_model(self, root: Path, *, templated_overlay: bool) -> JobConfig:
+        """Entry template importing a plain overlay and (optionally) a templated one."""
+        (root / "overlays").mkdir(parents=True, exist_ok=True)
+        (root / "overlays" / "fire.josh").write_text(
+            "start disturbance Fire\nend disturbance\n"
+        )
+        imports = ['import "overlays/fire.josh"']
+        aux = [Path("overlays/fire.josh")]
+        if templated_overlay:
+            (root / "overlays" / "mgmt.josh.j2").write_text(
+                "start disturbance Mgmt\n  n.init = {{ nplots }}\nend disturbance\n"
+            )
+            imports.append('import "overlays/mgmt.josh"')
+            aux.append(Path("overlays/mgmt.josh.j2"))
+        entry = root / "model.josh.j2"
+        entry.write_text(
+            "\n".join(imports)
+            + "\n\nstart simulation Main\n  grid.size = {{ n }} count\nend simulation\n"
+        )
+        return JobConfig(
+            template_string="",
+            source_template_path=entry,
+            template_vars={"n": 10, "nplots": 3},
+            import_files=aux,
+        )
+
+    def test_post_init_requires_entry(self):
+        with self.assertRaises(ValueError):
+            JobConfig(import_files=[Path("overlays/fire.josh")])
+
+    def test_import_files_roundtrip(self):
+        config = JobConfig(
+            source_path=Path("/m/model.josh"),
+            import_files=[Path("overlays/fire.josh"), Path("overlays/mgmt.josh.j2")],
+        )
+        restored = JobConfig.from_dict(config.to_dict())
+        self.assertEqual(
+            restored.import_files,
+            [Path("overlays/fire.josh"), Path("overlays/mgmt.josh.j2")],
+        )
+
+    def test_expand_materializes_collection(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            config = self._write_model(Path(src), templated_overlay=True)
+            job_set = JobExpander().expand(config, output_dir=Path(out))
+            job = job_set.jobs[0]
+
+            out_dir = Path(out)
+            # Plain overlay copied verbatim, templated overlay rendered (.j2 stripped).
+            self.assertTrue((out_dir / "overlays" / "fire.josh").exists())
+            mgmt = out_dir / "overlays" / "mgmt.josh"
+            self.assertTrue(mgmt.exists())
+            self.assertIn("n.init = 3", mgmt.read_text())  # template_vars applied
+            self.assertFalse((out_dir / "overlays" / "mgmt.josh.j2").exists())
+            # Collection recorded on the job, keyed by relative path.
+            self.assertEqual(
+                set(job.import_files.keys()),
+                {"overlays/fire.josh", "overlays/mgmt.josh"},
+            )
+
+    def test_run_hash_changes_with_overlay_content(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            config = self._write_model(Path(src), templated_overlay=False)
+            h1 = JobExpander().expand(config, output_dir=Path(out)).jobs[0].run_hash
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            config = self._write_model(Path(src), templated_overlay=False)
+            # Change the overlay content only.
+            (Path(src) / "overlays" / "fire.josh").write_text(
+                "start disturbance Fire\n  intensity.init = 9\nend disturbance\n"
+            )
+            h2 = JobExpander().expand(config, output_dir=Path(out)).jobs[0].run_hash
+        self.assertNotEqual(h1, h2)
+
+    def test_run_hash_backward_compatible_without_imports(self):
+        """A model with no import_files hashes identically to the legacy path."""
+        with tempfile.TemporaryDirectory() as out:
+            src = Path(out) / "model.josh"
+            src.write_text("start simulation Main\nend simulation\n")
+            legacy = _compute_run_hash(josh_path=src, config_content="cfg")
+            with_empty = _compute_run_hash(
+                josh_path=src, config_content="cfg", import_files=None
+            )
+            self.assertEqual(legacy, with_empty)
+
+    def test_missing_import_raises(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            entry = Path(src) / "model.josh.j2"
+            entry.write_text("start simulation Main\nend simulation\n")
+            config = JobConfig(
+                template_string="",
+                source_template_path=entry,
+                import_files=[Path("overlays/missing.josh")],
+            )
+            with self.assertRaises(FileNotFoundError):
+                JobExpander().expand(config, output_dir=Path(out))
+
+
 if __name__ == '__main__':
     unittest.main()

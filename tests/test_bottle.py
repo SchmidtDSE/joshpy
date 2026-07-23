@@ -82,6 +82,35 @@ class TestCreateBottle(unittest.TestCase):
 
     @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
     @patch("joshpy.jar.get_jar_hash", return_value="sha256abc123")
+    def test_bottle_includes_import_closure(self, mock_hash, mock_ver):
+        from dataclasses import replace
+
+        from joshpy.bottle import create_bottle
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = _make_job(tmpdir)
+            overlay = Path(tmpdir) / "overlays" / "fire.josh"
+            overlay.parent.mkdir(parents=True, exist_ok=True)
+            overlay.write_text("start disturbance Fire\nend disturbance\n")
+            job = replace(base, import_files={"overlays/fire.josh": overlay})
+
+            out_dir = Path(tmpdir) / "bottles"
+            archive = create_bottle(job, cli=_make_mock_cli(), output_dir=out_dir)
+
+            extract_dir = Path(tmpdir) / "extracted"
+            with tarfile.open(archive, "r:gz") as tar:
+                tar.extractall(extract_dir)
+
+            root = extract_dir / "bottle_abc123def456"
+            # Entry at root; overlay preserved at its relative path so
+            # `import "overlays/fire.josh"` resolves against simulation.josh.
+            self.assertTrue((root / "simulation.josh").exists())
+            self.assertTrue((root / "overlays" / "fire.josh").exists())
+            manifest = json.loads((root / "manifest.json").read_text())
+            self.assertEqual(manifest["import_files"], ["overlays/fire.josh"])
+
+    @patch("joshpy.jar.get_jar_version", return_value="0.5.0-dev")
+    @patch("joshpy.jar.get_jar_hash", return_value="sha256abc123")
     def test_archive_structure(self, mock_hash, mock_ver):
         from joshpy.bottle import create_bottle
 

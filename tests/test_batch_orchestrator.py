@@ -40,6 +40,23 @@ def _make_job(
 
 
 class TestAssembleBatchWorkdir(unittest.TestCase):
+    def test_stages_import_closure_preserving_layout(self):
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            workdir = tmp / "work"
+            workdir.mkdir()
+            overlay = tmp / "overlays" / "fire.josh"
+            overlay.parent.mkdir(parents=True, exist_ok=True)
+            overlay.write_text("start disturbance Fire\nend disturbance\n")
+            job = _make_job(tmp)
+            job.import_files["overlays/fire.josh"] = overlay
+
+            result = assemble_batch_workdir(job, workdir)
+
+            staged = result / "overlays" / "fire.josh"
+            self.assertTrue(staged.is_symlink())
+            self.assertEqual(staged.resolve(), overlay.resolve())
+
     def test_creates_per_run_hash_subdir(self):
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp = Path(tmp_str)
