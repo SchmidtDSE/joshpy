@@ -42,7 +42,7 @@ start simulation {{ simulation_name }}
   grid.low = {{ low_lat }} degrees latitude, {{ low_lon }} degrees longitude
   grid.high = {{ high_lat }} degrees latitude, {{ high_lon }} degrees longitude
   steps.low = 0 count
-  steps.high = {{ steps }} count
+  steps.high = {{ steps_high }} count
 end simulation
 
 start patch Default
@@ -92,7 +92,11 @@ config = JobConfig(
 ```
 
 Switching grids means swapping `grid.template_vars` -- no file copying, no
-editing bounds in multiple places.
+editing bounds in multiple places. For a temporal GridSpec, `steps` is the
+number of timesteps and `steps_high` is the inclusive upper bound. Use
+`{{ steps_high }}` when rendering `steps.high`; the temporal fields are also
+available as `time_type`, `time_start`, `time_count`, and either
+`time_unit`/`time_increment` or `time_interval`.
 
 ---
 

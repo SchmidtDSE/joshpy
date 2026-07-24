@@ -828,6 +828,45 @@ The resulting `grid.yaml` contains both grid geometry and the file inventory.
 Load it later with `GridSpec.from_yaml()` to get `file_mappings` and
 `template_vars` for `JobConfig`.
 
+### Temporal grids
+
+For time-varying resources, declare the shared axis on the GridSpec rather
+than repeating temporal options for every NetCDF file:
+
+```python
+from joshpy.grid import TimeAxis
+
+grid = GridSpec(
+    name="future-climate",
+    output_dir=Path("data/grids/future-climate"),
+    size_m=1000,
+    low=(34.0, -116.4),
+    high=(33.7, -115.4),
+    time=TimeAxis(
+        type="count",
+        start=2015,
+        unit="year",
+        count=86,
+        increment=1,
+    ),
+)
+
+grid.preprocess_netcdf(
+    cli,
+    josh_name="futureTemp",
+    data_file=DATA_DIR / "future_temperature.nc",
+    variable="tas",
+    units="K",
+    compress=True,
+)
+```
+
+The declared axis supplies Josh's `--time-*` preprocessing arguments and
+renders 86 physical slices (`steps.low = 0`, `steps.high = 85`). The saved
+manifest contains the same axis under `time:`. Use a per-resource
+`TimeAxis(...)` override only when a resource intentionally has a different
+cadence or range.
+
 ### Variant files
 
 When data files vary by scenario (e.g., different soil patterns or climate

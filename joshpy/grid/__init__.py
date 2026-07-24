@@ -28,4 +28,4 @@ CLI usage::
     python -m joshpy.grid data/grids/dev_fine/grid.yaml --json
 """
 
-from joshpy.grid._core import GridSpec  # noqa: F401
+from joshpy.grid._core import GridSpec, TimeAxis  # noqa: F401

@@ -392,7 +392,13 @@ grid:
   size_m: 30
   low: [33.902, -116.0465]
   high: [33.908, -116.0395]
-  steps: 86
+
+time:
+  type: count
+  start: 2015
+  unit: year
+  count: 86
+  increment: 1
 
 variants:
   scenario:
