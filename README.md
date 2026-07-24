@@ -99,7 +99,7 @@ Use the CLI wrapper directly for individual commands:
 
 ```python
 from pathlib import Path
-from joshpy.cli import JoshCLI, RunConfig, PreprocessConfig, ValidateConfig
+from joshpy.cli import JoshCLI, NetcdfPreprocessConfig, RunConfig, ValidateConfig
 
 cli = JoshCLI()
 
@@ -109,13 +109,17 @@ if not result.success:
     print(f"Validation failed: {result.stderr}")
 
 # Preprocess external data
-result = cli.preprocess(PreprocessConfig(
+result = cli.preprocess(NetcdfPreprocessConfig(
     script=Path("simulation.josh"),
     simulation="Main",
     data_file=Path("temperature.nc"),
     variable="temp",
     units="K",
     output=Path("temperature.jshd"),
+    time_type="count",
+    time_start=2015,
+    time_unit="year",
+    time_count=86,
 ))
 
 # Run a simulation

@@ -333,9 +333,62 @@ significantly reduce preprocessing time.
 | `y_coord` | Name of Y/latitude dimension (default: "lat") |
 | `time_coord` | Name of time dimension (default: "time") |
 | `timestep` | Extract specific time slice (optional) |
+| `time_type` | Declared temporal axis type: `"count"` or `"ISO"` (optional) |
+| `time_start` | First count coordinate or ISO date (optional) |
+| `time_unit` | Unit for a count axis, such as `"year"` (optional) |
+| `time_count` | Number of declared temporal coordinates (optional) |
+| `time_increment` | Increment between count coordinates (optional; JAR default: `1`) |
+| `time_interval` | ISO-8601 period between ISO dates, such as `"P1M"` (optional) |
+| `time_instant` | Single count coordinate or ISO date for a one-slice output (optional) |
 | `amend` | Add to existing `.jshd` file (default: False) |
 | `crs` | Coordinate reference system |
 | `parallel` | Enable parallel processing (~Nx speedup on N cores) |
+
+### Declared temporal axes
+
+By default, preprocessing preserves the source's raw slice layout. Set temporal
+axis options when the output should carry explicit coordinates for Josh's
+coordinate-based external reads.
+
+For a count axis, declare the first coordinate, its unit, the number of output
+slices, and optionally its increment:
+
+```python
+result = cli.preprocess(NetcdfPreprocessConfig(
+    script=SOURCE_PATH,
+    simulation="Main",
+    data_file=DATA_DIR / "soil_quality_gradient.nc",
+    variable="soil_quality",
+    units="percent",
+    output=DATA_DIR / "soil_quality_annual.jshd",
+    time_type="count",
+    time_start=2015,
+    time_unit="year",
+    time_count=86,
+    time_increment=1,
+))
+```
+
+For ISO dates, use an ISO-8601 period rather than a count unit and increment:
+
+```python
+result = cli.preprocess(NetcdfPreprocessConfig(
+    script=SOURCE_PATH,
+    simulation="Main",
+    data_file=DATA_DIR / "soil_quality_gradient.nc",
+    variable="soil_quality",
+    units="percent",
+    output=DATA_DIR / "soil_quality_monthly.jshd",
+    time_type="ISO",
+    time_start="2026-01-01",
+    time_count=12,
+    time_interval="P1M",
+))
+```
+
+Use `time_instant` instead of a range to declare a one-slice count coordinate
+or ISO date. The Josh JAR validates incompatible combinations and verifies that
+the declared count matches the output slices.
 
 ## Step 3: Verify with cli.inspect_jshd()
 

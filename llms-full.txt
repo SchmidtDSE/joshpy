@@ -288,8 +288,12 @@ result = cli.preprocess(NetcdfPreprocessConfig(
     amend=True,                # Add to existing file
     x_coord="longitude",       # Custom X dimension name
     y_coord="latitude",        # Custom Y dimension name
-    time_coord="calendar_year", # Custom time dimension name
-    timestep=5,                # Extract specific time slice (optional)
+    time_coord="calendar_year",  # Custom time dimension name
+    time_type="count",        # Persist an explicit count axis
+    time_start=2015,
+    time_unit="year",
+    time_count=86,
+    time_increment=1,
     crs="EPSG:4326",
     parallel=True,             # Enable parallel processing (~Nx speedup)
 ))
@@ -356,9 +360,27 @@ slow for large files. For large datasets, consider converting to GeoTIFF first.
 | `y_coord` | str | Y/latitude dimension name (default: "lat") |
 | `time_coord` | str | Time dimension name (default: "time") |
 | `timestep` | int | Extract specific time slice (optional) |
+| `time_type` | str | Declared temporal axis type: `"count"` or `"ISO"` (optional) |
+| `time_start` | str, int, or float | First count coordinate or ISO date (optional) |
+| `time_unit` | str | Unit for a count axis (optional) |
+| `time_count` | int | Number of declared temporal coordinates (optional) |
+| `time_increment` | int or float | Increment between count coordinates (optional; JAR default: 1) |
+| `time_interval` | str | ISO-8601 period between ISO dates, such as `"P1M"` (optional) |
+| `time_instant` | str, int, or float | Single count coordinate or ISO date for one output slice (optional) |
 | `amend` | bool | Amend existing file (default: False) |
 | `crs` | str | Coordinate Reference System |
 | `parallel` | bool | Enable parallel processing (~Nx speedup on N cores) |
+
+#### Declared Temporal Axes
+
+NetCDF preprocessing can persist explicit temporal coordinates in the output
+JSHD. For count axes, set `time_type="count"` with `time_start`, `time_unit`,
+and `time_count`; `time_increment` is optional and defaults to 1 in the JAR.
+For ISO axes, set `time_type="ISO"` with an ISO date `time_start`,
+`time_count`, and ISO-8601 `time_interval` such as `"P1M"`. Use
+`time_instant` instead of a range for a one-slice count coordinate or ISO date.
+The JAR validates incompatible combinations and requires the declared count to
+match the output slices.
 
 ### GeotiffPreprocessConfig Options
 
@@ -1869,7 +1891,9 @@ grid = GridSpec(
 grid.preprocess_geotiff(cli, josh_name="cover", data_file=tif_path,
                         band=0, units="percent", timestep=0)
 grid.preprocess_netcdf(cli, josh_name="futureTempJan", data_file=nc_path,
-                       variable="tas", units="K", subdirectory="monthly")
+                       variable="tas", units="K", subdirectory="monthly",
+                       time_type="count", time_start=2015,
+                       time_unit="year", time_count=86)
 grid.save()  # writes grid.yaml
 
 # Load later for model runs
@@ -1899,6 +1923,9 @@ The simulation name goes in `template_vars` at `JobConfig` construction time.
 | `preprocess_csv()` | CSV | `variable`, `timestep` |
 
 All accept: `josh_name`, `data_file`, `units`, `crs`, `parallel`, `amend`, `subdirectory`.
+`preprocess_netcdf()` also accepts `time_type`, `time_start`, `time_unit`,
+`time_count`, `time_increment`, `time_interval`, and `time_instant` to declare
+the output temporal axis.
 Internally renders a temp `.josh` file with grid geometry, calls `cli.preprocess()`,
 records the result in `grid.files` on success, and cleans up the temp file.
 

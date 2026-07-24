@@ -700,6 +700,13 @@ class GridSpec:
         y_coord: str = "lat",
         time_coord: str = "time",
         timestep: int | None = None,
+        time_type: str | None = None,
+        time_start: str | int | float | None = None,
+        time_unit: str | None = None,
+        time_count: int | None = None,
+        time_increment: int | float | None = None,
+        time_interval: str | None = None,
+        time_instant: str | int | float | None = None,
         crs: str | None = None,
         parallel: bool = False,
         amend: bool = False,
@@ -719,6 +726,13 @@ class GridSpec:
             y_coord: Name of the Y/latitude dimension.
             time_coord: Name of the time dimension.
             timestep: Optional specific time slice to extract.
+            time_type: Temporal axis type: ``"count"`` or ``"ISO"``.
+            time_start: First count coordinate or ISO date.
+            time_unit: Unit for a count axis.
+            time_count: Number of declared temporal coordinates.
+            time_increment: Increment between count coordinates.
+            time_interval: ISO-8601 period between ISO dates.
+            time_instant: Single count coordinate or ISO date for one output slice.
             crs: Coordinate reference system.
             parallel: Enable parallel processing.
             amend: Append to existing .jshd file.
@@ -753,6 +767,13 @@ class GridSpec:
                 y_coord=y_coord,
                 time_coord=time_coord,
                 timestep=timestep,
+                time_type=time_type,
+                time_start=time_start,
+                time_unit=time_unit,
+                time_count=time_count,
+                time_increment=time_increment,
+                time_interval=time_interval,
+                time_instant=time_instant,
                 crs=crs,
                 parallel=parallel,
                 amend=amend,
