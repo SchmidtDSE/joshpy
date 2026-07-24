@@ -221,6 +221,13 @@ class NetcdfPreprocessConfig:
         y_coord: Name of Y/latitude dimension (default: "lat").
         time_coord: Name of time dimension (default: "time").
         timestep: Extract specific time slice (optional).
+        time_type: Temporal axis type: ``"count"`` or ``"ISO"``.
+        time_start: First count coordinate or ISO date.
+        time_unit: Unit for a count axis.
+        time_count: Number of declared temporal coordinates.
+        time_increment: Increment between count coordinates.
+        time_interval: ISO-8601 period between ISO dates (e.g., ``"P1M"``).
+        time_instant: Single count coordinate or ISO date for one output slice.
         amend: Append to existing JSHD file.
         crs: Coordinate Reference System if not embedded.
         parallel: Enable parallel processing (~Nx speedup on N cores).
@@ -239,6 +246,13 @@ class NetcdfPreprocessConfig:
     amend: bool = False
     crs: str | None = None
     parallel: bool = False
+    time_type: str | None = None
+    time_start: str | int | float | None = None
+    time_unit: str | None = None
+    time_count: int | None = None
+    time_increment: int | float | None = None
+    time_interval: str | None = None
+    time_instant: str | int | float | None = None
 
     def __post_init__(self) -> None:
         """Validate config after initialization."""
@@ -1336,6 +1350,20 @@ class JoshCLI:
                 args.extend(["--time-dim", config.time_coord])
             if config.timestep is not None:
                 args.extend(["--timestep", str(config.timestep)])
+            if config.time_type is not None:
+                args.extend(["--time-type", config.time_type])
+            if config.time_start is not None:
+                args.extend(["--time-start", str(config.time_start)])
+            if config.time_unit is not None:
+                args.extend(["--time-unit", config.time_unit])
+            if config.time_count is not None:
+                args.extend(["--time-count", str(config.time_count)])
+            if config.time_increment is not None:
+                args.extend(["--time-increment", str(config.time_increment)])
+            if config.time_interval is not None:
+                args.extend(["--time-interval", config.time_interval])
+            if config.time_instant is not None:
+                args.extend(["--time-instant", str(config.time_instant)])
         else:
             # GeoTIFF and CSV require timestep (validated in __post_init__)
             args.extend(["--timestep", str(config.timestep)])

@@ -292,6 +292,31 @@ class TestGridSpecPreprocess(unittest.TestCase):
                 str(Path("monthly") / "futureTempJan.jshd"),
             )
 
+    def test_preprocess_netcdf_forwards_temporal_axis_options(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="futureTemp",
+                data_file=Path(tmpdir) / "tas.nc",
+                variable="tas",
+                units="K",
+                time_type="ISO",
+                time_start="2026-01-01",
+                time_count=12,
+                time_interval="P1M",
+                time_instant="2026-01-01",
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.time_type, "ISO")
+            self.assertEqual(config.time_start, "2026-01-01")
+            self.assertEqual(config.time_count, 12)
+            self.assertEqual(config.time_interval, "P1M")
+            self.assertEqual(config.time_instant, "2026-01-01")
+
     def test_preprocess_csv_calls_cli(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             grid = self._make_grid(tmpdir)

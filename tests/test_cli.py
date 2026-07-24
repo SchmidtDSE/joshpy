@@ -153,6 +153,13 @@ class TestNetcdfPreprocessConfig(unittest.TestCase):
         self.assertEqual(config.y_coord, "lat")
         self.assertEqual(config.time_coord, "time")
         self.assertIsNone(config.timestep)
+        self.assertIsNone(config.time_type)
+        self.assertIsNone(config.time_start)
+        self.assertIsNone(config.time_unit)
+        self.assertIsNone(config.time_count)
+        self.assertIsNone(config.time_increment)
+        self.assertIsNone(config.time_interval)
+        self.assertIsNone(config.time_instant)
 
     def test_with_custom_coordinates(self):
         """Config with custom coordinate names."""
@@ -174,6 +181,27 @@ class TestNetcdfPreprocessConfig(unittest.TestCase):
         self.assertEqual(config.y_coord, "latitude")
         self.assertEqual(config.time_coord, "calendar_year")
         self.assertEqual(config.timestep, 5)
+
+    def test_with_declared_temporal_axis(self):
+        """Temporal-axis options should be retained."""
+        config = NetcdfPreprocessConfig(
+            script=Path("simulation.josh"),
+            simulation="Main",
+            data_file=Path("data.nc"),
+            variable="rainfall",
+            units="mm/year",
+            output=Path("data.jshd"),
+            time_type="ISO",
+            time_start="2026-01-01",
+            time_count=12,
+            time_interval="P1M",
+            time_instant="2026-01-01",
+        )
+        self.assertEqual(config.time_type, "ISO")
+        self.assertEqual(config.time_start, "2026-01-01")
+        self.assertEqual(config.time_count, 12)
+        self.assertEqual(config.time_interval, "P1M")
+        self.assertEqual(config.time_instant, "2026-01-01")
 
     def test_invalid_extension(self):
         """Should raise ValueError for non-NetCDF file."""
@@ -635,6 +663,11 @@ class TestJoshCLI(unittest.TestCase):
         self.assertIn("time", cmd)
         # NetCDF without timestep should NOT have --timestep
         self.assertNotIn("--timestep", cmd)
+        for flag in (
+            "--time-type", "--time-start", "--time-unit", "--time-count",
+            "--time-increment", "--time-interval", "--time-instant",
+        ):
+            self.assertNotIn(flag, cmd)
 
     @patch("subprocess.run")
     def test_preprocess_netcdf_with_timestep(self, mock_run):
@@ -658,6 +691,43 @@ class TestJoshCLI(unittest.TestCase):
         cmd = mock_run.call_args[0][0]
         self.assertIn("--timestep", cmd)
         self.assertIn("5", cmd)
+
+    @patch("subprocess.run")
+    def test_preprocess_netcdf_with_declared_temporal_axis(self, mock_run):
+        """preprocess() should emit all declared temporal-axis flags."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = NetcdfPreprocessConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/temperature.nc"),
+            variable="temp",
+            units="K",
+            output=Path("/path/to/temperature.jshd"),
+            time_type="count",
+            time_start=2015,
+            time_unit="year",
+            time_count=86,
+            time_increment=1,
+            time_interval="P1Y",
+            time_instant="2026-01-01",
+        )
+
+        cli.preprocess(config)
+
+        cmd = mock_run.call_args[0][0]
+        expected = {
+            "--time-type": "count",
+            "--time-start": "2015",
+            "--time-unit": "year",
+            "--time-count": "86",
+            "--time-increment": "1",
+            "--time-interval": "P1Y",
+            "--time-instant": "2026-01-01",
+        }
+        for flag, value in expected.items():
+            self.assertEqual(cmd[cmd.index(flag) + 1], value)
 
     @patch("subprocess.run")
     def test_preprocess_geotiff(self, mock_run):
