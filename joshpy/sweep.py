@@ -2209,9 +2209,11 @@ class SweepManagerBuilder:
                 experiment_name=self._experiment_name,
             )
         else:
-            # For non-adaptive strategies, expand jobs upfront
+            # For non-adaptive strategies, expand jobs upfront. Pass the CLI so
+            # the model's import closure is auto-discovered authoritatively via
+            # `inspect-imports` (unless import_files is explicitly declared).
             expander = JobExpander()
-            job_set = expander.expand(self._config)
+            job_set = expander.expand(self._config, cli=self._cli)
 
             # Create or use session
             if self._session_id:

@@ -37,6 +37,9 @@ from joshpy.cli import (
     InspectExportsConfig,
     ExportFileInfo,
     ExportPaths,
+    InspectImportsConfig,
+    ImportInfo,
+    FlattenConfig,
     StageFromMinioConfig,
     StageToMinioConfig,
     BatchRemoteConfig,
@@ -108,6 +111,7 @@ try:
         to_batch_remote_config,
         run_sweep,
         discover_jshd_files,
+        discover_import_files,
     )
     from joshpy.strategies import (
         SweepStrategy,
@@ -207,6 +211,9 @@ __all__ = [
     "InspectExportsConfig",
     "ExportFileInfo",
     "ExportPaths",
+    "InspectImportsConfig",
+    "ImportInfo",
+    "FlattenConfig",
     "StageFromMinioConfig",
     "StageToMinioConfig",
     "BatchRemoteConfig",
@@ -262,6 +269,7 @@ __all__ = [
     "to_batch_remote_config",
     "run_sweep",
     "discover_jshd_files",
+    "discover_import_files",
     "GridSpec",
     "HAS_JOBS",
     # Strategies (optional, part of jobs)

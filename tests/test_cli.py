@@ -1468,6 +1468,158 @@ class TestFlattenIntegration(unittest.TestCase):
                 cli.flatten(FlattenConfig(entry=entry))
 
 
+class TestInspectImportsArgs(unittest.TestCase):
+    """Arg-building tests for inspect-imports (mocked execution)."""
+
+    JAR_MODE = JarMode.DEV
+
+    @patch.object(JoshCLI, "_execute")
+    def test_builds_args_and_parses_json(self, mock_execute):
+        from joshpy.cli import InspectImportsConfig
+
+        mock_execute.return_value = MagicMock(
+            success=True,
+            exit_code=0,
+            stdout=(
+                '{"entry": "/m/model.josh", "imports": ['
+                '{"path": "overlays/fire.josh", '
+                '"resolvedPath": "/m/overlays/fire.josh", '
+                '"sourceFile": "/m/model.josh", "line": 1}]}'
+            ),
+            stderr="",
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text('import "overlays/fire.josh"\n')
+            imports = cli.inspect_imports(
+                InspectImportsConfig(entry=entry, import_base=Path(tmp))
+            )
+
+        args = mock_execute.call_args[0][0]
+        self.assertEqual(args[0], "inspect-imports")
+        self.assertIn("--import-base", args)
+        # --json is a default-true toggle; must NOT be passed for JSON output.
+        self.assertNotIn("--json", args)
+        self.assertEqual(len(imports), 1)
+        self.assertEqual(imports[0].path, "overlays/fire.josh")
+        self.assertEqual(imports[0].resolved_path, Path("/m/overlays/fire.josh"))
+        self.assertEqual(imports[0].line, 1)
+
+    @patch.object(JoshCLI, "_execute")
+    def test_human_readable_toggles_json_off(self, mock_execute):
+        from joshpy.cli import InspectImportsConfig
+
+        mock_execute.return_value = MagicMock(
+            success=True, exit_code=0, stdout='{"imports": []}', stderr=""
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text("start simulation Main\nend simulation\n")
+            cli.inspect_imports(
+                InspectImportsConfig(entry=entry, json_output=False)
+            )
+        self.assertIn("--json", mock_execute.call_args[0][0])
+
+    @patch.object(JoshCLI, "_execute")
+    def test_raises_on_failure(self, mock_execute):
+        from joshpy.cli import InspectImportsConfig
+
+        mock_execute.return_value = MagicMock(
+            success=False, exit_code=3, stdout="", stderr="Cannot find imported file"
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text('import "nope.josh"\n')
+            with self.assertRaises(RuntimeError):
+                cli.inspect_imports(InspectImportsConfig(entry=entry))
+
+
+class TestInspectImportsIntegration(unittest.TestCase):
+    """Integration tests for inspect-imports using the DEV jar."""
+
+    JAR_MODE = JarMode.DEV
+    JAVA_PATH = Path(__file__).parent.parent / ".pixi" / "envs" / "default" / "bin" / "java"
+
+    def _cli(self):
+        if not self.JAVA_PATH.exists():
+            self.skipTest(f"Java not found at: {self.JAVA_PATH}")
+        return JoshCLI(josh_jar=self.JAR_MODE, java_path=str(self.JAVA_PATH))
+
+    def _make_model(self, root: Path) -> Path:
+        """Entry -> overlays/fire.josh -> overlays/shared.josh (transitive)."""
+        (root / "overlays").mkdir(parents=True, exist_ok=True)
+        (root / "overlays" / "shared.josh").write_text(
+            "start unit shared\nend unit\n"
+        )
+        (root / "overlays" / "fire.josh").write_text(
+            'import "shared.josh"\n'
+            "start disturbance Fire\n"
+            "end disturbance\n"
+        )
+        entry = root / "model.josh"
+        entry.write_text(
+            'import "overlays/fire.josh"\n\n'
+            "start simulation Main\n"
+            "  grid.size = 10 count\n"
+            "end simulation\n"
+        )
+        return entry
+
+    def test_returns_transitive_closure(self):
+        from joshpy.cli import InspectImportsConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = self._make_model(root)
+            imports = cli.inspect_imports(
+                InspectImportsConfig(entry=entry, import_base=root)
+            )
+
+        # Transitive: both the directly-imported overlay and its nested import.
+        paths = {i.path for i in imports}
+        self.assertEqual(paths, {"overlays/fire.josh", "shared.josh"})
+        resolved = {i.resolved_path.name for i in imports}
+        self.assertEqual(resolved, {"fire.josh", "shared.josh"})
+
+    def test_entry_outside_import_base_resolves(self):
+        """joshpy's real case: rendered entry in a job dir, base = source tree."""
+        from joshpy.cli import InspectImportsConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "src"
+            src.mkdir()
+            self._make_model(src)
+            # Rendered entry lives outside the source tree.
+            rendered = root / "model_rendered.josh"
+            rendered.write_text((src / "model.josh").read_text())
+            imports = cli.inspect_imports(
+                InspectImportsConfig(entry=rendered, import_base=src)
+            )
+            # resolvedPath (the field we key off) points into the source tree
+            # and is correct even though the entry lives outside import_base.
+            self.assertTrue(imports)
+            for info in imports:
+                self.assertTrue(info.resolved_path.is_absolute())
+                self.assertTrue(info.resolved_path.exists())
+                self.assertTrue(info.resolved_path.is_relative_to(src))
+
+    def test_no_import_model_empty(self):
+        from joshpy.cli import InspectImportsConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "plain.josh"
+            entry.write_text("start simulation Main\nend simulation\n")
+            imports = cli.inspect_imports(InspectImportsConfig(entry=entry))
+        self.assertEqual(imports, [])
+
+
 class TestStreamOutput(unittest.TestCase):
     """Tests for stream_output parameter in JoshCLI."""
 
