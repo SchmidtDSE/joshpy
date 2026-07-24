@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import re
 import shutil
 import tempfile
 from collections.abc import Callable, Iterator
@@ -1095,6 +1096,118 @@ class JobSet:
         return iter(self.jobs)
 
 
+# A real josh `import "..."` statement always starts a line with the `import`
+# keyword followed by a quoted path. This is only a cheap gate to decide whether
+# to invoke josh's authoritative resolver at all — NOT a closure parser. An entry
+# with no import statement has a definitively empty closure (the closure is what
+# is reachable *from* the entry), so gating on this never misses a real import.
+_IMPORT_LINE_RE = re.compile(r'^\s*import\s+["\']', re.MULTILINE)
+
+
+def _entry_has_imports(entry: Path) -> bool:
+    """Cheaply check whether an entry .josh file contains any import statement."""
+    try:
+        return bool(_IMPORT_LINE_RE.search(entry.read_text(encoding="utf-8")))
+    except OSError:
+        return False
+
+
+def _source_root(config: JobConfig) -> Path | None:
+    """Resolve the model source root — the base for relative ``import`` paths.
+
+    This is the parent of the entry model (``source_template_path`` if the
+    entry is templated, else ``source_path``). Returns None when the config
+    has no entry model.
+    """
+    if config.source_template_path is not None:
+        return config.source_template_path.parent
+    if config.source_path is not None:
+        return config.source_path.parent
+    return None
+
+
+def _render_entry(config: JobConfig, output_dir: Path) -> Path | None:
+    """Materialize the entry ``.josh`` for a config.
+
+    When ``source_template_path`` is set, renders it with ``template_vars``
+    into *output_dir* (stripping a trailing ``.j2``) and returns the rendered
+    path. Otherwise returns ``source_path`` unchanged (or None if neither is
+    set). Shared by :meth:`JobExpander.expand` and :func:`discover_import_files`
+    so both render the entry identically.
+    """
+    if config.source_template_path is not None:
+        template_dir = config.source_template_path.parent
+        template_name = config.source_template_path.name
+        env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
+        rendered = env.get_template(template_name).render(**config.template_vars)
+        rendered_path = output_dir / config.source_template_path.stem
+        # Strip .j2 extension if present (e.g., model.josh.j2 -> model.josh)
+        if not rendered_path.suffix:
+            rendered_path = rendered_path.with_suffix(".josh")
+        rendered_path.write_text(rendered)
+        return rendered_path
+    return config.source_path
+
+
+def discover_import_files(cli: JoshCLI, config: JobConfig) -> list[Path]:
+    """Authoritatively discover a model's import closure via ``inspect-imports``.
+
+    Renders the entry (matching what :meth:`JobExpander.expand` renders), asks
+    josh's own resolver for the full transitive closure, and returns the
+    resolved files as paths **relative to the model source root** — ready to
+    assign to :attr:`JobConfig.import_files`.
+
+    This replaces ad-hoc Python-side import scanning (regexing ``import "..."``
+    out of the rendered entry): the returned closure is transitive (nested
+    overlays included) and validated exactly as at run time, and the file set
+    josh *splices* is the file set joshpy *hashes* — eliminating provenance
+    drift between a caller-derived list and josh's real resolution.
+
+    The closure is structural — independent of swept config params — so
+    discover it once per :class:`JobConfig`, not per expanded job.
+
+    Args:
+        cli: JoshCLI instance used to invoke ``inspect-imports``.
+        config: Job configuration with an entry model (``source_path`` or
+            ``source_template_path``).
+
+    Returns:
+        Import closure as paths relative to the source root (absolute only for
+        the rare file that resolves outside the source root). Empty for a
+        single-file model.
+
+    Raises:
+        ValueError: If the config has no entry model.
+        RuntimeError: If inspect-imports fails (missing/cyclic/protocol import).
+    """
+    from joshpy.cli import InspectImportsConfig
+
+    _check_jinja2()
+    source_root = _source_root(config)
+    if source_root is None:
+        raise ValueError(
+            "discover_import_files requires an entry model "
+            "(source_path or source_template_path)"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="josh_discover_") as tmp:
+        entry = _render_entry(config, Path(tmp))
+        assert entry is not None  # guaranteed by the source_root check above
+        discovered = cli.inspect_imports(
+            InspectImportsConfig(entry=entry, import_base=source_root)
+        )
+
+    rels: list[Path] = []
+    for info in discovered:
+        try:
+            rels.append(info.resolved_path.relative_to(source_root))
+        except ValueError:
+            # Resolves outside the source root — keep absolute; expand() will
+            # surface it clearly if it can't be mirrored into the run dir.
+            rels.append(info.resolved_path)
+    return rels
+
+
 @dataclass
 class JobExpander:
     """Expands JobConfig with sweeps into concrete ExpandedJobs.
@@ -1115,12 +1228,23 @@ class JobExpander:
         self,
         config: JobConfig,
         output_dir: Path | None = None,
+        *,
+        cli: JoshCLI | None = None,
     ) -> JobSet:
         """Expand a JobConfig into a JobSet with one ExpandedJob per parameter combo.
 
         Args:
             config: The job configuration to expand.
             output_dir: Directory to write configs to (uses temp dir if None).
+            cli: Optional JoshCLI used to auto-discover the model's ``import``
+                closure via ``inspect-imports``. When provided *and*
+                ``config.import_files`` is empty, the closure is discovered
+                authoritatively from josh's own resolver (transitive, validated
+                exactly as at run time) and materialized/hashed. When
+                ``config.import_files`` is set, it always overrides discovery.
+                When ``cli`` is None (the default), expansion stays JVM-free —
+                the declared ``import_files`` (if any) are used verbatim, and a
+                single-file model keeps its legacy hash.
 
         Returns:
             JobSet containing all expanded jobs.
@@ -1142,28 +1266,37 @@ class JobExpander:
             temp_dir = Path(tempfile.mkdtemp(prefix="josh_sweep_"))
             output_dir = temp_dir
 
-        # Resolve source_template_path -> rendered .josh file
-        effective_source_path = config.source_path
-        if config.source_template_path:
-            template_dir = config.source_template_path.parent
-            template_name = config.source_template_path.name
-            env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
-            source_template = env.get_template(template_name)
-            rendered_josh = source_template.render(**config.template_vars)
+        # Resolve source_template_path -> rendered .josh file (or plain source_path)
+        effective_source_path = _render_entry(config, output_dir)
 
-            # Write rendered .josh to output directory
-            rendered_josh_path = output_dir / config.source_template_path.stem
-            # Strip .j2 extension if present (e.g., model.josh.j2 -> model.josh)
-            if not rendered_josh_path.suffix:
-                rendered_josh_path = rendered_josh_path.with_suffix(".josh")
-            rendered_josh_path.write_text(rendered_josh)
-            effective_source_path = rendered_josh_path
+        # Determine the import closure. Explicit import_files always wins;
+        # otherwise, when a CLI is supplied AND the entry actually imports
+        # something, auto-discover the closure authoritatively via josh's own
+        # resolver (transitive + validated). An import-less entry skips the JVM
+        # entirely and keeps its legacy single-file hash.
+        import_files = list(config.import_files)
+        if (
+            not import_files
+            and cli is not None
+            and effective_source_path is not None
+            and _entry_has_imports(effective_source_path)
+        ):
+            src_root = _source_root(config)
+            if src_root is not None:
+                from joshpy.cli import InspectImportsConfig
 
-        # Materialize the declared import closure (josh `import "..."`) alongside
-        # the entry so the jar resolves imports natively. Rendered once, shared
-        # across sweep combinations. Empty import_files => single-file behavior.
+                discovered = cli.inspect_imports(
+                    InspectImportsConfig(
+                        entry=effective_source_path, import_base=src_root
+                    )
+                )
+                import_files = [info.resolved_path for info in discovered]
+
+        # Materialize the import closure (josh `import "..."`) alongside the
+        # entry so the jar resolves imports natively. Rendered once, shared
+        # across sweep combinations. Empty closure => single-file behavior.
         import_manifest: list[tuple[str, Path]] = []
-        if config.import_files:
+        if import_files:
             source_root = (
                 config.source_template_path.parent
                 if config.source_template_path
@@ -1178,7 +1311,7 @@ class JobExpander:
                 effective_source_path = entry_dest
 
             seen_rel: set[str] = set()
-            for rel in config.import_files:
+            for rel in import_files:
                 src = rel if rel.is_absolute() else source_root / rel
                 mirror_rel = Path(rel)
                 if rel.is_absolute():

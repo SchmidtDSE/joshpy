@@ -667,6 +667,54 @@ class ExportPaths:
 
 
 @dataclass(frozen=True)
+class InspectImportsConfig:
+    """Arguments for 'java -jar joshsim.jar inspect-imports' command.
+
+    Lists the full transitive ``import`` closure reachable from an entry Josh
+    file using josh's own import resolver (the same recursive walk that backs
+    ``flatten`` and the run pipeline). This is the authoritative way to obtain
+    the set of files a model splices in — callers should not re-implement the
+    import parser in Python, since josh owns quoting, ``..``/escape rules,
+    protocol rejection, and duplicate-entity detection.
+
+    Attributes:
+        entry: Path to the entry Josh file to inspect (the rendered ``.josh``).
+        import_base: Directory used as the resolution root for the entry file's
+            relative imports. Defaults to the entry file's own directory. Set
+            this when the (rendered) entry lives outside its model source tree
+            — e.g. a temp/job dir — pointing it at the model source root.
+        json_output: Request JSON output (default: True). Mirrors
+            :class:`InspectExportsConfig`.
+    """
+
+    entry: Path
+    import_base: Path | None = None
+    json_output: bool = True
+
+
+@dataclass
+class ImportInfo:
+    """One entry in a model's import closure (from ``inspect-imports``).
+
+    Attributes:
+        path: The literal ``import "..."`` string as written in the source.
+        resolved_path: Absolute path the import resolves to (relative to the
+            command's ``--import-base``). **This is the field to materialize
+            and hash** — key off it rather than :attr:`path`/:attr:`source_file`,
+            whose cosmetic display may prefix the import-base when the entry
+            lives outside it.
+        source_file: The file containing the ``import`` statement (transitive
+            provenance — may be the entry or a nested overlay).
+        line: 1-based line number of the ``import`` statement in source_file.
+    """
+
+    path: str
+    resolved_path: Path
+    source_file: str
+    line: int
+
+
+@dataclass(frozen=True)
 class FlattenConfig:
     """Arguments for 'java -jar joshsim.jar flatten' command.
 
@@ -1434,6 +1482,62 @@ class JoshCLI:
                 "disturbance": parse_file_info(data["debugFiles"].get("disturbance")),
             },
         )
+
+    def inspect_imports(
+        self,
+        config: InspectImportsConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> list[ImportInfo]:
+        """List the transitive ``import`` closure of a Josh model.
+
+        Wraps ``joshsim inspect-imports``, which reuses josh's recursive import
+        resolver — so the returned closure is authoritative (josh's parser),
+        transitive (nested overlays included), and validated identically to the
+        run pipeline (missing/cyclic/protocol-rejected imports fail here too).
+
+        Args:
+            config: Inspect-imports configuration (entry, optional import_base).
+            timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
+
+        Returns:
+            List of :class:`ImportInfo`, one per file in the closure, in josh's
+            resolution order. Empty for a model with no imports.
+
+        Raises:
+            RuntimeError: If inspect-imports fails (missing import, import
+                cycle, duplicate entity, or a rejected protocol/absolute
+                import).
+        """
+        args = ["inspect-imports", str(config.entry.resolve())]
+        if config.import_base is not None:
+            args.extend(["--import-base", str(config.import_base.resolve())])
+
+        # --json is a toggle flag with default=true (as in inspect-exports).
+        # Passing --json toggles it OFF, so only add it when the caller wants
+        # the human-readable format instead.
+        if not config.json_output:
+            args.append("--json")
+
+        result = self._execute(args, timeout=timeout, jfr=jfr)
+
+        if not result.success:
+            raise RuntimeError(
+                f"inspect-imports failed (exit code {result.exit_code}): "
+                f"{result.stderr}"
+            )
+
+        data = json.loads(result.stdout)
+        return [
+            ImportInfo(
+                path=item["path"],
+                resolved_path=Path(item["resolvedPath"]),
+                source_file=item["sourceFile"],
+                line=item["line"],
+            )
+            for item in data.get("imports", [])
+        ]
 
     def flatten(
         self,

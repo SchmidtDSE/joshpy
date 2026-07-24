@@ -29,6 +29,7 @@ from joshpy.jobs import (
     to_run_remote_config,
     run_sweep,
     discover_jshd_files,
+    discover_import_files,
 )
 from joshpy.strategies import SweepExecutionError
 
@@ -2983,6 +2984,89 @@ class TestImportFiles(unittest.TestCase):
             )
             with self.assertRaises(FileNotFoundError):
                 JobExpander().expand(config, output_dir=Path(out))
+
+
+class TestAutoDiscoverImports(unittest.TestCase):
+    """Auto-discovery of the import closure via inspect-imports (DEV jar)."""
+
+    JAVA_PATH = Path(__file__).parent.parent / ".pixi" / "envs" / "default" / "bin" / "java"
+
+    def _cli(self):
+        from joshpy.cli import JoshCLI
+        from joshpy.jar import JarMode
+
+        if not self.JAVA_PATH.exists():
+            self.skipTest(f"Java not found at: {self.JAVA_PATH}")
+        return JoshCLI(josh_jar=JarMode.DEV, java_path=str(self.JAVA_PATH))
+
+    def _write_model(self, root: Path) -> Path:
+        """Plain entry -> overlays/fire.josh -> overlays/shared.josh (transitive)."""
+        (root / "overlays").mkdir(parents=True, exist_ok=True)
+        (root / "overlays" / "shared.josh").write_text("start unit shared\nend unit\n")
+        (root / "overlays" / "fire.josh").write_text(
+            'import "shared.josh"\nstart disturbance Fire\nend disturbance\n'
+        )
+        entry = root / "model.josh"
+        entry.write_text(
+            'import "overlays/fire.josh"\n\n'
+            "start simulation Main\n  grid.size = 10 count\nend simulation\n"
+        )
+        return entry
+
+    def test_discover_import_files_returns_relative_closure(self):
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as src:
+            entry = self._write_model(Path(src))
+            config = JobConfig(source_path=entry, simulation="Main")
+            rels = discover_import_files(cli, config)
+        self.assertEqual(
+            set(map(str, rels)),
+            {"overlays/fire.josh", "overlays/shared.josh"},
+        )
+
+    def test_discover_requires_entry(self):
+        cli = self._cli()
+        with self.assertRaises(ValueError):
+            discover_import_files(cli, JobConfig(template_string="cfg"))
+
+    def test_expand_auto_discovers_and_materializes(self):
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            entry = self._write_model(Path(src))
+            config = JobConfig(source_path=entry, simulation="Main")
+            job = JobExpander().expand(config, output_dir=Path(out), cli=cli).jobs[0]
+            self.assertEqual(
+                set(job.import_files.keys()),
+                {"overlays/fire.josh", "overlays/shared.josh"},
+            )
+            for dest in job.import_files.values():
+                self.assertTrue(dest.exists())
+
+    def test_explicit_import_files_override_discovery(self):
+        """Declared import_files win — discovery is skipped even when cli given."""
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as out:
+            entry = self._write_model(Path(src))
+            config = JobConfig(
+                source_path=entry,
+                simulation="Main",
+                import_files=[Path("overlays/fire.josh")],  # only the direct one
+            )
+            job = JobExpander().expand(config, output_dir=Path(out), cli=cli).jobs[0]
+            self.assertEqual(set(job.import_files.keys()), {"overlays/fire.josh"})
+
+    def test_single_file_hash_identical_with_and_without_cli(self):
+        """Auto-discovery on a no-import model preserves the legacy hash."""
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as src, \
+                tempfile.TemporaryDirectory() as o1, \
+                tempfile.TemporaryDirectory() as o2:
+            entry = Path(src) / "plain.josh"
+            entry.write_text("start simulation Main\n  grid.size = 10 count\nend simulation\n")
+            config = JobConfig(source_path=entry, simulation="Main")
+            h_nocli = JobExpander().expand(config, output_dir=Path(o1)).jobs[0].run_hash
+            h_cli = JobExpander().expand(config, output_dir=Path(o2), cli=cli).jobs[0].run_hash
+        self.assertEqual(h_nocli, h_cli)
 
 
 if __name__ == '__main__':

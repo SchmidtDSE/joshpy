@@ -58,13 +58,13 @@ joshpy/
 
 **Always available:**
 - `jar.py`: `JarMode`, `JarManager`, `get_jar`, `download_jars`, `get_jar_hash`, `get_jar_version`
-- `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `NetcdfPreprocessConfig`, `GeotiffPreprocessConfig`, `CsvPreprocessConfig`, `PreprocessConfig` (type alias), `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`, `FlattenConfig`
+- `cli.py`: `JoshCLI`, `CLIResult`, `RunConfig`, `RunRemoteConfig`, `NetcdfPreprocessConfig`, `GeotiffPreprocessConfig`, `CsvPreprocessConfig`, `PreprocessConfig` (type alias), `ValidateConfig`, `DiscoverConfigConfig`, `InspectJshdConfig`, `InspectExportsConfig`, `ExportFileInfo`, `ExportPaths`, `InspectImportsConfig`, `ImportInfo`, `FlattenConfig`
 - `config_parser.py`: `parse_jshc`, `parse_jshc_content`
 - `jshd.py`: `JshdMetadata`, `JshdData`, `load_jshd`, `plot_jshd`
 - `debug/`: `DebugMessage`, `DebugMessageStore`, `DebugSummary`, `parse_debug_line`, `load_debug_file`, `load_debug_from_script`, `format_message`
 
 **Requires joshpy[jobs]:**
-- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `discover_jshd_files`
+- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `discover_jshd_files`, `discover_import_files`
 - `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `SweepExecutionError`, `cv_objective`
 - `grid.py`: `GridSpec`
 
@@ -466,8 +466,50 @@ flat = cli.flatten(FlattenConfig(
 ```
 
 Note: multi-file models are normally driven from `JobConfig.import_files` (see
-JobConfig Options), which materializes the declared import closure alongside the
-entry so the jar resolves imports natively — no flatten step needed.
+JobConfig Options), which materializes the import closure alongside the entry so
+the jar resolves imports natively — no flatten step needed. That closure can be
+declared explicitly or auto-discovered (below).
+
+### Inspect Imports (`inspect-imports`)
+
+List the full transitive `import` closure of a model using josh's own resolver —
+the authoritative, transitive, validated way to obtain the file set a model
+splices in. Do NOT re-implement the import parser in Python (quoting, `..`/escape
+rules, protocol rejection, and duplicate-entity detection all live in josh):
+
+```python
+from joshpy.cli import JoshCLI, InspectImportsConfig
+
+cli = JoshCLI()
+imports = cli.inspect_imports(InspectImportsConfig(
+    entry=Path("model.josh"),        # the (rendered) entry .josh
+    import_base=Path("model_src"),   # resolution root; set when the entry lives
+))                                    # outside its source tree (e.g. a job dir)
+
+for info in imports:
+    info.path           # literal import "..." string
+    info.resolved_path  # absolute path to materialize + hash (key off THIS)
+    info.source_file    # which file did the importing (transitive provenance)
+    info.line
+```
+
+Key off `resolved_path` — `entry`/`source_file` display may cosmetically prefix
+the import-base when the entry lives outside it. A no-import model returns `[]`.
+
+For sweeps, the closure is discovered automatically: `JobExpander.expand(config,
+cli=cli)` calls `inspect-imports` on the rendered entry (unless
+`config.import_files` is set, which overrides) and materializes/hashes the result.
+`SweepManager` passes its CLI, so this is on by default there. Use the helper to
+populate `JobConfig.import_files` yourself once per config (discovery is
+structural — independent of swept params), keeping expansion JVM-free afterwards:
+
+```python
+from joshpy.jobs import discover_import_files
+config.import_files = discover_import_files(cli, config)  # relative to source root
+```
+
+An import-less entry skips the JVM entirely and keeps its legacy single-file hash;
+`JobExpander().expand(config)` without a `cli` never invokes josh.
 
 ### Remote Execution (Josh Cloud)
 
@@ -860,7 +902,7 @@ Note: `parameters` is a deprecated alias for `config_parameters`.
 | `source_path` | Path | Path to .josh source file |
 | `source_template_path` | Path | Path to .josh.j2 Jinja template. Rendered once with template_vars. Mutually exclusive with source_path |
 | `template_vars` | dict[str, Any] | Static template variables rendered into source_template_path and/or template_path. Unlike sweep parameters, these do not vary per job |
-| `import_files` | list[Path] | Auxiliary Josh files the model imports via `import "..."`, declared relative to the entry's source root. `.j2` entries are rendered with template_vars; others copied verbatim. Materialized into the run dir preserving relative layout so the jar resolves imports natively. Must be exactly the import closure (each file is hashed and bottled). Empty = single-file behavior |
+| `import_files` | list[Path] | Auxiliary Josh files the model imports via `import "..."`, declared relative to the entry's source root. `.j2` entries are rendered with template_vars; others copied verbatim. Materialized into the run dir preserving relative layout so the jar resolves imports natively. Must be exactly the import closure (each file is hashed and bottled). **Overrides** auto-discovery when set. Empty (default) = auto-discover via `inspect-imports` when `expand(cli=…)` is given (SweepManager does this); otherwise single-file behavior |
 | `simulation` | str | Simulation name (default: "Main") |
 | `replicates` | int | Replicates per job (default: 1) |
 | `sweep` | SweepConfig | Parameter sweep configuration |
