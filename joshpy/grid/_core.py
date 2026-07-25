@@ -611,12 +611,24 @@ class GridSpec:
         path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
         return path
 
-    def _render_preprocess_script(self) -> Path:
+    def _render_preprocess_script(self, step_count: int | None = None) -> Path:
         """Render a minimal .josh file for preprocessing.
+
+        Args:
+            step_count: Number of output slices the JAR must produce for
+                this call. Josh validates a declared ``--time-count``
+                against the stub simulation's step range, so a call
+                preprocessing a source with its own native length (e.g. a
+                shorter historical series than the grid's main-run
+                ``steps``) must size the stub from that length, not the
+                grid's nominal ``timestep_count``. Defaults to
+                ``timestep_count`` when omitted (no explicit axis for
+                this call).
 
         Returns:
             Path to a temporary .josh file. Caller must delete after use.
         """
+        steps_high = (step_count if step_count is not None else self.timestep_count) - 1
         content = (
             f"start simulation {_PREPROCESS_SIM_NAME}\n"
             f"  grid.size = {self.size_m} m\n"
@@ -625,7 +637,7 @@ class GridSpec:
             f"  grid.high = {self.high[0]} degrees latitude, "
             f"{self.high[1]} degrees longitude\n"
             f"  steps.low = 0 count\n"
-            f"  steps.high = {self.timestep_count - 1} count\n"
+            f"  steps.high = {steps_high} count\n"
             f"end simulation\n"
             f"\n"
             f"start patch Default\n"
@@ -874,13 +886,26 @@ class GridSpec:
             time_increment = axis.increment
             time_interval = axis.interval
 
+        # Size the throwaway stub simulation from this call's own declared
+        # slice count, not the grid's nominal timestep_count -- a source
+        # with a different native length (e.g. a shorter historical series
+        # against a grid whose steps match the longer scenario) must
+        # produce that many output slices, or Josh's --time-count
+        # invariant check fails.
+        if time_count is not None:
+            step_count: int | None = time_count
+        elif time_instant is not None:
+            step_count = 1
+        else:
+            step_count = None
+
         output_path = self._compute_output_path(
             josh_name,
             subdirectory,
             variant,
             compress=compress,
         )
-        script_path = self._render_preprocess_script()
+        script_path = self._render_preprocess_script(step_count=step_count)
         try:
             config = NetcdfPreprocessConfig(
                 script=script_path,

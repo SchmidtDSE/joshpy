@@ -1954,6 +1954,14 @@ override the grid default for a resource with a different axis.
 Internally renders a temp `.josh` file with grid geometry, calls `cli.preprocess()`,
 records the result in `grid.files` on success, and cleans up the temp file.
 
+The temp `.josh` file's own step range (`steps.high`) is sized from *that call's*
+resolved `time_count` (or `1` for a bare `time_instant`), not the grid's
+`timestep_count` — Josh validates a declared `--time-count` against this range, so a
+single `GridSpec` can preprocess multiple NetCDF sources of different native lengths
+(e.g. a shorter historical/spinup series alongside a longer future/scenario series)
+without their `time_count` needing to match the grid's own `steps`. Only a call with
+no temporal options at all falls back to the grid's `timestep_count`.
+
 ---
 
 ## Run Labels

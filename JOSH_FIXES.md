@@ -8,10 +8,12 @@ This doc tracks josh-side issues found while integrating joshpy against a Josh J
 |---|-------|--------|
 | 1 | `preprocess` rejects `--time-*` flags | ✅ Fixed (confirmed 2026-07-25, JAR sha256 `2d93e898...`) |
 | 2 | NetCDF (raster) preprocessing fails with "Error interpolating value for patch" | ✅ Fixed (confirmed 2026-07-25, JAR sha256 `29c89386...`) |
+| 3 | `preprocess_netcdf()` sizes its stub script from the grid's `steps`, not the per-call `time_count` ([josh#494](https://github.com/SchmidtDSE/josh/pull/494) invariant) | ✅ Fixed joshpy-side, 2026-07-25 |
 
-All four real-JAR integration tests in `tests/test_jshdz_integration.py` now pass:
+All five real-JAR integration tests in `tests/test_jshdz_integration.py` now pass:
 `test_csv_compress_roundtrip`, `test_netcdf_temporal_compress_roundtrip`,
-`test_netcdf_temporal_default_uncompressed_e2e`, `test_compress_default_false_unchanged_e2e`.
+`test_netcdf_temporal_default_uncompressed_e2e`, `test_compress_default_false_unchanged_e2e`,
+`test_shorter_and_longer_sources_both_preprocess_against_shared_grid`.
 
 The original temporal-read fix was only ever verified against `.jshdz` (compressed) output.
 `test_netcdf_temporal_default_uncompressed_e2e` closes that gap: same declared count/year axis,
@@ -97,6 +99,42 @@ default to `0`) instead of a fixed row count.
   `jar/joshsim-fat-prod.jar` (sha256 `8ca776f2b53aa4d1f15cf03f42af7130ef6f62e10a0d3217df92130af717f4c1`)
   was updated the same day but was not independently tested against this repro.
 - Java: bundled in `.pixi/envs/dev`.
-- joshpy tests: `pixi run -e dev test-integration` (4 passed, 17 skipped — MinIO tests require a
+- joshpy tests: `pixi run -e dev test-integration` (5 passed, 17 skipped — MinIO tests require a
   running MinIO and are unaffected by this work) and `pytest tests/ -m "not integration"`
-  (1125 passed).
+  (1131 passed).
+
+---
+
+## Issue 3: `preprocess_netcdf()`'s stub script ignored per-call `time_count` ✅ FIXED (joshpy-side)
+
+Reported externally (SchmidtDSE/josh-models, `dev_fine` grid): [josh#494](https://github.com/SchmidtDSE/josh/pull/494)
+added a strict check that a declared `--time-count` must equal the output-slice count derived
+from `preprocess`'s throwaway stub simulation (`steps.high - steps.low + 1`). joshpy's
+`GridSpec._render_preprocess_script()` always sized that stub from the grid's own
+`timestep_count` (`grid.yaml`'s `steps`, or a grid-level `TimeAxis.count`), regardless of the
+`time_count` actually declared for a given `preprocess_netcdf()` call. Any grid reused to
+preprocess two sources of different native lengths (e.g. a 65-year historical series and an
+86-year SSP scenario against the same `dev_fine` grid) failed preprocessing for whichever source
+didn't match the grid's declared `steps` — not a caller misconfiguration; there was no way to
+tell `preprocess_netcdf()` "this file is N timesteps long, independent of the grid's nominal
+count."
+
+This was not a JAR bug — [josh#494](https://github.com/SchmidtDSE/josh/pull/494)'s invariant is
+correct; joshpy's stub sizing just never accounted for it.
+
+### Fix
+
+`_render_preprocess_script()` now accepts an optional `step_count`, and `preprocess_netcdf()`
+resolves it per call: the axis's `time_count` when a temporal axis is declared (from `time=`, a
+per-call `time_count=`, or the grid's own `TimeAxis`), `1` for a bare `time_instant` (single-slice
+form), or `None` (falling back to the grid's `timestep_count`, preserving prior behavior) when no
+temporal options are given at all. This mirrors how the real Josh model decouples spinup length
+from scenario length rather than relying on one project-wide constant.
+
+Confirmed by reverting the fix locally and re-running
+`TestPreprocessMismatchedNativeLengths::test_shorter_and_longer_sources_both_preprocess_against_shared_grid`:
+it reproduces the reported `--time-count must equal the number of output slices` error exactly,
+and passes once the fix is restored. Also covered by five `tests/test_grid.py` unit tests
+asserting the rendered stub's `steps.high` in each resolution path (per-call `time_count`,
+grid-level `TimeAxis`, per-resource `time=` override, bare `time_instant`, and the no-axis
+fallback).
