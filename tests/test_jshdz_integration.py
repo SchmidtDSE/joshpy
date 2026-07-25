@@ -16,6 +16,8 @@ Run with::
 
 from __future__ import annotations
 
+import csv
+import io
 import lzma
 from textwrap import dedent
 
@@ -182,8 +184,18 @@ class TestJshdzCompressIntegration:
               exportFiles.patch = "file://{output_csv}"
             end simulation
 
+            start unit year
+              alias years
+            end unit
+
             start patch Default
-              temperature.step = external temperature at time meta.time
+              # Declared axis unit is "year" (--time-unit year), so the read
+              # clause keyword must be "year", not "time" -- "at time" is only
+              # for ISO axes. Without a simulation-level calendar declaration,
+              # meta.year yields the raw 0-based step, so the real axis
+              # coordinate (2015, 2016, ...) has to be computed explicitly.
+              year.step = meta.year + 2015 year
+              temperature.step = external temperature at year year
               export.meanTemperature.step = mean(temperature)
             end patch
         """)
@@ -198,8 +210,25 @@ class TestJshdzCompressIntegration:
             )
         )
         assert run_result.success, f"run failed: {run_result.stderr}"
-        rows = output_csv.read_text().strip().splitlines()
-        assert len(rows) == 3, f"expected header plus two steps, got {rows!r}"
+
+        # exportFiles.patch writes one row per patch per step (not a
+        # grid-level aggregate), so check per-step value sets rather than
+        # a fixed row count.
+        rows = list(csv.DictReader(io.StringIO(output_csv.read_text())))
+        assert rows, f"expected at least one exported row, got {output_csv.read_text()!r}"
+
+        by_step = {"0": {10, 11, 12, 13}, "1": {20, 21, 22, 23}}
+        seen_steps = {row["step"] for row in rows}
+        assert seen_steps == set(by_step), f"expected steps 0 and 1, got {seen_steps}"
+        for step, expected_values in by_step.items():
+            # Patches outside the source's coverage default to 0; only
+            # covered cells are checked against the source data.
+            observed = {
+                float(row["meanTemperature"])
+                for row in rows
+                if row["step"] == step and float(row["meanTemperature"]) != 0
+            }
+            assert observed == expected_values, f"step {step}: expected {expected_values}, got {observed}"
 
     def test_compress_default_false_unchanged_e2e(self, josh_cli, tmp_path):
         """Regression sanity: compress=False (default) still produces .jshd."""

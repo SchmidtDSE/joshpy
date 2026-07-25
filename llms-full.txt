@@ -297,6 +297,18 @@ result = cli.preprocess(NetcdfPreprocessConfig(
     crs="EPSG:4326",
     parallel=True,             # Enable parallel processing (~Nx speedup)
 ))
+
+# Flat, timeless NetCDF (e.g. a single 2D raster) — no time dimension
+result = cli.preprocess(NetcdfPreprocessConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    data_file=Path("cover_2d.nc"),
+    variable="cover",
+    units="percent",
+    output=Path("cover.jshd"),
+    time_coord=None,           # Emits --no-time-dim; every grid step reads
+                               # the source's single available slice.
+))
 ```
 
 #### GeoTIFF/COG Files
@@ -358,7 +370,7 @@ slow for large files. For large datasets, consider converting to GeoTIFF first.
 | `output` | Path | Output .jshd file path (required) |
 | `x_coord` | str | X/longitude dimension name (default: "lon") |
 | `y_coord` | str | Y/latitude dimension name (default: "lat") |
-| `time_coord` | str | Time dimension name (default: "time") |
+| `time_coord` | str or None | Time dimension name (default: "time"); `None` emits `--no-time-dim` for a flat, timeless source |
 | `timestep` | int | Extract specific time slice (optional) |
 | `time_type` | str | Declared temporal axis type: `"count"` or `"ISO"` (optional) |
 | `time_start` | str, int, or float | First count coordinate or ISO date (optional) |

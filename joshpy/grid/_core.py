@@ -785,7 +785,7 @@ class GridSpec:
         units: str,
         x_coord: str = "lon",
         y_coord: str = "lat",
-        time_coord: str = "time",
+        time_coord: str | None = "time",
         timestep: int | None = None,
         time_type: str | None = None,
         time_start: str | int | float | None = None,
@@ -812,7 +812,8 @@ class GridSpec:
             units: Data units.
             x_coord: Name of the X/longitude dimension.
             y_coord: Name of the Y/latitude dimension.
-            time_coord: Name of the time dimension.
+            time_coord: Name of the time dimension. Set to ``None`` for a
+                source with no time dimension (emits ``--no-time-dim``).
             timestep: Optional specific time slice to extract.
             time_type: Temporal axis type: ``"count"`` or ``"ISO"``.
             time_start: First count coordinate or ISO date.
