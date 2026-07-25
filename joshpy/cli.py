@@ -208,7 +208,9 @@ class NetcdfPreprocessConfig:
     """Preprocess NetCDF files into Josh's .jshd format.
 
     For files with time dimensions. Use x_coord, y_coord, and time_coord
-    to specify dimension names if they differ from defaults.
+    to specify dimension names if they differ from defaults. For a flat,
+    timeless NetCDF (e.g. a 2D raster), set ``time_coord=None`` to emit
+    ``--no-time-dim`` instead of looking for a time dimension.
 
     Attributes:
         script: Path to Josh simulation file (.josh).
@@ -219,7 +221,8 @@ class NetcdfPreprocessConfig:
         output: Path for output .jshd file.
         x_coord: Name of X/longitude dimension (default: "lon").
         y_coord: Name of Y/latitude dimension (default: "lat").
-        time_coord: Name of time dimension (default: "time").
+        time_coord: Name of time dimension (default: "time"). Set to
+            ``None`` for a source with no time dimension at all.
         timestep: Extract specific time slice (optional).
         time_type: Temporal axis type: ``"count"`` or ``"ISO"``.
         time_start: First count coordinate or ISO date.
@@ -241,7 +244,7 @@ class NetcdfPreprocessConfig:
     output: Path
     x_coord: str = "lon"
     y_coord: str = "lat"
-    time_coord: str = "time"
+    time_coord: str | None = "time"
     timestep: int | None = None
     amend: bool = False
     crs: str | None = None
@@ -1348,6 +1351,8 @@ class JoshCLI:
                 args.extend(["--y-coord", config.y_coord])
             if config.time_coord:
                 args.extend(["--time-dim", config.time_coord])
+            else:
+                args.append("--no-time-dim")
             if config.timestep is not None:
                 args.extend(["--timestep", str(config.timestep)])
             if config.time_type is not None:

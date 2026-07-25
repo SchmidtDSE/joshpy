@@ -242,7 +242,7 @@ start simulation {{ simulation_name }}
   grid.low = {{ low_lat }} degrees latitude, {{ low_lon }} degrees longitude
   grid.high = {{ high_lat }} degrees latitude, {{ high_lon }} degrees longitude
   steps.low = 0 count
-  steps.high = {{ steps }} count
+  steps.high = {{ steps_high }} count
 
   exportFiles.patch = "file:///outputs/{{ export_prefix }}_{replicate}_{run_hash}.csv"
   {% if debug %}

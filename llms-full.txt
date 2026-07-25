@@ -297,6 +297,18 @@ result = cli.preprocess(NetcdfPreprocessConfig(
     crs="EPSG:4326",
     parallel=True,             # Enable parallel processing (~Nx speedup)
 ))
+
+# Flat, timeless NetCDF (e.g. a single 2D raster) — no time dimension
+result = cli.preprocess(NetcdfPreprocessConfig(
+    script=Path("simulation.josh"),
+    simulation="Main",
+    data_file=Path("cover_2d.nc"),
+    variable="cover",
+    units="percent",
+    output=Path("cover.jshd"),
+    time_coord=None,           # Emits --no-time-dim; every grid step reads
+                               # the source's single available slice.
+))
 ```
 
 #### GeoTIFF/COG Files
@@ -358,7 +370,7 @@ slow for large files. For large datasets, consider converting to GeoTIFF first.
 | `output` | Path | Output .jshd file path (required) |
 | `x_coord` | str | X/longitude dimension name (default: "lon") |
 | `y_coord` | str | Y/latitude dimension name (default: "lat") |
-| `time_coord` | str | Time dimension name (default: "time") |
+| `time_coord` | str or None | Time dimension name (default: "time"); `None` emits `--no-time-dim` for a flat, timeless source |
 | `timestep` | int | Extract specific time slice (optional) |
 | `time_type` | str | Declared temporal axis type: `"count"` or `"ISO"` (optional) |
 | `time_start` | str, int, or float | First count coordinate or ISO date (optional) |
@@ -1856,7 +1868,13 @@ grid:
   size_m: 30
   low: [33.902, -116.0465]    # [lat, lon]
   high: [33.908, -116.0395]
-  steps: 86
+
+time:
+  type: count
+  start: 2015
+  unit: year
+  count: 86
+  increment: 1
 
 files:
   cover:
@@ -1875,7 +1893,7 @@ Paths are relative to the YAML file's directory. Keys are josh external names.
 ### Usage
 
 ```python
-from joshpy.grid import GridSpec
+from joshpy.grid import GridSpec, TimeAxis
 
 # Create from scratch (before preprocessing)
 grid = GridSpec(
@@ -1884,16 +1902,20 @@ grid = GridSpec(
     size_m=30,
     low=(33.902, -116.0465),
     high=(33.908, -116.0395),
-    steps=86,
+    time=TimeAxis(
+        type="count",
+        start=2015,
+        unit="year",
+        count=86,
+        increment=1,
+    ),
 )
 
 # Preprocess data — grid handles boilerplate .josh file internally
 grid.preprocess_geotiff(cli, josh_name="cover", data_file=tif_path,
                         band=0, units="percent", timestep=0)
 grid.preprocess_netcdf(cli, josh_name="futureTempJan", data_file=nc_path,
-                       variable="tas", units="K", subdirectory="monthly",
-                       time_type="count", time_start=2015,
-                       time_unit="year", time_count=86)
+                        variable="tas", units="K", subdirectory="monthly")
 grid.save()  # writes grid.yaml
 
 # Load later for model runs
@@ -1923,9 +1945,12 @@ The simulation name goes in `template_vars` at `JobConfig` construction time.
 | `preprocess_csv()` | CSV | `variable`, `timestep` |
 
 All accept: `josh_name`, `data_file`, `units`, `crs`, `parallel`, `amend`, `subdirectory`.
-`preprocess_netcdf()` also accepts `time_type`, `time_start`, `time_unit`,
-`time_count`, `time_increment`, `time_interval`, and `time_instant` to declare
-the output temporal axis.
+For a temporal GridSpec, `TimeAxis` is the source of truth for the shared
+temporal contract. Its `count` controls the preprocessing range
+(`steps.high = count - 1`) and supplies `preprocess_netcdf()` with
+`time_type`, `time_start`, `time_unit`, `time_count`, `time_increment`, or
+`time_interval`. Pass individual options or a per-resource `TimeAxis` only to
+override the grid default for a resource with a different axis.
 Internally renders a temp `.josh` file with grid geometry, calls `cli.preprocess()`,
 records the result in `grid.files` on success, and cleans up the temp file.
 

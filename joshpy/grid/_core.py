@@ -60,14 +60,51 @@ except ImportError:
 
 def _check_yaml() -> None:
     if not HAS_YAML:
-        raise ImportError(
-            "pyyaml is required for GridSpec. Install with: pip install joshpy[jobs]"
-        )
+        raise ImportError("pyyaml is required for GridSpec. Install with: pip install joshpy[jobs]")
 
 
 # Josh identifiers cannot contain underscores or start with special characters,
 # so we use a fixed CamelCase name for the temporary preprocess script.
 _PREPROCESS_SIM_NAME = "Preprocess"
+
+
+@dataclass(frozen=True)
+class TimeAxis:
+    """Declared temporal axis shared by a grid's time-varying resources.
+
+    A ``count`` axis has numeric coordinates, while an ``ISO`` axis has
+    ISO-8601 coordinates. The axis count is the authoritative number of
+    preprocessing slices and simulation timesteps for a temporal GridSpec.
+    """
+
+    type: str
+    start: str | int | float
+    count: int
+    unit: str | None = None
+    increment: int | float | None = None
+    interval: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the axis fields accepted by Josh preprocessing."""
+        if self.type not in {"count", "ISO"}:
+            raise ValueError(f"time.type must be 'count' or 'ISO', got {self.type!r}")
+        if self.count < 1:
+            raise ValueError(f"time.count must be at least 1, got {self.count}")
+        if self.type == "count":
+            if self.unit is None or self.increment is None:
+                raise ValueError("count time axes require unit and increment")
+            if self.interval is not None:
+                raise ValueError("count time axes cannot define interval")
+        else:
+            if self.interval is None:
+                raise ValueError("ISO time axes require interval")
+            if self.unit is not None or self.increment is not None:
+                raise ValueError("ISO time axes cannot define unit or increment")
+
+    @property
+    def steps_high(self) -> int:
+        """Inclusive upper bound for a simulation with ``count`` timesteps."""
+        return self.count - 1
 
 
 @dataclass
@@ -80,7 +117,9 @@ class GridSpec:
         size_m: Grid cell size in meters.
         low: (latitude, longitude) of the grid's low corner.
         high: (latitude, longitude) of the grid's high corner.
-        steps: Number of simulation timesteps.
+        steps: Legacy number of simulation timesteps. Use ``time`` for grids
+            with time-varying resources.
+        time: Declared temporal axis for shared time-varying resources.
         files: Inventory of preprocessed files.
             Keys are josh external names, values are dicts with
             ``"path"`` (relative to output_dir) and ``"units"``.
@@ -91,9 +130,27 @@ class GridSpec:
     size_m: int | float
     low: tuple[float, float]  # (lat, lon)
     high: tuple[float, float]  # (lat, lon)
-    steps: int
+    steps: int | None = None
     files: dict[str, dict[str, str]] = field(default_factory=dict)
     variants: dict[str, dict[str, Any]] = field(default_factory=dict)
+    time: TimeAxis | None = None
+
+    def __post_init__(self) -> None:
+        """Validate the inclusive timestep range can represent the count."""
+        if self.steps is None and self.time is None:
+            raise ValueError("GridSpec requires either steps or time")
+        if self.steps is not None and self.steps < 1:
+            raise ValueError(f"steps must be at least 1, got {self.steps}")
+        if self.time is not None and self.steps is not None and self.steps != self.time.count:
+            raise ValueError(f"steps ({self.steps}) must match time.count ({self.time.count})")
+
+    @property
+    def timestep_count(self) -> int:
+        """Number of simulation timesteps represented by this grid."""
+        if self.time is not None:
+            return self.time.count
+        assert self.steps is not None
+        return self.steps
 
     @property
     def file_mappings(self) -> dict[str, Path]:
@@ -122,14 +179,30 @@ class GridSpec:
         Returns:
             Dict with grid geometry values suitable for Jinja2 templates.
         """
-        return {
+        result: dict[str, Any] = {
             "size_m": self.size_m,
             "low_lat": self.low[0],
             "low_lon": self.low[1],
             "high_lat": self.high[0],
             "high_lon": self.high[1],
-            "steps": self.steps,
+            "steps": self.timestep_count,
+            "steps_high": self.timestep_count - 1,
         }
+        if self.time is not None:
+            result.update(
+                {
+                    "time_type": self.time.type,
+                    "time_start": self.time.start,
+                    "time_count": self.time.count,
+                }
+            )
+            if self.time.unit is not None:
+                result["time_unit"] = self.time.unit
+            if self.time.increment is not None:
+                result["time_increment"] = self.time.increment
+            if self.time.interval is not None:
+                result["time_interval"] = self.time.interval
+        return result
 
     def file_mappings_for(self, **variant_values: str) -> dict[str, Path]:
         """Resolve file mappings with specific variant values.
@@ -151,15 +224,11 @@ class GridSpec:
         for axis, value in variant_values.items():
             if axis not in self.variants:
                 raise ValueError(
-                    f"Unknown variant axis '{axis}'. "
-                    f"Available: {list(self.variants.keys())}"
+                    f"Unknown variant axis '{axis}'. Available: {list(self.variants.keys())}"
                 )
             allowed = self.variants[axis]["values"]
             if value not in allowed:
-                raise ValueError(
-                    f"Invalid value '{value}' for axis '{axis}'. "
-                    f"Allowed: {allowed}"
-                )
+                raise ValueError(f"Invalid value '{value}' for axis '{axis}'. Allowed: {allowed}")
 
         merged = {k: v["default"] for k, v in self.variants.items()}
         merged.update(variant_values)
@@ -213,8 +282,7 @@ class GridSpec:
             # Single-axis mode
             if axis not in self.variants:
                 raise ValueError(
-                    f"Unknown variant axis '{axis}'. "
-                    f"Available: {list(self.variants.keys())}"
+                    f"Unknown variant axis '{axis}'. Available: {list(self.variants.keys())}"
                 )
             sweep_values = values if values is not None else self.variants[axis]["values"]
             if values is not None:
@@ -222,8 +290,7 @@ class GridSpec:
                 for v in values:
                     if v not in allowed:
                         raise ValueError(
-                            f"Invalid value '{v}' for axis '{axis}'. "
-                            f"Allowed: {allowed}"
+                            f"Invalid value '{v}' for axis '{axis}'. Allowed: {allowed}"
                         )
 
             # Find template_path files referencing this axis
@@ -241,9 +308,7 @@ class GridSpec:
                     resolved_vars = {**defaults, axis: val}
                     resolved = info["template_path"].format(**resolved_vars)
                     paths.append((self.output_dir / resolved).resolve())
-                parameters.append(
-                    FileSweepParameter(name=josh_name, paths=paths)
-                )
+                parameters.append(FileSweepParameter(name=josh_name, paths=paths))
 
             return CompoundSweepParameter(
                 name=axis,
@@ -254,14 +319,11 @@ class GridSpec:
             # Multi-axis mode
             assert axes is not None
             if values is not None:
-                raise ValueError(
-                    "'values' parameter is only supported for single-axis sweeps."
-                )
+                raise ValueError("'values' parameter is only supported for single-axis sweeps.")
             for ax in axes:
                 if ax not in self.variants:
                     raise ValueError(
-                        f"Unknown variant axis '{ax}'. "
-                        f"Available: {list(self.variants.keys())}"
+                        f"Unknown variant axis '{ax}'. Available: {list(self.variants.keys())}"
                     )
 
             # Build cross-product of axis values
@@ -285,9 +347,7 @@ class GridSpec:
                         resolved_vars[ax] = val
                     resolved = info["template_path"].format(**resolved_vars)
                     paths.append((self.output_dir / resolved).resolve())
-                parameters.append(
-                    FileSweepParameter(name=josh_name, paths=paths)
-                )
+                parameters.append(FileSweepParameter(name=josh_name, paths=paths))
 
             labels = ["_".join(combo) for combo in combos]
             return CompoundSweepParameter(
@@ -355,14 +415,14 @@ class GridSpec:
                     }
                 )
 
-        return {
+        result: dict[str, Any] = {
             "name": self.name,
             "output_dir": str(self.output_dir),
             "geometry": {
                 "size_m": self.size_m,
                 "low": list(self.low),
                 "high": list(self.high),
-                "steps": self.steps,
+                "steps": self.timestep_count,
             },
             "variants": {
                 ax: {"values": v["values"], "default": v["default"]}
@@ -370,6 +430,16 @@ class GridSpec:
             },
             "files": files_out,
         }
+        if self.time is not None:
+            result["time"] = {
+                "type": self.time.type,
+                "start": self.time.start,
+                "count": self.time.count,
+                "unit": self.time.unit,
+                "increment": self.time.increment,
+                "interval": self.time.interval,
+            }
+        return result
 
     def describe(self) -> str:
         """Human-readable overview of the grid and its external-data inventory.
@@ -391,9 +461,7 @@ class GridSpec:
         if s["variants"]:
             lines.append("Variant axes:")
             for ax, v in s["variants"].items():
-                vals = ", ".join(
-                    f"{x}*" if x == v["default"] else str(x) for x in v["values"]
-                )
+                vals = ", ".join(f"{x}*" if x == v["default"] else str(x) for x in v["values"])
                 lines.append(f"  {ax}: [{vals}]")
             lines.append("  (* = default)")
         else:
@@ -445,6 +513,8 @@ class GridSpec:
         grid = data.get("grid", {})
         low = tuple(grid.get("low", [0, 0]))
         high = tuple(grid.get("high", [0, 0]))
+        time_data = data.get("time")
+        time = TimeAxis(**time_data) if time_data is not None else None
 
         files = {}
         for josh_name, info in data.get("files", {}).items():
@@ -472,9 +542,10 @@ class GridSpec:
             size_m=grid.get("size_m", 0),
             low=low,
             high=high,
-            steps=grid.get("steps", 0),
+            steps=grid.get("steps"),
             files=files,
             variants=variants,
+            time=time,
         )
 
     def save(self, path: str | Path | None = None) -> Path:
@@ -493,15 +564,30 @@ class GridSpec:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
+        grid_data: dict[str, Any] = {
+            "size_m": self.size_m,
+            "low": list(self.low),
+            "high": list(self.high),
+        }
+        if self.time is None:
+            grid_data["steps"] = self.timestep_count
+
         data: dict[str, Any] = {
             "name": self.name,
-            "grid": {
-                "size_m": self.size_m,
-                "low": list(self.low),
-                "high": list(self.high),
-                "steps": self.steps,
-            },
+            "grid": grid_data,
         }
+        if self.time is not None:
+            data["time"] = {
+                "type": self.time.type,
+                "start": self.time.start,
+                "count": self.time.count,
+            }
+            if self.time.unit is not None:
+                data["time"]["unit"] = self.time.unit
+            if self.time.increment is not None:
+                data["time"]["increment"] = self.time.increment
+            if self.time.interval is not None:
+                data["time"]["interval"] = self.time.interval
 
         if self.variants:
             data["variants"] = {}
@@ -539,7 +625,7 @@ class GridSpec:
             f"  grid.high = {self.high[0]} degrees latitude, "
             f"{self.high[1]} degrees longitude\n"
             f"  steps.low = 0 count\n"
-            f"  steps.high = {self.steps} count\n"
+            f"  steps.high = {self.timestep_count - 1} count\n"
             f"end simulation\n"
             f"\n"
             f"start patch Default\n"
@@ -605,9 +691,7 @@ class GridSpec:
         except ValueError:
             return str(absolute_path)
 
-    def _register_file(
-        self, josh_name: str, output_path: Path, units: str
-    ) -> None:
+    def _register_file(self, josh_name: str, output_path: Path, units: str) -> None:
         """Register a successfully preprocessed file in the inventory."""
         self.files[josh_name] = {
             "path": self._relative_path(output_path),
@@ -663,7 +747,10 @@ class GridSpec:
         from joshpy.cli import GeotiffPreprocessConfig
 
         output_path = self._compute_output_path(
-            josh_name, subdirectory, variant, compress=compress,
+            josh_name,
+            subdirectory,
+            variant,
+            compress=compress,
         )
         script_path = self._render_preprocess_script()
         try:
@@ -698,7 +785,7 @@ class GridSpec:
         units: str,
         x_coord: str = "lon",
         y_coord: str = "lat",
-        time_coord: str = "time",
+        time_coord: str | None = "time",
         timestep: int | None = None,
         time_type: str | None = None,
         time_start: str | int | float | None = None,
@@ -707,6 +794,7 @@ class GridSpec:
         time_increment: int | float | None = None,
         time_interval: str | None = None,
         time_instant: str | int | float | None = None,
+        time: TimeAxis | None = None,
         crs: str | None = None,
         parallel: bool = False,
         amend: bool = False,
@@ -724,7 +812,8 @@ class GridSpec:
             units: Data units.
             x_coord: Name of the X/longitude dimension.
             y_coord: Name of the Y/latitude dimension.
-            time_coord: Name of the time dimension.
+            time_coord: Name of the time dimension. Set to ``None`` for a
+                source with no time dimension (emits ``--no-time-dim``).
             timestep: Optional specific time slice to extract.
             time_type: Temporal axis type: ``"count"`` or ``"ISO"``.
             time_start: First count coordinate or ISO date.
@@ -733,6 +822,8 @@ class GridSpec:
             time_increment: Increment between count coordinates.
             time_interval: ISO-8601 period between ISO dates.
             time_instant: Single count coordinate or ISO date for one output slice.
+            time: Per-resource temporal-axis override. When omitted, this
+                GridSpec's ``time`` axis supplies omitted temporal options.
             crs: Coordinate reference system.
             parallel: Enable parallel processing.
             amend: Append to existing .jshd file.
@@ -751,8 +842,43 @@ class GridSpec:
         """
         from joshpy.cli import NetcdfPreprocessConfig
 
+        explicit_time_options = (
+            time_type,
+            time_start,
+            time_unit,
+            time_count,
+            time_increment,
+            time_interval,
+        )
+        if time is not None:
+            if any(value is not None for value in explicit_time_options):
+                raise ValueError("Specify either time or individual time_* options, not both")
+            axis = time
+        elif self.time is None:
+            axis = None
+        else:
+            axis = TimeAxis(
+                type=time_type if time_type is not None else self.time.type,
+                start=time_start if time_start is not None else self.time.start,
+                count=time_count if time_count is not None else self.time.count,
+                unit=time_unit if time_unit is not None else self.time.unit,
+                increment=(time_increment if time_increment is not None else self.time.increment),
+                interval=(time_interval if time_interval is not None else self.time.interval),
+            )
+
+        if axis is not None:
+            time_type = axis.type
+            time_start = axis.start
+            time_unit = axis.unit
+            time_count = axis.count
+            time_increment = axis.increment
+            time_interval = axis.interval
+
         output_path = self._compute_output_path(
-            josh_name, subdirectory, variant, compress=compress,
+            josh_name,
+            subdirectory,
+            variant,
+            compress=compress,
         )
         script_path = self._render_preprocess_script()
         try:
@@ -831,7 +957,10 @@ class GridSpec:
         from joshpy.cli import CsvPreprocessConfig
 
         output_path = self._compute_output_path(
-            josh_name, subdirectory, variant, compress=compress,
+            josh_name,
+            subdirectory,
+            variant,
+            compress=compress,
         )
         script_path = self._render_preprocess_script()
         try:

@@ -670,6 +670,29 @@ class TestJoshCLI(unittest.TestCase):
             self.assertNotIn(flag, cmd)
 
     @patch("subprocess.run")
+    def test_preprocess_netcdf_no_time_dim(self, mock_run):
+        """preprocess() should emit --no-time-dim for a flat, timeless source."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = NetcdfPreprocessConfig(
+            script=Path("/path/to/simulation.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/temperature.nc"),
+            variable="temp",
+            units="K",
+            output=Path("/path/to/temperature.jshd"),
+            time_coord=None,
+        )
+
+        result = cli.preprocess(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--no-time-dim", cmd)
+        self.assertNotIn("--time-dim", cmd)
+
+    @patch("subprocess.run")
     def test_preprocess_netcdf_with_timestep(self, mock_run):
         """preprocess() should include --timestep for NetCDF when specified."""
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")

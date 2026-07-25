@@ -3,7 +3,13 @@ grid:
   size_m: 1000
   low: [34.0, -116.4]
   high: [33.7, -115.4]
-  steps: 10
+
+time:
+  type: count
+  start: 2015
+  unit: year
+  count: 10
+  increment: 1
 
 variants:
   pattern:

@@ -59,7 +59,13 @@ grid:
   size_m: 30
   low: [33.902, -116.0465]
   high: [33.908, -116.0395]
-  steps: 86
+
+time:
+  type: count
+  start: 2015
+  unit: year
+  count: 86
+  increment: 1
 
 variants:
   scenario:
@@ -85,9 +91,12 @@ grid.variant_sweep("scenario")            # → CompoundSweepParameter for sweep
 grid.template_vars                        # {"size_m": 30, "low_lat": 33.902, ...}
 ```
 
-GridSpec also handles preprocessing: `grid.preprocess_geotiff(cli, ...)` renders
-a temporary `.josh` file with the grid geometry, calls `cli.preprocess()`, and
-records the result in the manifest. See the [Preprocessing](tutorials/preprocessing.qmd)
+The optional `time` block is the shared temporal contract for time-varying
+resources. Its `count` determines the inclusive preprocessing range and is
+forwarded to `preprocess_netcdf()` as Josh temporal metadata. GridSpec also
+handles preprocessing: `grid.preprocess_geotiff(cli, ...)` renders a temporary
+`.josh` file with the grid geometry, calls `cli.preprocess()`, and records the
+result in the manifest. See the [Preprocessing](tutorials/preprocessing.qmd)
 tutorial.
 
 GridSpec is **optional**. A Josh model can define its grid inline in the `.josh`

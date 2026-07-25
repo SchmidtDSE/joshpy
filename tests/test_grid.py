@@ -12,7 +12,7 @@ try:
 except ImportError:
     HAS_YAML = False
 
-from joshpy.grid import GridSpec
+from joshpy.grid import GridSpec, TimeAxis
 
 
 class TestGridSpecConstruction(unittest.TestCase):
@@ -39,6 +39,46 @@ class TestGridSpecConstruction(unittest.TestCase):
         self.assertEqual(grid.steps, 86)
         self.assertEqual(grid.files, {})
 
+    def test_constructor_rejects_non_positive_steps(self):
+        for steps in (0, -1):
+            with self.subTest(steps=steps):
+                with self.assertRaisesRegex(ValueError, "steps must be at least 1"):
+                    self._make_grid(steps=steps)
+
+    def test_time_axis_derives_timestep_count_and_template_vars(self):
+        grid = self._make_grid(
+            steps=None,
+            time=TimeAxis(
+                type="count",
+                start=2015,
+                unit="year",
+                count=86,
+                increment=1,
+            ),
+        )
+
+        self.assertEqual(grid.timestep_count, 86)
+        self.assertEqual(grid.template_vars["steps"], 86)
+        self.assertEqual(grid.template_vars["steps_high"], 85)
+        self.assertEqual(grid.template_vars["time_start"], 2015)
+
+    def test_time_axis_rejects_invalid_configuration(self):
+        with self.assertRaisesRegex(ValueError, "count time axes require"):
+            TimeAxis(type="count", start=2015, count=86)
+        with self.assertRaisesRegex(ValueError, "ISO time axes require"):
+            TimeAxis(type="ISO", start="2015-01-01", count=86)
+        with self.assertRaisesRegex(ValueError, "must match time.count"):
+            self._make_grid(
+                steps=85,
+                time=TimeAxis(
+                    type="count",
+                    start=2015,
+                    unit="year",
+                    count=86,
+                    increment=1,
+                ),
+            )
+
     def test_template_vars(self):
         grid = self._make_grid()
         tv = grid.template_vars
@@ -63,12 +103,8 @@ class TestGridSpecConstruction(unittest.TestCase):
                 },
             )
             mappings = grid.file_mappings
-            self.assertEqual(
-                mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve()
-            )
-            self.assertEqual(
-                mappings["fire"], (Path(tmpdir) / "subdir" / "fire.jshd").resolve()
-            )
+            self.assertEqual(mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve())
+            self.assertEqual(mappings["fire"], (Path(tmpdir) / "subdir" / "fire.jshd").resolve())
 
 
 @unittest.skipIf(not HAS_YAML, "pyyaml not installed")
@@ -107,6 +143,30 @@ class TestGridSpecYaml(unittest.TestCase):
             self.assertIn("temp", loaded.files)
             self.assertEqual(loaded.files["cover"]["units"], "percent")
             self.assertEqual(loaded.files["temp"]["path"], "monthly/temp.jshd")
+
+    def test_save_and_load_temporal_grid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="temporal",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                time=TimeAxis(
+                    type="count",
+                    start=2015,
+                    unit="year",
+                    count=86,
+                    increment=1,
+                ),
+            )
+            saved = grid.save()
+            data = yaml.safe_load(saved.read_text())
+            loaded = GridSpec.from_yaml(saved)
+
+            self.assertNotIn("steps", data["grid"])
+            self.assertEqual(data["time"]["count"], 86)
+            self.assertEqual(loaded.time, grid.time)
 
     def test_save_custom_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -185,7 +245,7 @@ class TestGridSpecPreprocessScript(unittest.TestCase):
             self.assertIn("-116.0465 degrees longitude", content)
             self.assertIn("33.908 degrees latitude", content)
             self.assertIn("-116.0395 degrees longitude", content)
-            self.assertIn("steps.high = 86 count", content)
+            self.assertIn("steps.high = 85 count", content)
             self.assertIn("start patch Default", content)
             self.assertIn("end patch", content)
         finally:
@@ -317,6 +377,77 @@ class TestGridSpecPreprocess(unittest.TestCase):
             self.assertEqual(config.time_interval, "P1M")
             self.assertEqual(config.time_instant, "2026-01-01")
 
+    def test_preprocess_netcdf_inherits_grid_time_axis(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="temporal",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                time=TimeAxis(
+                    type="count",
+                    start=2015,
+                    unit="year",
+                    count=86,
+                    increment=1,
+                ),
+            )
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="futureTemp",
+                data_file=Path(tmpdir) / "tas.nc",
+                variable="tas",
+                units="K",
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.time_type, "count")
+            self.assertEqual(config.time_start, 2015)
+            self.assertEqual(config.time_unit, "year")
+            self.assertEqual(config.time_count, 86)
+            self.assertEqual(config.time_increment, 1)
+
+    def test_preprocess_netcdf_accepts_per_resource_time_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="temporal",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                time=TimeAxis(
+                    type="count",
+                    start=2015,
+                    unit="year",
+                    count=86,
+                    increment=1,
+                ),
+            )
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="monthlyTemp",
+                data_file=Path(tmpdir) / "monthly.nc",
+                variable="tas",
+                units="K",
+                time=TimeAxis(
+                    type="ISO",
+                    start="2015-01-01",
+                    count=12,
+                    interval="P1M",
+                ),
+            )
+
+            config = cli.preprocess.call_args[0][0]
+            self.assertEqual(config.time_type, "ISO")
+            self.assertEqual(config.time_start, "2015-01-01")
+            self.assertEqual(config.time_count, 12)
+            self.assertEqual(config.time_interval, "P1M")
+
     def test_preprocess_csv_calls_cli(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             grid = self._make_grid(tmpdir)
@@ -393,7 +524,8 @@ class TestGridSpecPreprocess(unittest.TestCase):
 
             config = cli.preprocess.call_args[0][0]
             self.assertEqual(
-                config.output, Path(tmpdir) / "monthly" / "future.jshdz",
+                config.output,
+                Path(tmpdir) / "monthly" / "future.jshdz",
             )
             self.assertEqual(
                 grid.files["future"]["path"],
@@ -556,9 +688,7 @@ class TestGridSpecVariants(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             grid = self._make_variant_grid(tmpdir)
             mappings = grid.file_mappings
-            self.assertEqual(
-                mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve()
-            )
+            self.assertEqual(mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve())
 
     def test_file_mappings_for_specific_variant(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -567,9 +697,7 @@ class TestGridSpecVariants(unittest.TestCase):
             expected = (Path(tmpdir) / "monthly/tas_ssp370_jan.jshd").resolve()
             self.assertEqual(mappings["futureTempJan"], expected)
             # Static files unchanged
-            self.assertEqual(
-                mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve()
-            )
+            self.assertEqual(mappings["cover"], (Path(tmpdir) / "cover.jshd").resolve())
 
     def test_file_mappings_for_invalid_axis(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -856,9 +984,7 @@ class TestGridSpecVariantYaml(unittest.TestCase):
             # variants section exists
             self.assertIn("variants", data)
             self.assertIn("scenario", data["variants"])
-            self.assertEqual(
-                data["variants"]["scenario"]["values"], ["ssp245", "ssp370"]
-            )
+            self.assertEqual(data["variants"]["scenario"]["values"], ["ssp245", "ssp370"])
 
             # files: cover has path, temp has template_path
             self.assertIn("path", data["files"]["cover"])
@@ -1077,7 +1203,7 @@ class TestGridSpecDescribe(unittest.TestCase):
             "variants:\n"
             "  scenario: {values: [ssp245, ssp370], default: ssp245}\n"
             "files:\n"
-            "  cover: {path: cover.jshd, units: \"\"}\n"
+            '  cover: {path: cover.jshd, units: ""}\n'
             "  futureTempJan: {template_path: 'monthly/tas_{scenario}_jan.jshd', units: degC}\n"
             "  missingStatic: {path: nope.jshd, units: m}\n"
         )
@@ -1110,9 +1236,9 @@ class TestGridSpecDescribe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             text = self._grid(Path(d)).describe()
             self.assertIn("Grid: dev_fine", text)
-            self.assertIn("ssp245*", text)          # default marked
-            self.assertIn("1/2 present", text)       # templated availability
-            self.assertIn("MISSING", text)           # missing files surfaced
+            self.assertIn("ssp245*", text)  # default marked
+            self.assertIn("1/2 present", text)  # templated availability
+            self.assertIn("MISSING", text)  # missing files surfaced
             self.assertIn("cover", text)
 
     def test_describe_no_variants(self):
@@ -1123,7 +1249,7 @@ class TestGridSpecDescribe(unittest.TestCase):
                 "name: plain\n"
                 "grid: {size_m: 30, low: [0, 0], high: [1, 1], steps: 5}\n"
                 "files:\n"
-                "  cover: {path: cover.jshd, units: \"\"}\n"
+                '  cover: {path: cover.jshd, units: ""}\n'
             )
             text = GridSpec.from_yaml(tmp / "grid.yaml").describe()
             self.assertIn("Variant axes: (none)", text)
@@ -1138,18 +1264,20 @@ class TestGridCli(unittest.TestCase):
             "name: dev_fine\n"
             "grid: {size_m: 30, low: [0, 0], high: [1, 1], steps: 5}\n"
             "files:\n"
-            "  cover: {path: cover.jshd, units: \"\"}\n"
+            '  cover: {path: cover.jshd, units: ""}\n'
         )
         return tmp / "grid.yaml"
 
     def test_help_exits_zero(self):
         from joshpy.grid.__main__ import main
+
         with self.assertRaises(SystemExit) as cm:
             main(["--help"])
         self.assertEqual(cm.exception.code, 0)
 
     def test_text_output_returns_zero(self):
         from joshpy.grid.__main__ import main
+
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(main([str(self._write_grid(Path(d)))]), 0)
 
@@ -1158,6 +1286,7 @@ class TestGridCli(unittest.TestCase):
         import json
         from contextlib import redirect_stdout
         from joshpy.grid.__main__ import main
+
         with tempfile.TemporaryDirectory() as d:
             buf = io.StringIO()
             with redirect_stdout(buf):
@@ -1168,6 +1297,7 @@ class TestGridCli(unittest.TestCase):
 
     def test_missing_file_returns_one(self):
         from joshpy.grid.__main__ import main
+
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(main([str(Path(d) / "nope.yaml")]), 1)
 
