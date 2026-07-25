@@ -1,9 +1,10 @@
-"""End-to-end integration tests for compressed .jshdz output.
+"""End-to-end integration tests for .jshd/.jshdz output.
 
 Verifies:
   1. CSV preprocessing produces a scalar .jshdz that a simulation can read.
-  2. NetCDF preprocessing persists declared temporal metadata in a .jshdz that
-     a simulation uses through ``length of external`` and ``at time meta.time``.
+  2. NetCDF preprocessing persists declared temporal metadata in both .jshdz
+     and .jshd that a simulation uses through ``length of external`` and
+     ``at year <coordinate>``.
   3. Compressed output has valid XZ framing (no joshpy/JAR mocking — real JAR,
      real disk I/O).
 
@@ -124,8 +125,8 @@ class TestJshdzCompressIntegration:
         rows = output_csv.read_text().strip().splitlines()
         assert len(rows) >= 2, f"expected header+data, got {rows!r}"
 
-    def test_netcdf_temporal_compress_roundtrip(self, josh_cli, tmp_path):
-        """Preprocess temporal metadata into .jshdz and consume it in a run."""
+    def _write_temporal_netcdf(self, tmp_path):
+        """Two-timestep, 2x2 NetCDF fixture shared by jshd/jshdz temporal tests."""
         netcdf_input = tmp_path / "temperature.nc"
         with netcdf_file(netcdf_input, "w") as dataset:
             dataset.createDimension("time", 2)
@@ -139,9 +140,19 @@ class TestJshdzCompressIntegration:
                 "f4",
                 ("time", "lat", "lon"),
             )[:] = [[[10, 11], [12, 13]], [[20, 21], [22, 23]]]
+        return netcdf_input
+
+    def _run_temporal_netcdf_roundtrip(self, josh_cli, tmp_path, *, compress, grid_name):
+        """Preprocess temporal metadata, consume it in a run, return (result, output_csv).
+
+        Shared by the compressed (.jshdz) and uncompressed (.jshd) temporal
+        roundtrip tests below -- both exercise the same declared count/year
+        axis and the same ``external ... at year ...`` read.
+        """
+        netcdf_input = self._write_temporal_netcdf(tmp_path)
 
         grid = GridSpec(
-            name="temporal-jshdz-integration",
+            name=grid_name,
             output_dir=tmp_path / "out",
             size_m=30,
             low=(33.901, -116.001),
@@ -160,14 +171,13 @@ class TestJshdzCompressIntegration:
             data_file=netcdf_input,
             variable="temperature",
             units="celsius",
-            compress=True,
+            compress=compress,
         )
         assert preprocess_result.success, f"preprocess failed: {preprocess_result.stderr}"
 
-        jshdz = tmp_path / "out" / "temperature.jshdz"
-        assert jshdz.exists(), f"expected {jshdz} to exist"
-        with open(jshdz, "rb") as f:
-            assert f.read(6) == XZ_MAGIC
+        extension = "jshdz" if compress else "jshd"
+        data_file = tmp_path / "out" / f"temperature.{extension}"
+        assert data_file.exists(), f"expected {data_file} to exist"
 
         output_csv = tmp_path / "temporal-output.csv"
         sim = tmp_path / "consume-temporal.josh"
@@ -206,9 +216,12 @@ class TestJshdzCompressIntegration:
                 script=sim,
                 simulation="Main",
                 replicates=1,
-                data={"temperature": jshdz},
+                data={"temperature": data_file},
             )
         )
+        return data_file, run_result, output_csv
+
+    def _assert_temporal_output(self, run_result, output_csv):
         assert run_result.success, f"run failed: {run_result.stderr}"
 
         # exportFiles.patch writes one row per patch per step (not a
@@ -228,7 +241,33 @@ class TestJshdzCompressIntegration:
                 for row in rows
                 if row["step"] == step and float(row["meanTemperature"]) != 0
             }
-            assert observed == expected_values, f"step {step}: expected {expected_values}, got {observed}"
+            assert observed == expected_values, (
+                f"step {step}: expected {expected_values}, got {observed}"
+            )
+
+    def test_netcdf_temporal_compress_roundtrip(self, josh_cli, tmp_path):
+        """Preprocess temporal metadata into .jshdz and consume it in a run."""
+        jshdz, run_result, output_csv = self._run_temporal_netcdf_roundtrip(
+            josh_cli, tmp_path, compress=True, grid_name="temporal-jshdz-integration"
+        )
+        with open(jshdz, "rb") as f:
+            assert f.read(6) == XZ_MAGIC
+        self._assert_temporal_output(run_result, output_csv)
+
+    def test_netcdf_temporal_default_uncompressed_e2e(self, josh_cli, tmp_path):
+        """Same temporal roundtrip as above, but with compress=False (.jshd).
+
+        The --time-* flag support and interpolation fix documented in
+        JOSH_FIXES.md were only ever verified against .jshdz; this confirms
+        the plain, uncompressed .jshd path reads declared temporal metadata
+        identically.
+        """
+        jshd, run_result, output_csv = self._run_temporal_netcdf_roundtrip(
+            josh_cli, tmp_path, compress=False, grid_name="temporal-jshd-integration"
+        )
+        with open(jshd, "rb") as f:
+            assert f.read(6) != XZ_MAGIC
+        self._assert_temporal_output(run_result, output_csv)
 
     def test_compress_default_false_unchanged_e2e(self, josh_cli, tmp_path):
         """Regression sanity: compress=False (default) still produces .jshd."""

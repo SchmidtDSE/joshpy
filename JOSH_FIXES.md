@@ -9,9 +9,14 @@ This doc tracks josh-side issues found while integrating joshpy against a Josh J
 | 1 | `preprocess` rejects `--time-*` flags | ✅ Fixed (confirmed 2026-07-25, JAR sha256 `2d93e898...`) |
 | 2 | NetCDF (raster) preprocessing fails with "Error interpolating value for patch" | ✅ Fixed (confirmed 2026-07-25, JAR sha256 `29c89386...`) |
 
-All three real-JAR integration tests in `tests/test_jshdz_integration.py` now pass:
+All four real-JAR integration tests in `tests/test_jshdz_integration.py` now pass:
 `test_csv_compress_roundtrip`, `test_netcdf_temporal_compress_roundtrip`,
-`test_compress_default_false_unchanged_e2e`.
+`test_netcdf_temporal_default_uncompressed_e2e`, `test_compress_default_false_unchanged_e2e`.
+
+The original temporal-read fix was only ever verified against `.jshdz` (compressed) output.
+`test_netcdf_temporal_default_uncompressed_e2e` closes that gap: same declared count/year axis,
+same `external ... at year ...` read, against plain `.jshd` (`compress=False`, the default) —
+confirms the fix isn't compression-path-specific.
 
 ---
 
@@ -92,6 +97,6 @@ default to `0`) instead of a fixed row count.
   `jar/joshsim-fat-prod.jar` (sha256 `8ca776f2b53aa4d1f15cf03f42af7130ef6f62e10a0d3217df92130af717f4c1`)
   was updated the same day but was not independently tested against this repro.
 - Java: bundled in `.pixi/envs/dev`.
-- joshpy tests: `pixi run -e dev test-integration` (3 passed, 17 skipped — MinIO tests require a
+- joshpy tests: `pixi run -e dev test-integration` (4 passed, 17 skipped — MinIO tests require a
   running MinIO and are unaffected by this work) and `pytest tests/ -m "not integration"`
   (1125 passed).
