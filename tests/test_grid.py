@@ -251,6 +251,23 @@ class TestGridSpecPreprocessScript(unittest.TestCase):
         finally:
             script_path.unlink(missing_ok=True)
 
+    def test_render_preprocess_script_step_count_override(self):
+        """An explicit step_count sizes the stub independent of grid.steps."""
+        grid = GridSpec(
+            name="dev_fine",
+            output_dir=Path("/tmp/test"),
+            size_m=30,
+            low=(33.902, -116.0465),
+            high=(33.908, -116.0395),
+            steps=86,
+        )
+        script_path = grid._render_preprocess_script(step_count=65)
+        try:
+            content = script_path.read_text()
+            self.assertIn("steps.high = 64 count", content)
+        finally:
+            script_path.unlink(missing_ok=True)
+
 
 class TestGridSpecPreprocess(unittest.TestCase):
     """Tests for preprocess methods with mocked CLI."""
@@ -447,6 +464,139 @@ class TestGridSpecPreprocess(unittest.TestCase):
             self.assertEqual(config.time_start, "2015-01-01")
             self.assertEqual(config.time_count, 12)
             self.assertEqual(config.time_interval, "P1M")
+
+    def _capture_stub_script(self, cli):
+        """Rig a mocked cli.preprocess to capture the stub script's content.
+
+        The script is deleted (see preprocess_netcdf's finally block) before
+        preprocess_netcdf() returns, so content has to be read from inside
+        the mock's side_effect, while the file still exists.
+        """
+        captured: dict[str, str] = {}
+
+        def _side_effect(config):
+            captured["content"] = Path(config.script).read_text()
+            mock_result = MagicMock()
+            mock_result.success = True
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            return mock_result
+
+        cli.preprocess.side_effect = _side_effect
+        return captured
+
+    def test_preprocess_netcdf_stub_uses_per_call_time_count_not_grid_steps(self):
+        """A source's own time_count sizes the stub, not the grid's steps.
+
+        Regression for josh#494: Josh now validates that a declared
+        --time-count equals the stub simulation's output-slice count. A
+        grid preprocessing sources of different native lengths (e.g. a
+        65-year historical series against an 86-step grid) must size each
+        call's stub from that call's own time_count.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)  # steps=10
+            cli, _ = self._mock_cli()
+            captured = self._capture_stub_script(cli)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="historicalTemp",
+                data_file=Path(tmpdir) / "hist.nc",
+                variable="tas",
+                units="K",
+                time_type="count",
+                time_start=1950,
+                time_unit="year",
+                time_count=65,
+                time_increment=1,
+            )
+
+            self.assertIn("steps.high = 64 count", captured["content"])
+
+    def test_preprocess_netcdf_stub_uses_grid_time_axis_count(self):
+        """A grid-level TimeAxis sizes the stub when a call has no override."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="temporal",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                time=TimeAxis(type="count", start=2015, unit="year", count=86, increment=1),
+            )
+            cli, _ = self._mock_cli()
+            captured = self._capture_stub_script(cli)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="futureTemp",
+                data_file=Path(tmpdir) / "tas.nc",
+                variable="tas",
+                units="K",
+            )
+
+            self.assertIn("steps.high = 85 count", captured["content"])
+
+    def test_preprocess_netcdf_stub_uses_per_resource_time_override_count(self):
+        """A per-call ``time=`` override sizes the stub, not the grid axis."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = GridSpec(
+                name="temporal",
+                output_dir=Path(tmpdir),
+                size_m=30,
+                low=(33.9, -116.05),
+                high=(33.95, -116.0),
+                time=TimeAxis(type="count", start=2015, unit="year", count=86, increment=1),
+            )
+            cli, _ = self._mock_cli()
+            captured = self._capture_stub_script(cli)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="monthlyTemp",
+                data_file=Path(tmpdir) / "monthly.nc",
+                variable="tas",
+                units="K",
+                time=TimeAxis(type="ISO", start="2015-01-01", count=12, interval="P1M"),
+            )
+
+            self.assertIn("steps.high = 11 count", captured["content"])
+
+    def test_preprocess_netcdf_stub_uses_one_for_time_instant(self):
+        """A bare time_instant (no range) sizes the stub to a single slice."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)  # steps=10
+            cli, _ = self._mock_cli()
+            captured = self._capture_stub_script(cli)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="singleMonth",
+                data_file=Path(tmpdir) / "single.nc",
+                variable="tas",
+                units="K",
+                time_instant="2026-01-01",
+            )
+
+            self.assertIn("steps.high = 0 count", captured["content"])
+
+    def test_preprocess_netcdf_stub_falls_back_to_grid_steps_without_time(self):
+        """No time options at all: stub still uses the grid's timestep_count."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)  # steps=10
+            cli, _ = self._mock_cli()
+            captured = self._capture_stub_script(cli)
+
+            grid.preprocess_netcdf(
+                cli,
+                josh_name="staticCover",
+                data_file=Path(tmpdir) / "cover.nc",
+                variable="cover",
+                units="percent",
+            )
+
+            self.assertIn("steps.high = 9 count", captured["content"])
 
     def test_preprocess_csv_calls_cli(self):
         with tempfile.TemporaryDirectory() as tmpdir:
