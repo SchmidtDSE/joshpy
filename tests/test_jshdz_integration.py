@@ -296,3 +296,81 @@ class TestJshdzCompressIntegration:
         assert result.success, f"preprocess failed: {result.stderr}"
         assert (tmp_path / "out" / "soil_quality.jshd").exists()
         assert not (tmp_path / "out" / "soil_quality.jshdz").exists()
+
+
+class TestPreprocessMismatchedNativeLengths:
+    """Regression for josh#494's --time-count invariant.
+
+    A single GridSpec is often reused to preprocess multiple NetCDF sources
+    with different native temporal lengths against the same spatial grid --
+    e.g. a shorter historical/spinup series alongside a longer future/
+    scenario series (the josh-models ``dev_fine`` grid's standard pattern).
+    Josh validates a declared ``--time-count`` against the preprocessing
+    stub's own step range, so that stub must be sized per-call from each
+    source's own declared axis, not from the grid's nominal ``steps``.
+    """
+
+    @staticmethod
+    def _write_netcdf(path, values):
+        with netcdf_file(path, "w") as dataset:
+            dataset.createDimension("time", len(values))
+            dataset.createDimension("lat", 2)
+            dataset.createDimension("lon", 2)
+            dataset.createVariable("time", "f8", ("time",))[:] = list(range(len(values)))
+            dataset.createVariable("lat", "f8", ("lat",))[:] = [33.901, 33.9]
+            dataset.createVariable("lon", "f8", ("lon",))[:] = [-116.001, -116.0]
+            dataset.createVariable("temperature", "f4", ("time", "lat", "lon"))[:] = values
+
+    def test_shorter_and_longer_sources_both_preprocess_against_shared_grid(
+        self, josh_cli, tmp_path
+    ):
+        # grid.steps (5) intentionally matches neither source's native length,
+        # to prove the stub is sized per-call rather than from the grid.
+        grid = GridSpec(
+            name="mismatched-lengths",
+            output_dir=tmp_path / "out",
+            size_m=30,
+            low=(33.901, -116.001),
+            high=(33.9, -116.0),
+            steps=5,
+        )
+
+        historical_nc = tmp_path / "historical.nc"
+        self._write_netcdf(historical_nc, [[[1, 2], [3, 4]], [[5, 6], [7, 8]]])  # 2 slices
+
+        future_nc = tmp_path / "future.nc"
+        self._write_netcdf(
+            future_nc,
+            [[[10, 11], [12, 13]], [[20, 21], [22, 23]], [[30, 31], [32, 33]]],  # 3 slices
+        )
+
+        historical_result = grid.preprocess_netcdf(
+            josh_cli,
+            josh_name="historicalTemp",
+            data_file=historical_nc,
+            variable="temperature",
+            units="celsius",
+            time_type="count",
+            time_start=1950,
+            time_unit="year",
+            time_count=2,
+            time_increment=1,
+        )
+        assert historical_result.success, f"preprocess failed: {historical_result.stderr}"
+
+        future_result = grid.preprocess_netcdf(
+            josh_cli,
+            josh_name="futureTemp",
+            data_file=future_nc,
+            variable="temperature",
+            units="celsius",
+            time_type="count",
+            time_start=2015,
+            time_unit="year",
+            time_count=3,
+            time_increment=1,
+        )
+        assert future_result.success, f"preprocess failed: {future_result.stderr}"
+
+        assert (tmp_path / "out" / "historicalTemp.jshd").exists()
+        assert (tmp_path / "out" / "futureTemp.jshd").exists()
