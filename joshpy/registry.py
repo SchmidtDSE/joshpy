@@ -953,6 +953,35 @@ class RunRegistry:
 
     # ========== S3 Sync ==========
 
+    def _describe_remote_columns(self, remote: str) -> dict[str, str]:
+        """Column name -> DuckDB SQL type for a published table's Parquet file.
+
+        Dict order matches the Parquet file's own column order.
+        """
+        rows = self.conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{remote}')").fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def _sync_table_columns(self, table: str, remote_cols: dict[str, str]) -> None:
+        """Add any columns present in *remote_cols* but missing from *table* locally.
+
+        ``config_parameters`` and ``cell_data`` have dynamically-added
+        columns (sweep parameters, export variables respectively) that only
+        exist once something has locally registered/ingested that specific
+        column. A destination registry that's never seen a given parameter
+        or variable needs it added before ``INSERT``/merge can reference it.
+        """
+        local_cols = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                [table],
+            ).fetchall()
+        }
+        for col_name, col_type in remote_cols.items():
+            if col_name not in local_cols:
+                quoted = _quote_identifier(col_name)
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {quoted} {col_type}")
+
     def push_to_s3(
         self,
         *,
@@ -994,9 +1023,13 @@ class RunRegistry:
             >>> registry.push_to_s3(bucket="josh-batch-storage")
             's3://josh-batch-storage/run-registries/jotr_sensitivity/'
         """
+        # Resolve the (purely local) prefix before touching credentials/network,
+        # so a ":memory:" registry without an explicit prefix fails fast with
+        # the right error instead of first demanding S3 credentials it'll
+        # never use.
+        resolved_prefix = (prefix or _default_s3_prefix(self.db_path)).strip("/")
         endpoint, access_key, secret_key = _resolve_s3_credentials(endpoint, access_key, secret_key)
         configure_s3(self.conn, endpoint, access_key, secret_key, use_ssl=use_ssl)
-        resolved_prefix = (prefix or _default_s3_prefix(self.db_path)).strip("/")
 
         for table in tables or REGISTRY_SYNC_TABLES:
             remote = f"s3://{bucket}/{resolved_prefix}/{table}.parquet"
@@ -1064,9 +1097,11 @@ class RunRegistry:
         if mode not in ("restore", "merge"):
             raise ValueError(f"mode must be 'restore' or 'merge', got {mode!r}")
 
+        # Same reasoning as push_to_s3: resolve the local prefix before
+        # touching credentials/network.
+        resolved_prefix = (prefix or _default_s3_prefix(self.db_path)).strip("/")
         endpoint, access_key, secret_key = _resolve_s3_credentials(endpoint, access_key, secret_key)
         configure_s3(self.conn, endpoint, access_key, secret_key, use_ssl=use_ssl)
-        resolved_prefix = (prefix or _default_s3_prefix(self.db_path)).strip("/")
         sync_tables = tables or REGISTRY_SYNC_TABLES
 
         if mode == "restore":
@@ -1077,9 +1112,19 @@ class RunRegistry:
         rows: dict[str, int] = {}
         for table in sync_tables:
             remote = f"s3://{bucket}/{resolved_prefix}/{table}.parquet"
+            # config_parameters and cell_data have dynamically-added columns
+            # (sweep parameters, export variables) that only exist locally
+            # once something has registered/ingested that specific column --
+            # a destination registry that's never seen a given parameter/
+            # variable needs it added before the two sides' columns line up.
+            remote_cols = self._describe_remote_columns(remote)
+            self._sync_table_columns(table, remote_cols)
+
             if mode == "restore":
+                col_list = ", ".join(_quote_identifier(c) for c in remote_cols)
                 self.conn.execute(
-                    f"INSERT INTO {table} SELECT * FROM read_parquet('{remote}')"
+                    f"INSERT INTO {table} ({col_list}) "
+                    f"SELECT {col_list} FROM read_parquet('{remote}')"
                 )
                 count = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
             elif table == "cell_data":
@@ -1099,11 +1144,15 @@ class RunRegistry:
                     ).fetchall()
                 ]
                 quoted_cols = ", ".join(_quote_identifier(c) for c in cols)
+                select_clause = ", ".join(
+                    _quote_identifier(c) if c in remote_cols else f"NULL AS {_quote_identifier(c)}"
+                    for c in cols
+                )
                 before = self.conn.execute("SELECT COUNT(*) FROM cell_data").fetchone()[0]
                 self.conn.execute(
                     f"""
                     INSERT INTO cell_data ({quoted_cols})
-                    SELECT {quoted_cols} FROM read_parquet('{remote}') AS src
+                    SELECT {select_clause} FROM read_parquet('{remote}') AS src
                     WHERE NOT EXISTS (
                         SELECT 1 FROM cell_data cd
                         WHERE cd.run_hash = src.run_hash AND cd.replicate = src.replicate
@@ -1122,10 +1171,14 @@ class RunRegistry:
                     ).fetchall()
                 ]
                 quoted_cols = ", ".join(_quote_identifier(c) for c in cols)
+                select_clause = ", ".join(
+                    _quote_identifier(c) if c in remote_cols else f"NULL AS {_quote_identifier(c)}"
+                    for c in cols
+                )
                 before = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 self.conn.execute(
                     f"INSERT OR IGNORE INTO {table} ({quoted_cols}) "
-                    f"SELECT {quoted_cols} FROM read_parquet('{remote}')"
+                    f"SELECT {select_clause} FROM read_parquet('{remote}')"
                 )
                 after = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 count = (after - before,)
