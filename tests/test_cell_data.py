@@ -337,6 +337,40 @@ class TestDiagnosticQueries:
         assert "param_value" in df.columns
         assert "mean_value" in df.columns
 
+    def test_get_parameter_comparison_with_step_filter(self):
+        """A fixed step= shouldn't crash with a GROUP BY binder error.
+
+        cd.step is constant within each group once filtered to one step, but
+        it isn't itself a GROUP BY column -- this regresses a bug where the
+        bare column reference in SELECT was rejected by DuckDB.
+        """
+        skip_if_no_pandas()
+        df = self.queries.get_parameter_comparison(
+            variable="treeCount",
+            param_name="maxGrowth",
+            step=1,
+        )
+
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 1
+        assert df["step"].iloc[0] == 1
+
+    def test_get_parameter_comparison_by_label_with_step_filter(self):
+        """Same step= regression, via the group_by="label" branch."""
+        skip_if_no_pandas()
+        self.registry.label_run("abc123", "baseline")
+
+        df = self.queries.get_parameter_comparison(
+            variable="treeCount",
+            param_name="label",
+            step=1,
+        )
+
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 1
+        assert df["step"].iloc[0] == 1
+        assert df["param_value"].iloc[0] == "baseline"
+
     def test_get_replicate_uncertainty(self):
         """Test getting uncertainty across replicates."""
         skip_if_no_pandas()

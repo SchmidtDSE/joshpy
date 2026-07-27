@@ -242,27 +242,60 @@ by construction.
 
 ### Validated scopes
 
-Three tagging methods each check their target actually exists before writing:
+Three tagging methods each check their target actually exists before writing.
+To keep this demo real rather than fabricated, we run two tiny simulations
+using the tutorial model from [Single Run & Iteration](manual-workflow.qmd) --
+its `baseline.jshc` and `high_growth.jshc` configs stand in for two field
+sites here, each producing a genuine `run_hash` to tag:
 
 ```{python}
 #| label: tags-setup
-from joshpy.registry import RunRegistry
+from pathlib import Path
 from joshpy.jobs import JobConfig
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
 
-registry = RunRegistry(":memory:")
-config = JobConfig(simulation="JoshuaTreeSim")
-session_id = registry.create_session(config=config, experiment_name="jotr_sites")
+SOURCE_PATH = Path("../../examples/tutorial_sweep.josh")
+cli = JoshCLI(josh_jar=JarMode.DEV)
 
-for run_hash in ("hash_jotr001", "hash_jotr002"):
-    registry.register_run(
-        session_id, run_hash, "/tmp/sim.josh",
-        "maxGrowth = 50 meters", None, {"maxGrowth": 50},
+site_configs = {
+    "JOTR001": Path("../../examples/configs/baseline.jshc"),
+    "JOTR002": Path("../../examples/configs/high_growth.jshc"),
+}
+
+registry_path = "tags_demo.duckdb"
+run_hashes = {}
+
+for site, config_path in site_configs.items():
+    config = JobConfig(
+        source_path=SOURCE_PATH, config_path=config_path,
+        simulation="Main", replicates=1,
     )
+    manager = (
+        SweepManager.builder(config)
+        .with_registry(registry_path, experiment_name="tags_demo")
+        .with_cli(cli)
+        .build()
+    )
+    manager.run(quiet=True)
+    manager.load_results(quiet=True)
 
-registry.tag_by_run_hash("hash_jotr001", site="JOTR001", biome="desert")
-registry.tag_by_run_hash("hash_jotr002", site="JOTR002", biome="desert")
+    run_hash = manager.job_set.jobs[0].run_hash
+    manager.registry.tag_by_run_hash(run_hash, site=site)
+    run_hashes[site] = run_hash
+    manager.cleanup()
+    manager.close()
 
-print(registry.get_tags_by_run_hash("hash_jotr001"))
+print(run_hashes)
+```
+
+```{python}
+#| label: tags-get
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry(registry_path)
+print(registry.get_tags_by_run_hash(run_hashes["JOTR001"]))
 ```
 
 `tag_by_session_id(session_id, **tags)` and `tag_by_run_id(run_id, **tags)`
@@ -273,28 +306,15 @@ execution rather than a run's configuration.
 
 Once tagged, `DiagnosticQueries.get_parameter_comparison()`'s `group_by` picks
 up tag keys automatically for anything that isn't a declared sweep parameter
--- no extra query code needed:
+-- no extra query code needed. `step=10` here just asks for a single-timestep
+snapshot instead of the full time series, to keep the printed table short:
 
 ```{python}
 #| label: tags-group-by
-run_id_1 = registry.start_run("hash_jotr001", session_id=session_id)
-registry.complete_run(run_id_1, exit_code=0)
-run_id_2 = registry.start_run("hash_jotr002", session_id=session_id)
-registry.complete_run(run_id_2, exit_code=0)
-
-registry.conn.execute("ALTER TABLE cell_data ADD COLUMN averageHeight DOUBLE")
-registry.conn.execute(
-    "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
-    "VALUES (?, 'hash_jotr001', 0, 0, 4.2)", [run_id_1],
-)
-registry.conn.execute(
-    "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
-    "VALUES (?, 'hash_jotr002', 0, 0, 5.1)", [run_id_2],
-)
-
 from joshpy.cell_data import DiagnosticQueries
+
 diag = DiagnosticQueries(registry)
-print(diag.get_parameter_comparison("averageHeight", "site"))
+print(diag.get_parameter_comparison("averageHeight", "site", step=10))
 ```
 
 ### Synthetic groupings and the reverse lookup
@@ -311,6 +331,25 @@ registry.tag_custom("JOTR001", scope="site", n_plots=12, elevation_m=850)
 print(registry.get_custom_tags("JOTR001", scope="site"))
 
 print(registry.find_tagged("site", "JOTR001"))
+```
+
+`tag_custom()` and `find_tagged()` aren't magic -- `run_tags` is a plain
+`(scope, key) -> JSON` table, and both methods just run SQL against it.
+Here's exactly what happened above, expressed as raw queries:
+
+```{python}
+#| label: tags-raw-sql
+# What tag_custom("JOTR001", scope="site", ...) actually wrote:
+print(registry.conn.execute(
+    "SELECT scope, key, tags FROM run_tags WHERE scope = 'site' AND key = 'JOTR001'"
+).fetchone())
+
+# What find_tagged("site", "JOTR001") actually runs -- a JSON-path match
+# against every row in the "run_hash" scope:
+print(registry.conn.execute(
+    "SELECT key FROM run_tags WHERE scope = 'run_hash' "
+    "AND json_extract_string(tags, '$.site') = ?", ["JOTR001"]
+).fetchall())
 ```
 
 `tag_custom()` refuses the three validated scope names (`run_hash`,

@@ -539,6 +539,12 @@ class DiagnosticQueries:
         quoted_var = _quote_identifier(variable)
         step_filter = "AND cd.step = ?" if step else ""
         step_group = "" if step else ", cd.step"
+        # When step is fixed, every row in a group already has the same
+        # cd.step by construction (the WHERE filter), but a bare `cd.step` in
+        # SELECT still isn't valid unless it's also in GROUP BY or wrapped in
+        # an aggregate -- ANY_VALUE() satisfies that without changing the
+        # result (there's only ever one distinct value to pick from).
+        step_select = "cd.step" if not step else "ANY_VALUE(cd.step) as step"
         params: list[Any] = [step] if step else []
 
         if param_name == "label":
@@ -546,7 +552,7 @@ class DiagnosticQueries:
             query = f"""
                 SELECT
                     jc.label as param_value,
-                    cd.step,
+                    {step_select},
                     {aggregation}({quoted_var}) as mean_value,
                     STDDEV({quoted_var}) as std_value,
                     COUNT(*) as n_cells
@@ -554,14 +560,14 @@ class DiagnosticQueries:
                 JOIN job_configs jc ON cd.run_hash = jc.run_hash
                 WHERE jc.label IS NOT NULL {step_filter}
                 GROUP BY jc.label{step_group}
-                ORDER BY param_value, cd.step
+                ORDER BY param_value, step
             """
         elif param_name in self.registry.list_config_columns():
             quoted_param = _quote_identifier(param_name)
             query = f"""
                 SELECT
                     cp.{quoted_param} as param_value,
-                    cd.step,
+                    {step_select},
                     {aggregation}({quoted_var}) as mean_value,
                     STDDEV({quoted_var}) as std_value,
                     COUNT(*) as n_cells
@@ -569,7 +575,7 @@ class DiagnosticQueries:
                 JOIN config_parameters cp ON cd.run_hash = cp.run_hash
                 WHERE 1=1 {step_filter}
                 GROUP BY cp.{quoted_param}{step_group}
-                ORDER BY param_value, cd.step
+                ORDER BY param_value, step
             """
         else:
             # Not a declared sweep parameter -- fall back to free-form tags
@@ -580,7 +586,7 @@ class DiagnosticQueries:
             query = f"""
                 SELECT
                     json_extract_string(rt.tags, ?) as param_value,
-                    cd.step,
+                    {step_select},
                     {aggregation}({quoted_var}) as mean_value,
                     STDDEV({quoted_var}) as std_value,
                     COUNT(*) as n_cells
@@ -588,7 +594,7 @@ class DiagnosticQueries:
                 JOIN run_tags rt ON rt.key = cd.run_hash AND rt.scope = 'run_hash'
                 WHERE json_extract_string(rt.tags, ?) IS NOT NULL {step_filter}
                 GROUP BY param_value{step_group}
-                ORDER BY param_value, cd.step
+                ORDER BY param_value, step
             """
 
         if show_sql:
