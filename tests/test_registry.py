@@ -2466,6 +2466,26 @@ class TestRunTags(unittest.TestCase):
         self.assertEqual(list(df["param_value"]), ["JOTR001"])
         self.assertEqual(list(df["mean_value"]), [5.0])
 
+    def test_group_by_tags_with_step_filter(self):
+        """Same tag-fallback group_by, but with a fixed step= (regression:
+        DuckDB rejected the bare cd.step column once step was filtered)."""
+        from joshpy.cell_data import DiagnosticQueries
+
+        run_id = self.registry.start_run("hash_aaa111", session_id=self.session_id)
+        self.registry.complete_run(run_id, exit_code=0)
+        self.registry.conn.execute("ALTER TABLE cell_data ADD COLUMN averageHeight DOUBLE")
+        self.registry.conn.execute(
+            "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
+            "VALUES (?, 'hash_aaa111', 3, 0, 5.0)",
+            [run_id],
+        )
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+
+        diag = DiagnosticQueries(self.registry)
+        df = diag.get_parameter_comparison("averageHeight", "site", step=3)
+        self.assertEqual(list(df["param_value"]), ["JOTR001"])
+        self.assertEqual(list(df["step"]), [3])
+
 
 if __name__ == "__main__":
     unittest.main()
