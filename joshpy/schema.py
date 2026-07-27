@@ -80,4 +80,12 @@ CREATE INDEX IF NOT EXISTS idx_cell_step ON cell_data(step);
 CREATE INDEX IF NOT EXISTS idx_cell_replicate ON cell_data(replicate);
 CREATE INDEX IF NOT EXISTS idx_cell_spatial ON cell_data(longitude, latitude);
 CREATE INDEX IF NOT EXISTS idx_cell_step_replicate ON cell_data(step, replicate);
+
+CREATE TABLE IF NOT EXISTS run_tags (
+    scope           VARCHAR NOT NULL,
+    key             VARCHAR NOT NULL,
+    tags            JSON NOT NULL,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (scope, key)
+);
 """

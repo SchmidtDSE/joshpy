@@ -147,6 +147,7 @@ try:
         SessionSummary,
         DataSummary,
         configure_s3,
+        open_s3_registries,
     )
     from joshpy.cell_data import (
         CellDataLoader,
@@ -297,6 +298,7 @@ __all__ = [
     "SessionSummary",
     "DataSummary",
     "configure_s3",
+    "open_s3_registries",
     "CellDataLoader",
     "DiagnosticQueries",
     "SimulationDiagnostics",

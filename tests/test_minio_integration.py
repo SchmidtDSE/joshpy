@@ -689,3 +689,227 @@ class TestMinioEdgeCases:
 
         assert val_a == 111
         assert val_b == 999
+
+
+# ===================================================================
+# Level 6: RunRegistry <-> S3 sync (push_to_s3 / pull_from_s3 / open_s3_registries)
+# ===================================================================
+
+
+def _make_synced_registry(run_hash, replicate_steps=(0, 1)):
+    """Build an in-memory registry with one labeled run and some cell_data + tags."""
+    from joshpy.jobs import JobConfig
+    from joshpy.registry import RunRegistry
+
+    registry = RunRegistry(":memory:")
+    config = JobConfig(source_path=Path("/tmp/sim.josh"), simulation="Main", replicates=1)
+    session_id = registry.create_session(config=config, experiment_name="sync-test")
+    registry.register_run(
+        session_id=session_id,
+        run_hash=run_hash,
+        josh_path="/tmp/sim.josh",
+        config_content="test",
+        file_mappings=None,
+        parameters={"maxGrowth": 10},
+    )
+    run_id = registry.start_run(run_hash, session_id=session_id)
+    registry.complete_run(run_id, exit_code=0)
+    registry.conn.execute("ALTER TABLE cell_data ADD COLUMN averageHeight DOUBLE")
+    for step in replicate_steps:
+        registry.conn.execute(
+            "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
+            "VALUES (?, ?, ?, 0, ?)",
+            [run_id, run_hash, step, 5.0 + step],
+        )
+    registry.tag_by_run_hash(run_hash, site="JOTR001")
+    return registry
+
+
+class TestMinioRegistrySync:
+    """Level 6: publishing/restoring/merging a registry as S3 Parquet."""
+
+    def test_push_then_restore_roundtrip(self, minio_available, test_bucket):
+        run_hash = f"sync_{uuid.uuid4().hex[:8]}"
+        prefix = f"test-sync/{uuid.uuid4().hex[:8]}"
+        src = _make_synced_registry(run_hash)
+
+        uri = src.push_to_s3(
+            bucket=test_bucket, prefix=prefix,
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        assert uri == f"s3://{test_bucket}/{prefix}/"
+        src.close()
+
+        from joshpy.registry import RunRegistry
+
+        dst = RunRegistry(":memory:")
+        counts = dst.pull_from_s3(
+            bucket=test_bucket, prefix=prefix, mode="restore",
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        assert counts["cell_data"] == 2
+        rows = dst.conn.execute(
+            "SELECT run_hash, step, averageHeight FROM cell_data ORDER BY step"
+        ).fetchall()
+        assert rows == [(run_hash, 0, 5.0), (run_hash, 1, 6.0)]
+        assert dst.get_tags_by_run_hash(run_hash) == {"site": "JOTR001"}
+        dst.close()
+
+    def test_pull_restore_replaces_local_state(self, minio_available, test_bucket):
+        run_hash = f"sync_{uuid.uuid4().hex[:8]}"
+        prefix = f"test-sync/{uuid.uuid4().hex[:8]}"
+        src = _make_synced_registry(run_hash)
+        src.push_to_s3(
+            bucket=test_bucket, prefix=prefix,
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        src.close()
+
+        # dst has unrelated pre-existing local data that "restore" should wipe.
+        other_hash = f"other_{uuid.uuid4().hex[:8]}"
+        dst = _make_synced_registry(other_hash, replicate_steps=(0,))
+        dst.pull_from_s3(
+            bucket=test_bucket, prefix=prefix, mode="restore",
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        hashes = {r[0] for r in dst.conn.execute("SELECT run_hash FROM job_configs").fetchall()}
+        assert hashes == {run_hash}
+        dst.close()
+
+    def test_pull_merge_adds_without_overwriting_local(self, minio_available, test_bucket):
+        run_hash = f"sync_{uuid.uuid4().hex[:8]}"
+        prefix = f"test-sync/{uuid.uuid4().hex[:8]}"
+        src = _make_synced_registry(run_hash, replicate_steps=(0, 1))
+        src.push_to_s3(
+            bucket=test_bucket, prefix=prefix,
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        src.close()
+
+        local_only_hash = f"local_{uuid.uuid4().hex[:8]}"
+        dst = _make_synced_registry(local_only_hash, replicate_steps=(0,))
+        counts = dst.pull_from_s3(
+            bucket=test_bucket, prefix=prefix, mode="merge",
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        assert counts["cell_data"] == 2
+        hashes = {r[0] for r in dst.conn.execute("SELECT run_hash FROM job_configs").fetchall()}
+        assert hashes == {run_hash, local_only_hash}
+        local_rows = dst.conn.execute(
+            "SELECT COUNT(*) FROM cell_data WHERE run_hash = ?", [local_only_hash]
+        ).fetchone()[0]
+        assert local_rows == 1
+        dst.close()
+
+    def test_pull_merge_dedupes_cell_data_on_replay(self, minio_available, test_bucket):
+        """Re-running the same merge must not duplicate cell_data rows.
+
+        cell_id is a per-registry surrogate, so this also guards against the
+        (fixed) bug where deduping cell_data by cell_id silently drops or
+        duplicates rows depending on accidental ID overlap between registries.
+        """
+        run_hash = f"sync_{uuid.uuid4().hex[:8]}"
+        prefix = f"test-sync/{uuid.uuid4().hex[:8]}"
+        src = _make_synced_registry(run_hash, replicate_steps=(0, 1))
+        src.push_to_s3(
+            bucket=test_bucket, prefix=prefix,
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        src.close()
+
+        from joshpy.registry import RunRegistry
+
+        dst = RunRegistry(":memory:")
+        for _ in range(2):
+            dst.pull_from_s3(
+                bucket=test_bucket, prefix=prefix, mode="merge",
+                endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY,
+                secret_key=MINIO_SECRET_KEY, use_ssl=False,
+            )
+        count = dst.conn.execute("SELECT COUNT(*) FROM cell_data").fetchone()[0]
+        assert count == 2
+        dst.close()
+
+    def test_push_requires_explicit_prefix_for_in_memory_registry(self, minio_available):
+        from joshpy.registry import RunRegistry
+
+        registry = RunRegistry(":memory:")
+        with pytest.raises(ValueError):
+            registry.push_to_s3(bucket="whatever")
+        registry.close()
+
+    def test_default_prefix_derived_from_registry_filename(
+        self, minio_available, test_bucket, tmp_path
+    ):
+        from joshpy.jobs import JobConfig
+        from joshpy.registry import RunRegistry
+
+        run_hash = f"sync_{uuid.uuid4().hex[:8]}"
+        db_name = f"jotr_sensitivity_{uuid.uuid4().hex[:8]}"
+        db_path = tmp_path / f"{db_name}.duckdb"
+        src = RunRegistry(str(db_path))
+        session_id = src.create_session(
+            config=JobConfig(
+                source_path=Path("/tmp/sim.josh"), simulation="Main", replicates=1
+            ),
+            experiment_name="sync-test",
+        )
+        src.register_run(
+            session_id=session_id, run_hash=run_hash, josh_path="/tmp/sim.josh",
+            config_content="test", file_mappings=None, parameters={},
+        )
+        uri = src.push_to_s3(
+            bucket=test_bucket,
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        assert uri == f"s3://{test_bucket}/run-registries/{db_name}/"
+        src.close()
+
+    def test_open_s3_registries_joins_without_merging(self, minio_available, test_bucket):
+        """Cross-registry analysis should read both published registries live,
+        without ever copying either into a local table."""
+        from joshpy.registry import open_s3_registries
+
+        name_a = f"exp_a_{uuid.uuid4().hex[:8]}"
+        name_b = f"exp_b_{uuid.uuid4().hex[:8]}"
+        hash_a = f"hash_{uuid.uuid4().hex[:8]}"
+        hash_b = f"hash_{uuid.uuid4().hex[:8]}"
+
+        reg_a = _make_synced_registry(hash_a, replicate_steps=(0,))
+        reg_a.push_to_s3(
+            bucket=test_bucket, prefix=f"run-registries/{name_a}",
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        reg_a.close()
+
+        reg_b = _make_synced_registry(hash_b, replicate_steps=(0,))
+        reg_b.push_to_s3(
+            bucket=test_bucket, prefix=f"run-registries/{name_b}",
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        )
+        reg_b.close()
+
+        with open_s3_registries(
+            [name_a, name_b], bucket=test_bucket,
+            endpoint=MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY, secret_key=MINIO_SECRET_KEY,
+            use_ssl=False,
+        ) as conn:
+            df = conn.execute(
+                f"""
+                SELECT 'a' AS experiment, run_hash FROM "{name_a}".cell_data
+                UNION ALL
+                SELECT 'b' AS experiment, run_hash FROM "{name_b}".cell_data
+                """
+            ).df()
+
+        assert set(df["run_hash"]) == {hash_a, hash_b}

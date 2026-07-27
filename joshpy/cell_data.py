@@ -523,7 +523,10 @@ class DiagnosticQueries:
         Args:
             variable: Variable name to analyze (e.g., "treeCount", "avg.height").
             param_name: Parameter name to group by. Use ``"label"`` to group
-                by run labels assigned via ``registry.label_run()``.
+                by run labels assigned via ``registry.label_run()``. If
+                *param_name* isn't a declared sweep parameter (i.e. not in
+                ``registry.list_config_columns()``), falls back to free-form
+                tags set via ``registry.tag_by_run_hash(run_hash, <param_name>=...)``.
             step: Optional timestep filter (if None, groups by step).
             aggregation: Aggregation function (AVG, MIN, MAX, SUM).
             show_sql: If True, print the SQL query for copy/paste modification.
@@ -536,6 +539,7 @@ class DiagnosticQueries:
         quoted_var = _quote_identifier(variable)
         step_filter = "AND cd.step = ?" if step else ""
         step_group = "" if step else ", cd.step"
+        params: list[Any] = [step] if step else []
 
         if param_name == "label":
             # Group by run labels from job_configs table
@@ -552,7 +556,7 @@ class DiagnosticQueries:
                 GROUP BY jc.label{step_group}
                 ORDER BY param_value, cd.step
             """
-        else:
+        elif param_name in self.registry.list_config_columns():
             quoted_param = _quote_identifier(param_name)
             query = f"""
                 SELECT
@@ -567,8 +571,25 @@ class DiagnosticQueries:
                 GROUP BY cp.{quoted_param}{step_group}
                 ORDER BY param_value, cd.step
             """
-
-        params: list[Any] = [step] if step else []
+        else:
+            # Not a declared sweep parameter -- fall back to free-form tags
+            # (registry.tag_by_run_hash), joined on the validated "run_hash"
+            # scope rather than assuming a config_parameters column exists.
+            json_path = f"$.{param_name}"
+            params = [json_path, json_path] + params
+            query = f"""
+                SELECT
+                    json_extract_string(rt.tags, ?) as param_value,
+                    cd.step,
+                    {aggregation}({quoted_var}) as mean_value,
+                    STDDEV({quoted_var}) as std_value,
+                    COUNT(*) as n_cells
+                FROM cell_data cd
+                JOIN run_tags rt ON rt.key = cd.run_hash AND rt.scope = 'run_hash'
+                WHERE json_extract_string(rt.tags, ?) IS NOT NULL {step_filter}
+                GROUP BY param_value{step_group}
+                ORDER BY param_value, cd.step
+            """
 
         if show_sql:
             self._print_sql(query, params)

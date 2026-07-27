@@ -16,7 +16,9 @@ organizing model files, configs, data, and results. This guide covers:
 4. **Config templating** (`.jshc.j2`) vs raw config files (`.jshc`)
 5. **Data directory helpers** to reduce file-mapping boilerplate
 6. **Run labels** for ad-hoc iteration and comparison
-7. **Cross-experiment tracking** with `ProjectCatalog`
+7. **Free-form tags** for grouping runs by anything a sweep parameter doesn't capture (e.g. a site)
+8. **Cross-experiment tracking** with `ProjectCatalog`
+9. **Publishing registries to S3** for sharing and cross-machine analysis
 
 These features compose with `SweepManager` (see [SweepManager Workflow](sweep-manager.qmd))
 and work identically for local and remote execution.
@@ -226,6 +228,104 @@ For a runnable end-to-end example, see
 [GridSpec Variant Sweeps](gridspec-variant-sweeps.qmd). For the manual
 `FileSweepParameter` approach, see
 [Sweeping Over External Data](external-data-sweep.qmd).
+
+## Tagging Runs for Custom Grouping
+
+GridSpec variants (above) sweep over an axis you declared up front, like
+`scenario`. Sometimes the grouping you actually care about didn't come from a
+sweep parameter at all -- e.g. a batch of runs dispatched independently across
+many field sites, where "site" was never a `ConfigSweepParameter`.
+`RunRegistry` has a `run_tags` sidecar table for exactly this: free-form JSON
+metadata attached to a run (or a session, or a single execution) without
+touching `config_parameters`, which is schema-mutating and one-value-per-run
+by construction.
+
+### Validated scopes
+
+Three tagging methods each check their target actually exists before writing:
+
+```{python}
+#| label: tags-setup
+from joshpy.registry import RunRegistry
+from joshpy.jobs import JobConfig
+
+registry = RunRegistry(":memory:")
+config = JobConfig(simulation="JoshuaTreeSim")
+session_id = registry.create_session(config=config, experiment_name="jotr_sites")
+
+for run_hash in ("hash_jotr001", "hash_jotr002"):
+    registry.register_run(
+        session_id, run_hash, "/tmp/sim.josh",
+        "maxGrowth = 50 meters", None, {"maxGrowth": 50},
+    )
+
+registry.tag_by_run_hash("hash_jotr001", site="JOTR001", biome="desert")
+registry.tag_by_run_hash("hash_jotr002", site="JOTR002", biome="desert")
+
+print(registry.get_tags_by_run_hash("hash_jotr001"))
+```
+
+`tag_by_session_id(session_id, **tags)` and `tag_by_run_id(run_id, **tags)`
+work the same way, for metadata scoped to a whole sweep session or a single
+execution rather than a run's configuration.
+
+### Grouping by a tag
+
+Once tagged, `DiagnosticQueries.get_parameter_comparison()`'s `group_by` picks
+up tag keys automatically for anything that isn't a declared sweep parameter
+-- no extra query code needed:
+
+```{python}
+#| label: tags-group-by
+run_id_1 = registry.start_run("hash_jotr001", session_id=session_id)
+registry.complete_run(run_id_1, exit_code=0)
+run_id_2 = registry.start_run("hash_jotr002", session_id=session_id)
+registry.complete_run(run_id_2, exit_code=0)
+
+registry.conn.execute("ALTER TABLE cell_data ADD COLUMN averageHeight DOUBLE")
+registry.conn.execute(
+    "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
+    "VALUES (?, 'hash_jotr001', 0, 0, 4.2)", [run_id_1],
+)
+registry.conn.execute(
+    "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
+    "VALUES (?, 'hash_jotr002', 0, 0, 5.1)", [run_id_2],
+)
+
+from joshpy.cell_data import DiagnosticQueries
+diag = DiagnosticQueries(registry)
+print(diag.get_parameter_comparison("averageHeight", "site"))
+```
+
+### Synthetic groupings and the reverse lookup
+
+`site="JOTR001"` above is a *value* shared by many run_hashes -- it isn't a
+column anywhere in the schema by itself. To attach metadata to the site
+*itself* (plot count, elevation) rather than to one particular run, use
+`tag_custom()` with your own scope name, and `find_tagged()` to go the other
+direction -- from a tag value back to every run_hash that carries it:
+
+```{python}
+#| label: tags-custom
+registry.tag_custom("JOTR001", scope="site", n_plots=12, elevation_m=850)
+print(registry.get_custom_tags("JOTR001", scope="site"))
+
+print(registry.find_tagged("site", "JOTR001"))
+```
+
+`tag_custom()` refuses the three validated scope names (`run_hash`,
+`session_id`, `run_id`) -- use the matching `tag_by_*` method for those, since
+it both validates the target exists and is what `group_by` already knows how
+to join against.
+
+```{python}
+#| label: tags-cleanup
+registry.close()
+```
+
+See [Best Practices](../best-practices.qmd#tagging-runs-with-free-form-metadata)
+for the full scope-by-scope join reference (which tables/columns each scope
+corresponds to).
 
 ## Model Templating (.josh.j2)
 
@@ -644,6 +744,74 @@ with catalog.open_registries(experiments) as conn:
     """).df()
 ```
 
+`open_registries()` is local-only -- it `ATTACH`es `.duckdb` files that already
+exist on disk. For registries published to S3 (below), the analogous
+cross-registry query is `open_s3_registries()`.
+
+## Sharing Registries via S3
+
+`RunRegistry` is a local DuckDB file by design -- DuckDB has no writable,
+concurrent-safe "live" database over S3, so there's no way to open one
+directly from `s3://`. What *is* supported is publishing a registry's tables
+to S3 as Parquet and restoring/merging them back, using the same S3/MinIO
+credentials `ingest_results()` already uses (`MINIO_ENDPOINT`,
+`MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, or explicit arguments).
+
+::: {.callout-note}
+These examples require a real S3/MinIO endpoint and aren't executed as part
+of this doc build.
+:::
+
+**Publish** a registry (defaults to `run-registries/<db filename stem>/` on
+the given bucket):
+
+```python
+uri = registry.push_to_s3(bucket="josh-batch-storage")
+# 's3://josh-batch-storage/run-registries/jotr_sensitivity/'
+```
+
+**Restore** rehydrates a registry from its own prior export -- e.g. on a new
+machine, or after deleting the local file. Existing rows are replaced with
+exactly what's published; table constraints (PKs, the `cell_id` sequence) are
+preserved, only the rows change:
+
+```python
+registry.pull_from_s3(bucket="josh-batch-storage", mode="restore")
+```
+
+**Merge** adds only rows this registry doesn't already have -- for bringing
+in more replicates of the *same* experiment from a teammate's machine or a
+batch worker publishing to the same prefix:
+
+```python
+registry.pull_from_s3(bucket="josh-batch-storage", mode="merge")
+```
+
+Don't use `merge` to combine genuinely different experiments into one
+registry -- see [Why Not Reuse Registries?](../best-practices.qmd#why-not-reuse-registries)
+for exactly why that risks ambiguous, hash-colliding data. To analyze several
+published registries together without merging their data, use
+`open_s3_registries()` -- the S3-hosted analogue of `catalog.open_registries()`
+above, opening each as a read-only schema of views:
+
+```python
+from joshpy.registry import open_s3_registries
+
+with open_s3_registries(
+    ["jotr_baseline", "jotr_dry"], bucket="josh-batch-storage"
+) as conn:
+    df = conn.execute("""
+        SELECT 'baseline' AS experiment, step, AVG(averageHeight)
+        FROM jotr_baseline.cell_data GROUP BY step
+        UNION ALL
+        SELECT 'dry' AS experiment, step, AVG(averageHeight)
+        FROM jotr_dry.cell_data GROUP BY step
+    """).df()
+```
+
+See [Sharing & Syncing via S3](../best-practices.qmd#sharing-syncing-via-s3)
+for the full restore/merge semantics.
+
 ## Cleanup
 
 ```{python}
@@ -655,4 +823,4 @@ catalog.close()
 
 - [SweepManager Workflow](sweep-manager.qmd) -- Parameter sweep orchestration
 - [Sweeping Over External Data](external-data-sweep.qmd) -- `FileSweepParameter` for data file sweeps
-- [Best Practices](../best-practices.qmd) -- Registry lifecycle, error diagnosis
+- [Best Practices](../best-practices.qmd) -- Registry lifecycle, error diagnosis, tagging, and S3 sync

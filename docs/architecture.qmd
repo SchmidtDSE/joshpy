@@ -292,6 +292,11 @@ erDiagram
         double averageHeight
         double treeCount
     }
+    run_tags {
+        varchar scope PK
+        varchar key PK
+        json tags
+    }
 ```
 
 Key design decisions:
@@ -307,6 +312,12 @@ Key design decisions:
   (e.g., `averageHeight DOUBLE`), added when data is loaded.
 - **Labels.** The `label` column on `job_configs` gives human-readable names to
   runs for ad-hoc iteration workflows.
+- **Tags are a sidecar, not a foreign key.** `run_tags` (`scope`, `key`) → JSON
+  is deliberately undeclared as a relationship: `tag_by_run_hash`/
+  `tag_by_session_id`/`tag_by_run_id` validate the target exists in Python,
+  then join by value equality (e.g. `rt.key = cd.run_hash`) -- the same
+  run_hash value is already denormalized across several tables, so there's no
+  single "owning" table to point a real FK at.
 
 ::: {.callout-tip title="Git provenance"}
 `create_session()` automatically records the current git HEAD hash (plus dirty
@@ -328,6 +339,9 @@ Analysis tools built on the registry:
   (`get_parameter_comparison`, `get_replicate_uncertainty`)
 - `registry.query(sql)` -- direct DuckDB SQL access
 - R can connect directly: `dbConnect(duckdb(), "experiment.duckdb", read_only = TRUE)`
+- `registry.push_to_s3()` / `pull_from_s3()` -- publish/restore via S3 Parquet;
+  `open_s3_registries()` -- cross-registry SQL without merging (see
+  [Best Practices](best-practices.qmd#sharing-syncing-via-s3))
 
 API: [RunRegistry](reference/registry.RunRegistry.qmd)
 | Tutorial: [Analysis & Visualization](tutorials/analysis.qmd)
@@ -384,6 +398,11 @@ A ProjectCatalog is an *index* -- it stores hashes and pointers, not simulation
 data. Each experiment's actual results live in a separate RunRegistry (`.duckdb`
 file). The catalog tells you *where* results are; the registry contains *what*
 the results are.
+
+`open_registries()` attaches local `.duckdb` files. For registries published to
+S3, `RunRegistry.open_s3_registries()` is the analogous cross-registry query,
+opening each as a read-only schema of views instead of merging their data --
+see [Best Practices](best-practices.qmd#sharing-syncing-via-s3).
 
 SweepManager integrates via `.with_catalog(catalog, experiment_name="...")` on the
 builder, which auto-registers the experiment on `build()` and updates status after

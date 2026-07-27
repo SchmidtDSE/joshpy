@@ -149,6 +149,142 @@ def configure_s3(
     )
 
 
+def _resolve_s3_credentials(
+    endpoint: str | None,
+    access_key: str | None,
+    secret_key: str | None,
+) -> tuple[str, str, str]:
+    """Resolve S3/MinIO credentials from explicit args, falling back to env vars.
+
+    Mirrors the resolution ``ingest_results()`` does internally
+    (``MINIO_ENDPOINT``, ``MINIO_ACCESS_KEY``, ``MINIO_SECRET_KEY``), shared
+    here for :func:`RunRegistry.push_to_s3` / :func:`RunRegistry.pull_from_s3`
+    / :func:`open_s3_registries`.
+
+    Raises:
+        RuntimeError: If any credential is missing after falling back to env vars.
+    """
+    import os
+
+    endpoint = endpoint or os.environ.get("MINIO_ENDPOINT", "")
+    access_key = access_key or os.environ.get("MINIO_ACCESS_KEY", "")
+    secret_key = secret_key or os.environ.get("MINIO_SECRET_KEY", "")
+    if not endpoint or not access_key or not secret_key:
+        raise RuntimeError(
+            "S3 credentials required: pass endpoint/access_key/secret_key, or "
+            "set MINIO_ENDPOINT, MINIO_ACCESS_KEY, and MINIO_SECRET_KEY."
+        )
+    return endpoint, access_key, secret_key
+
+
+def _default_s3_prefix(db_path: Path | str) -> str:
+    """Derive a default S3 prefix from a registry's own file name.
+
+    Mirrors the local convention (one registry file per experiment, named
+    after it) so the S3 layout needs no separate naming scheme to learn.
+
+    Raises:
+        ValueError: If db_path is ``":memory:"`` (no filename to derive from).
+    """
+    db_str = str(db_path)
+    if db_str == ":memory:":
+        raise ValueError(
+            "An in-memory registry has no filename to derive an S3 prefix "
+            "from -- pass prefix= explicitly."
+        )
+    return f"run-registries/{Path(db_str).stem}"
+
+
+# Registry tables synced by push_to_s3()/pull_from_s3(), in parent-first
+# (foreign-key-safe) order. run_tags has no FK and sorts anywhere, but is kept
+# last for clarity since it's metadata, not run/result data.
+REGISTRY_SYNC_TABLES: tuple[str, ...] = (
+    "sweep_sessions",
+    "job_configs",
+    "session_configs",
+    "config_parameters",
+    "job_runs",
+    "run_outputs",
+    "cell_data",
+    "run_tags",
+)
+
+
+@contextmanager
+def open_s3_registries(
+    names: list[str],
+    *,
+    bucket: str,
+    prefix_template: str = "run-registries/{name}",
+    endpoint: str | None = None,
+    access_key: str | None = None,
+    secret_key: str | None = None,
+    use_ssl: bool | None = None,
+) -> Iterator[Any]:
+    """Open multiple S3-published registries for read-only cross-registry queries.
+
+    The recommended way to analyze several experiments together: each
+    registry pushed via :meth:`RunRegistry.push_to_s3` is exposed as a schema
+    of views (``<name>.<table>``) reading directly from its Parquet export --
+    nothing is copied or merged locally. JOIN/UNION across the views instead
+    of pulling multiple experiments' data into one registry, which risks the
+    hash-collision ambiguity a reused registry already has (see
+    "One registry per experiment" in the best-practices guide) -- merging
+    genuinely different experiments' rows together has the same problem.
+
+    Args:
+        names: Registry names to open (as pushed -- i.e. the ``name`` each
+            was published under via ``push_to_s3``).
+        bucket: S3/MinIO bucket containing the published registries.
+        prefix_template: Format string mapping a name to its S3 prefix.
+            Default matches ``push_to_s3``'s own default layout.
+        endpoint: S3 endpoint. Falls back to ``MINIO_ENDPOINT`` env var.
+        access_key: S3 access key. Falls back to ``MINIO_ACCESS_KEY``.
+        secret_key: S3 secret key. Falls back to ``MINIO_SECRET_KEY``.
+        use_ssl: Use HTTPS. See :func:`configure_s3`.
+
+    Yields:
+        An in-memory DuckDB connection with each registry attached as a
+        same-named schema of views.
+
+    Examples:
+        >>> with open_s3_registries(
+        ...     ["jotr_baseline", "jotr_dry"], bucket="josh-batch-storage"
+        ... ) as conn:
+        ...     df = conn.execute('''
+        ...         SELECT 'baseline' AS experiment, step, AVG(averageHeight)
+        ...         FROM jotr_baseline.cell_data GROUP BY step
+        ...         UNION ALL
+        ...         SELECT 'dry' AS experiment, step, AVG(averageHeight)
+        ...         FROM jotr_dry.cell_data GROUP BY step
+        ...     ''').df()
+    """
+    _check_duckdb()
+    endpoint, access_key, secret_key = _resolve_s3_credentials(endpoint, access_key, secret_key)
+    conn = duckdb.connect(":memory:")
+    configure_s3(conn, endpoint, access_key, secret_key, use_ssl=use_ssl)
+    try:
+        for name in names:
+            prefix = prefix_template.format(name=name).rstrip("/")
+            conn.execute(f'CREATE SCHEMA IF NOT EXISTS "{name}"')
+            for table in REGISTRY_SYNC_TABLES:
+                remote = f"s3://{bucket}/{prefix}/{table}.parquet"
+                try:
+                    conn.execute(
+                        f'CREATE VIEW "{name}".{table} AS '
+                        f"SELECT * FROM read_parquet('{remote}')"
+                    )
+                except Exception:
+                    # Table wasn't published (e.g. older export predating a
+                    # schema addition, or genuinely empty/never pushed) --
+                    # skip it, same as ProjectCatalog.open_registries() skips
+                    # missing local registry files.
+                    continue
+        yield conn
+    finally:
+        conn.close()
+
+
 def _get_git_hash() -> str | None:
     """Get current git HEAD hash, or None if not in a git repo."""
     try:
@@ -814,6 +950,476 @@ class RunRegistry:
         """
         path_str = str(path)
         self._conn.execute(f"COPY {table} TO '{path_str}' (FORMAT CSV, HEADER)")
+
+    # ========== S3 Sync ==========
+
+    def _describe_remote_columns(self, remote: str) -> dict[str, str]:
+        """Column name -> DuckDB SQL type for a published table's Parquet file.
+
+        Dict order matches the Parquet file's own column order.
+        """
+        rows = self.conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{remote}')").fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def _sync_table_columns(self, table: str, remote_cols: dict[str, str]) -> None:
+        """Add any columns present in *remote_cols* but missing from *table* locally.
+
+        ``config_parameters`` and ``cell_data`` have dynamically-added
+        columns (sweep parameters, export variables respectively) that only
+        exist once something has locally registered/ingested that specific
+        column. A destination registry that's never seen a given parameter
+        or variable needs it added before ``INSERT``/merge can reference it.
+        """
+        local_cols = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                [table],
+            ).fetchall()
+        }
+        for col_name, col_type in remote_cols.items():
+            if col_name not in local_cols:
+                quoted = _quote_identifier(col_name)
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {quoted} {col_type}")
+
+    def push_to_s3(
+        self,
+        *,
+        bucket: str,
+        prefix: str | None = None,
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        use_ssl: bool | None = None,
+        tables: tuple[str, ...] | None = None,
+    ) -> str:
+        """Publish this registry's tables to S3 as Parquet, one file per table.
+
+        Overwrites whatever is currently at the destination prefix with this
+        registry's current state. This publishes *this* registry only -- it
+        does not read or touch any other registry. Pair with
+        :meth:`pull_from_s3` (same registry, restoring or adding replicates)
+        or :func:`open_s3_registries` (querying several published registries
+        together, read-only, without merging them).
+
+        Args:
+            bucket: S3/MinIO bucket to publish under.
+            prefix: S3 key prefix. Defaults to ``run-registries/<name>``
+                where ``<name>`` is this registry's own filename stem --
+                matching the "one registry file per experiment, named after
+                it" convention already used locally. Required if this
+                registry is ``":memory:"``.
+            endpoint: S3 endpoint. Falls back to ``MINIO_ENDPOINT`` env var.
+            access_key: S3 access key. Falls back to ``MINIO_ACCESS_KEY``.
+            secret_key: S3 secret key. Falls back to ``MINIO_SECRET_KEY``.
+            use_ssl: Use HTTPS. See :func:`configure_s3`.
+            tables: Tables to publish. Defaults to all of
+                :data:`REGISTRY_SYNC_TABLES`.
+
+        Returns:
+            The ``s3://bucket/prefix/`` URI published to.
+
+        Examples:
+            >>> registry.push_to_s3(bucket="josh-batch-storage")
+            's3://josh-batch-storage/run-registries/jotr_sensitivity/'
+        """
+        # Resolve the (purely local) prefix before touching credentials/network,
+        # so a ":memory:" registry without an explicit prefix fails fast with
+        # the right error instead of first demanding S3 credentials it'll
+        # never use.
+        resolved_prefix = (prefix or _default_s3_prefix(self.db_path)).strip("/")
+        endpoint, access_key, secret_key = _resolve_s3_credentials(endpoint, access_key, secret_key)
+        configure_s3(self.conn, endpoint, access_key, secret_key, use_ssl=use_ssl)
+
+        for table in tables or REGISTRY_SYNC_TABLES:
+            remote = f"s3://{bucket}/{resolved_prefix}/{table}.parquet"
+            self.conn.execute(f"COPY (SELECT * FROM {table}) TO '{remote}' (FORMAT PARQUET)")
+
+        return f"s3://{bucket}/{resolved_prefix}/"
+
+    def pull_from_s3(
+        self,
+        *,
+        bucket: str,
+        prefix: str | None = None,
+        mode: str = "restore",
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        use_ssl: bool | None = None,
+        tables: tuple[str, ...] | None = None,
+    ) -> dict[str, int]:
+        """Pull a registry's Parquet export from S3 back into this registry.
+
+        Args:
+            bucket: S3/MinIO bucket the registry was published to.
+            prefix: S3 key prefix. Defaults to ``run-registries/<name>``,
+                matching :meth:`push_to_s3`'s default. Required if this
+                registry is ``":memory:"``.
+            mode: ``"restore"`` (default) or ``"merge"``:
+
+                - ``"restore"``: this registry's tables are emptied and
+                  replaced with exactly what's at *prefix*. Use this to
+                  rehydrate a local registry from its own prior
+                  ``push_to_s3`` export -- e.g. on a new machine, or after
+                  deleting the local file. The table schemas (constraints,
+                  the ``cell_id`` sequence) are preserved; only the rows
+                  change.
+                - ``"merge"``: adds rows from *prefix* that this registry
+                  doesn't already have (by primary key, or for ``cell_data``
+                  by ``(run_hash, replicate)`` since ``cell_id`` is a local
+                  surrogate with no meaning across registries); existing
+                  local rows are never touched. **Only use this to bring in
+                  more runs
+                  of the *same* experiment** (e.g. a teammate's machine or a
+                  batch worker publishing to the same prefix) -- not to
+                  combine genuinely different experiments into one registry.
+                  Per the one-registry-per-experiment guidance, merging
+                  unrelated experiments risks the same hash-collision
+                  ambiguity a reused registry already warns about. To
+                  analyze multiple experiments together without merging
+                  their data, use :func:`open_s3_registries` instead.
+            endpoint: S3 endpoint. Falls back to ``MINIO_ENDPOINT`` env var.
+            access_key: S3 access key. Falls back to ``MINIO_ACCESS_KEY``.
+            secret_key: S3 secret key. Falls back to ``MINIO_SECRET_KEY``.
+            use_ssl: Use HTTPS. See :func:`configure_s3`.
+            tables: Tables to pull. Defaults to all of
+                :data:`REGISTRY_SYNC_TABLES`.
+
+        Returns:
+            Dict mapping table name -> number of rows loaded from S3 (for
+            ``"merge"``, only the newly-inserted rows; for ``"restore"``,
+            the full row count now in the table).
+
+        Raises:
+            ValueError: If mode is not ``"restore"`` or ``"merge"``.
+        """
+        if mode not in ("restore", "merge"):
+            raise ValueError(f"mode must be 'restore' or 'merge', got {mode!r}")
+
+        # Same reasoning as push_to_s3: resolve the local prefix before
+        # touching credentials/network.
+        resolved_prefix = (prefix or _default_s3_prefix(self.db_path)).strip("/")
+        endpoint, access_key, secret_key = _resolve_s3_credentials(endpoint, access_key, secret_key)
+        configure_s3(self.conn, endpoint, access_key, secret_key, use_ssl=use_ssl)
+        sync_tables = tables or REGISTRY_SYNC_TABLES
+
+        if mode == "restore":
+            # Child-first delete (FK order), same reasoning as drop_run().
+            for table in reversed(sync_tables):
+                self.conn.execute(f"DELETE FROM {table}")
+
+        rows: dict[str, int] = {}
+        for table in sync_tables:
+            remote = f"s3://{bucket}/{resolved_prefix}/{table}.parquet"
+            # config_parameters and cell_data have dynamically-added columns
+            # (sweep parameters, export variables) that only exist locally
+            # once something has registered/ingested that specific column --
+            # a destination registry that's never seen a given parameter/
+            # variable needs it added before the two sides' columns line up.
+            remote_cols = self._describe_remote_columns(remote)
+            self._sync_table_columns(table, remote_cols)
+
+            if mode == "restore":
+                col_list = ", ".join(_quote_identifier(c) for c in remote_cols)
+                self.conn.execute(
+                    f"INSERT INTO {table} ({col_list}) "
+                    f"SELECT {col_list} FROM read_parquet('{remote}')"
+                )
+                count = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+            elif table == "cell_data":
+                # cell_id is a per-registry surrogate (auto-incremented
+                # locally) with no cross-registry meaning -- deduping on it
+                # would either drop real rows or duplicate them depending on
+                # accidental ID overlap between registries. Dedup instead on
+                # (run_hash, replicate), the same identity loaded_replicates()
+                # already uses everywhere else in this codebase, and let
+                # cell_id be freshly assigned by the local sequence.
+                cols = [
+                    row[0]
+                    for row in self.conn.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'cell_data' AND column_name != 'cell_id' "
+                        "ORDER BY ordinal_position"
+                    ).fetchall()
+                ]
+                quoted_cols = ", ".join(_quote_identifier(c) for c in cols)
+                select_clause = ", ".join(
+                    _quote_identifier(c) if c in remote_cols else f"NULL AS {_quote_identifier(c)}"
+                    for c in cols
+                )
+                before = self.conn.execute("SELECT COUNT(*) FROM cell_data").fetchone()[0]
+                self.conn.execute(
+                    f"""
+                    INSERT INTO cell_data ({quoted_cols})
+                    SELECT {select_clause} FROM read_parquet('{remote}') AS src
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM cell_data cd
+                        WHERE cd.run_hash = src.run_hash AND cd.replicate = src.replicate
+                    )
+                    """
+                )
+                after = self.conn.execute("SELECT COUNT(*) FROM cell_data").fetchone()[0]
+                count = (after - before,)
+            else:
+                cols = [
+                    row[0]
+                    for row in self.conn.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = ? ORDER BY ordinal_position",
+                        [table],
+                    ).fetchall()
+                ]
+                quoted_cols = ", ".join(_quote_identifier(c) for c in cols)
+                select_clause = ", ".join(
+                    _quote_identifier(c) if c in remote_cols else f"NULL AS {_quote_identifier(c)}"
+                    for c in cols
+                )
+                before = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                self.conn.execute(
+                    f"INSERT OR IGNORE INTO {table} ({quoted_cols}) "
+                    f"SELECT {select_clause} FROM read_parquet('{remote}')"
+                )
+                after = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                count = (after - before,)
+            rows[table] = count[0] if count else 0
+
+        if "cell_data" in sync_tables:
+            # restore's INSERT above supplies explicit cell_id values from
+            # the source; keep the local sequence ahead of them so future
+            # inserts don't collide. (merge never carries cell_id over, so
+            # this is a no-op there beyond the harmless MAX() check.)
+            max_id = self.conn.execute("SELECT MAX(cell_id) FROM cell_data").fetchone()[0]
+            if max_id is not None:
+                current = self.conn.execute(
+                    "SELECT last_value FROM duckdb_sequences() WHERE sequence_name = 'cell_id_seq'"
+                ).fetchone()[0]
+                current = current or 0
+                if current < max_id:
+                    self.conn.execute(
+                        f"SELECT nextval('cell_id_seq') FROM range({int(max_id) - int(current)})"
+                    )
+
+        return rows
+
+    # ========== Tags (free-form metadata) ==========
+    #
+    # `run_tags` is a sidecar table (scope, key) -> JSON, kept deliberately
+    # separate from config_parameters/cell_data so tagging never mutates a
+    # production table's schema. Three *validated* scopes correspond to real,
+    # already-existing identifiers in this registry -- each checks the target
+    # exists before writing, and each is documented below against exactly the
+    # tables/columns it joins:
+    #
+    #   scope="run_hash"    -- joins job_configs.run_hash, config_parameters.run_hash,
+    #                          job_runs.run_hash, cell_data.run_hash (all the same
+    #                          value, denormalized on purpose). Set via
+    #                          tag_by_run_hash(); DiagnosticQueries.get_parameter_comparison
+    #                          auto-joins this scope when param_name isn't a
+    #                          declared sweep parameter.
+    #   scope="session_id"  -- joins sweep_sessions.session_id, job_runs.session_id,
+    #                          session_configs.session_id. Set via tag_by_session_id().
+    #   scope="run_id"      -- joins job_runs.run_id, cell_data.run_id, run_outputs.run_id
+    #                          (via job_runs). Set via tag_by_run_id().
+    #
+    # Anything else (e.g. a site code shared by many run_hashes) is a
+    # *synthetic* grouping with no corresponding column anywhere in the
+    # schema -- there is no join for it, by definition. Use tag_custom() /
+    # get_custom_tags() for that, and find_tagged() to recover the set of
+    # keys sharing a tag value (e.g. every run_hash at a given site).
+
+    #: Scopes with a validated tag_by_*()/get_tags_by_*() pair. tag_custom()
+    #: refuses these -- use the dedicated method instead, which checks the
+    #: target actually exists.
+    _VALIDATED_TAG_SCOPES = ("run_hash", "session_id", "run_id")
+
+    def _upsert_tags(self, scope: str, key: str, tags: dict[str, Any]) -> None:
+        """Merge *tags* into whatever's already stored at (scope, key)."""
+        if not tags:
+            raise ValueError("at least one tag=value pair is required")
+
+        existing = self.conn.execute(
+            "SELECT tags FROM run_tags WHERE scope = ? AND key = ?", [scope, key]
+        ).fetchone()
+        merged = json.loads(existing[0]) if existing else {}
+        merged.update(tags)
+
+        self.conn.execute(
+            """
+            INSERT INTO run_tags (scope, key, tags, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT (scope, key)
+            DO UPDATE SET tags = excluded.tags, updated_at = excluded.updated_at
+            """,
+            [scope, key, json.dumps(merged)],
+        )
+
+    def _read_tags(self, scope: str, key: str) -> dict[str, Any]:
+        result = self.conn.execute(
+            "SELECT tags FROM run_tags WHERE scope = ? AND key = ?", [scope, key]
+        ).fetchone()
+        return json.loads(result[0]) if result else {}
+
+    def tag_by_run_hash(self, run_hash: str, **tags: Any) -> None:
+        """Attach free-form JSON metadata to a run_hash.
+
+        Joins ``job_configs.run_hash`` / ``config_parameters.run_hash`` /
+        ``job_runs.run_hash`` / ``cell_data.run_hash`` -- all the same value.
+        ``DiagnosticQueries.get_parameter_comparison(variable, param_name)``
+        picks these up automatically for any ``param_name`` that isn't a
+        declared sweep parameter.
+
+        Calling this again for the same run_hash merges into the existing
+        tags (like ``dict.update``) rather than replacing them.
+
+        Args:
+            run_hash: The run to tag.
+            **tags: Tag values to set, in whatever shape you like.
+
+        Raises:
+            KeyError: If run_hash isn't a registered run.
+            ValueError: If no tags are given.
+
+        Examples:
+            >>> registry.tag_by_run_hash(run_hash, site="JOTR001", biome="desert")
+        """
+        if self.get_config_by_hash(run_hash) is None:
+            raise KeyError(f"No run found with hash '{run_hash}'")
+        self._upsert_tags("run_hash", run_hash, tags)
+
+    def get_tags_by_run_hash(self, run_hash: str) -> dict[str, Any]:
+        """Get the tags attached to a run_hash, or ``{}`` if none."""
+        return self._read_tags("run_hash", run_hash)
+
+    def tag_by_session_id(self, session_id: str, **tags: Any) -> None:
+        """Attach free-form JSON metadata to a sweep session.
+
+        Joins ``sweep_sessions.session_id`` / ``job_runs.session_id`` /
+        ``session_configs.session_id``.
+
+        Args:
+            session_id: The session to tag.
+            **tags: Tag values to set, in whatever shape you like.
+
+        Raises:
+            KeyError: If session_id isn't a registered session.
+            ValueError: If no tags are given.
+        """
+        if self.get_session(session_id) is None:
+            raise KeyError(f"No session found with id '{session_id}'")
+        self._upsert_tags("session_id", session_id, tags)
+
+    def get_tags_by_session_id(self, session_id: str) -> dict[str, Any]:
+        """Get the tags attached to a session_id, or ``{}`` if none."""
+        return self._read_tags("session_id", session_id)
+
+    def tag_by_run_id(self, run_id: str, **tags: Any) -> None:
+        """Attach free-form JSON metadata to a specific run execution.
+
+        Distinct from ``tag_by_run_hash``: a run_hash is *what* was run and
+        can have several run_ids (e.g. under the ``pool`` collision policy);
+        a run_id is *which execution* produced a given replicate. Joins
+        ``job_runs.run_id`` / ``cell_data.run_id`` / ``run_outputs.run_id``
+        (the latter via ``job_runs``).
+
+        Args:
+            run_id: The run execution to tag.
+            **tags: Tag values to set, in whatever shape you like.
+
+        Raises:
+            KeyError: If run_id isn't a recorded execution.
+            ValueError: If no tags are given.
+        """
+        if self.get_run(run_id) is None:
+            raise KeyError(f"No run execution found with id '{run_id}'")
+        self._upsert_tags("run_id", run_id, tags)
+
+    def get_tags_by_run_id(self, run_id: str) -> dict[str, Any]:
+        """Get the tags attached to a run_id, or ``{}`` if none."""
+        return self._read_tags("run_id", run_id)
+
+    def tag_custom(self, key: str, *, scope: str, **tags: Any) -> None:
+        """Attach free-form JSON metadata under a synthetic scope.
+
+        For groupings that don't correspond to any column in the schema --
+        e.g. a site code shared by many run_hashes. Unlike ``tag_by_run_hash``
+        etc., there's no existence check (nothing to check against) and no
+        automatic join anywhere: recover matching keys with ``find_tagged()``,
+        then use them as a plain filter (e.g. ``run_hash IN (...)``) against
+        whatever table you're actually querying.
+
+        Args:
+            key: The key to tag (e.g. ``"JOTR001"``).
+            scope: Name for this synthetic grouping (e.g. ``"site"``). Must
+                not be one of the validated scopes (``run_hash``,
+                ``session_id``, ``run_id``) -- use the matching ``tag_by_*``
+                method for those instead.
+            **tags: Tag values to set, in whatever shape you like.
+
+        Raises:
+            ValueError: If scope is a validated scope, or no tags are given.
+
+        Examples:
+            >>> registry.tag_custom("JOTR001", scope="site", n_plots=12)
+        """
+        if scope in self._VALIDATED_TAG_SCOPES:
+            raise ValueError(
+                f"scope={scope!r} is one of joshpy's own validated scopes -- "
+                f"use tag_by_{scope}() instead, which checks the target exists."
+            )
+        self._upsert_tags(scope, key, tags)
+
+    def get_custom_tags(self, key: str, *, scope: str) -> dict[str, Any]:
+        """Get the tags attached to *key* under a synthetic *scope*."""
+        return self._read_tags(scope, key)
+
+    def list_tag_keys(self, *, scope: str) -> list[str]:
+        """List all distinct tag keys in use for a scope.
+
+        Args:
+            scope: Scope to inspect (e.g. ``"run_hash"``, or a custom scope
+                like ``"site"``).
+
+        Returns:
+            Sorted list of tag keys (e.g. ``["biome", "site"]``).
+        """
+        rows = self.conn.execute(
+            "SELECT DISTINCT json_keys(tags) FROM run_tags WHERE scope = ?",
+            [scope],
+        ).fetchall()
+        keys: set[str] = set()
+        for row in rows:
+            keys.update(row[0] or [])
+        return sorted(keys)
+
+    def find_tagged(self, tag_key: str, value: Any, *, scope: str = "run_hash") -> list[str]:
+        """Find every key in *scope* whose tags[tag_key] == value.
+
+        The reverse of ``get_tags_by_*`` / ``get_custom_tags``: given a tag
+        value (e.g. a site code), recover every key (e.g. run_hash) that
+        carries it -- the many-to-one direction, since several keys can
+        share the same tag value.
+
+        Args:
+            tag_key: The tag key to match on (e.g. ``"site"``).
+            value: The value to match (compared as text).
+            scope: Scope to search. Defaults to ``"run_hash"``.
+
+        Returns:
+            List of matching keys (e.g. run_hashes), in no particular order.
+
+        Examples:
+            >>> registry.tag_by_run_hash("hash1", site="JOTR001")
+            >>> registry.tag_by_run_hash("hash2", site="JOTR001")
+            >>> registry.find_tagged("site", "JOTR001")
+            ['hash1', 'hash2']
+        """
+        json_path = f"$.{tag_key}"
+        rows = self.conn.execute(
+            "SELECT key FROM run_tags WHERE scope = ? AND json_extract_string(tags, ?) = ?",
+            [scope, json_path, str(value)],
+        ).fetchall()
+        return [row[0] for row in rows]
 
     # ========== Filter Context Managers ==========
 

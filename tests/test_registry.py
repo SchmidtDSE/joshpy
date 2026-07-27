@@ -2307,5 +2307,165 @@ class TestRegistryBusyError(unittest.TestCase):
         self.assertTrue(issubclass(RegistryBusyError, RuntimeError))
 
 
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestRunTags(unittest.TestCase):
+    """Tests for the run_tags metadata sidecar's scoped tagging methods."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        config = _make_config()
+        self.session_id = self.registry.create_session(config=config)
+        self.registry.register_run(
+            self.session_id, "hash_aaa111", "/sim.josh",
+            "param = 10 count", None, {"param": 10},
+        )
+
+    def tearDown(self):
+        self.registry.close()
+
+    # -- tag_by_run_hash --------------------------------------------------
+
+    def test_tag_by_run_hash_set_and_get(self):
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001", biome="desert")
+        self.assertEqual(
+            self.registry.get_tags_by_run_hash("hash_aaa111"),
+            {"site": "JOTR001", "biome": "desert"},
+        )
+
+    def test_get_tags_by_run_hash_missing_returns_empty(self):
+        self.assertEqual(self.registry.get_tags_by_run_hash("hash_aaa111"), {})
+
+    def test_tag_by_run_hash_merges_into_existing(self):
+        """Calling tag_by_run_hash again adds/overwrites keys, doesn't replace the dict."""
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.tag_by_run_hash("hash_aaa111", biome="desert")
+        self.assertEqual(
+            self.registry.get_tags_by_run_hash("hash_aaa111"),
+            {"site": "JOTR001", "biome": "desert"},
+        )
+
+    def test_tag_by_run_hash_overwrites_same_key(self):
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR002")
+        self.assertEqual(self.registry.get_tags_by_run_hash("hash_aaa111"), {"site": "JOTR002"})
+
+    def test_tag_by_run_hash_requires_at_least_one_tag(self):
+        with self.assertRaises(ValueError):
+            self.registry.tag_by_run_hash("hash_aaa111")
+
+    def test_tag_by_run_hash_unknown_hash_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.tag_by_run_hash("nonexistent", site="JOTR001")
+
+    # -- tag_by_session_id --------------------------------------------------
+
+    def test_tag_by_session_id_set_and_get(self):
+        self.registry.tag_by_session_id(self.session_id, analyst="jsmith")
+        self.assertEqual(
+            self.registry.get_tags_by_session_id(self.session_id), {"analyst": "jsmith"}
+        )
+
+    def test_tag_by_session_id_unknown_id_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.tag_by_session_id("nonexistent", analyst="jsmith")
+
+    # -- tag_by_run_id --------------------------------------------------
+
+    def test_tag_by_run_id_set_and_get(self):
+        run_id = self.registry.start_run("hash_aaa111", session_id=self.session_id)
+        self.registry.tag_by_run_id(run_id, worker="node-3")
+        self.assertEqual(self.registry.get_tags_by_run_id(run_id), {"worker": "node-3"})
+
+    def test_tag_by_run_id_unknown_id_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.tag_by_run_id("nonexistent", worker="node-3")
+
+    # -- tag_custom (synthetic scopes) -------------------------------------
+
+    def test_tag_custom_scope_not_run_hash(self):
+        """tag_custom keys on something other than run_hash (e.g. a site spanning many runs)."""
+        self.registry.tag_custom("JOTR001", scope="site", n_plots=12)
+        self.assertEqual(self.registry.get_tags_by_run_hash("JOTR001"), {})
+        self.assertEqual(
+            self.registry.get_custom_tags("JOTR001", scope="site"), {"n_plots": 12}
+        )
+
+    def test_tag_custom_rejects_validated_scope(self):
+        """tag_custom refuses run_hash/session_id/run_id -- use the dedicated method."""
+        with self.assertRaises(ValueError) as ctx:
+            self.registry.tag_custom("hash_aaa111", scope="run_hash", site="JOTR001")
+        self.assertIn("tag_by_run_hash", str(ctx.exception))
+
+    def test_tag_custom_requires_at_least_one_tag(self):
+        with self.assertRaises(ValueError):
+            self.registry.tag_custom("JOTR001", scope="site")
+
+    # -- list_tag_keys --------------------------------------------------
+
+    def test_list_tag_keys(self):
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001", biome="desert")
+        self.assertEqual(self.registry.list_tag_keys(scope="run_hash"), ["biome", "site"])
+
+    def test_list_tag_keys_empty(self):
+        self.assertEqual(self.registry.list_tag_keys(scope="run_hash"), [])
+
+    def test_list_tag_keys_scoped(self):
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.tag_custom("JOTR001", scope="site", n_plots=12)
+        self.assertEqual(self.registry.list_tag_keys(scope="run_hash"), ["site"])
+        self.assertEqual(self.registry.list_tag_keys(scope="site"), ["n_plots"])
+
+    # -- find_tagged (reverse lookup) --------------------------------------
+
+    def test_find_tagged_returns_all_matching_keys(self):
+        """Many run_hashes can share the same tag value (e.g. a location ID)."""
+        self.registry.register_run(
+            self.session_id, "hash_bbb222", "/sim.josh",
+            "param = 20 count", None, {"param": 20},
+        )
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.tag_by_run_hash("hash_bbb222", site="JOTR001")
+        self.assertEqual(
+            set(self.registry.find_tagged("site", "JOTR001")),
+            {"hash_aaa111", "hash_bbb222"},
+        )
+
+    def test_find_tagged_no_match_returns_empty(self):
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.assertEqual(self.registry.find_tagged("site", "JOTR002"), [])
+
+    def test_find_tagged_custom_scope(self):
+        self.registry.tag_custom("JOTR001", scope="site", biome="desert")
+        self.registry.tag_custom("JOTR002", scope="site", biome="desert")
+        self.assertEqual(
+            set(self.registry.find_tagged("biome", "desert", scope="site")),
+            {"JOTR001", "JOTR002"},
+        )
+
+    # -- group_by wiring --------------------------------------------------
+
+    def test_group_by_falls_back_to_tags(self):
+        """DiagnosticQueries.get_parameter_comparison should pick up run_hash
+        tag keys that aren't declared config_parameters columns."""
+        from joshpy.cell_data import DiagnosticQueries
+
+        run_id = self.registry.start_run("hash_aaa111", session_id=self.session_id)
+        self.registry.complete_run(run_id, exit_code=0)
+        self.registry.conn.execute("ALTER TABLE cell_data ADD COLUMN averageHeight DOUBLE")
+        self.registry.conn.execute(
+            "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
+            "VALUES (?, 'hash_aaa111', 0, 0, 5.0)",
+            [run_id],
+        )
+        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+
+        diag = DiagnosticQueries(self.registry)
+        df = diag.get_parameter_comparison("averageHeight", "site")
+        self.assertEqual(list(df["param_value"]), ["JOTR001"])
+        self.assertEqual(list(df["mean_value"]), [5.0])
+
+
 if __name__ == "__main__":
     unittest.main()
