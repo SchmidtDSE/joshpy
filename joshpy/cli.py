@@ -549,7 +549,10 @@ class PreprocessBatchConfig:
         crs: CRS to use when reading the file.
         x_coord: Name of X coordinate dimension.
         y_coord: Name of Y coordinate dimension.
-        time_dim: Name of time dimension.
+        time_dim: Name of time dimension. Ignored if ``no_time_dim`` is True.
+        no_time_dim: Treat the source as having no time dimension, such as a
+            flat raster (emits ``--no-time-dim``, takes precedence over
+            ``time_dim``).
         timestep: Single timestep to process.
         default_value: Default value to fill grid spaces before copying data.
         parallel: Enable parallel processing of patches within each timestep.
@@ -557,6 +560,13 @@ class PreprocessBatchConfig:
         no_wait: If True, dispatch and exit without polling for completion.
         poll_interval: Polling interval in seconds (optional).
         timeout: Maximum seconds to wait for completion (optional).
+        time_type: Declared JSHD time axis type: ``"count"`` or ``"ISO"``.
+        time_start: First count coordinate or ISO start date.
+        time_unit: Unit for a count axis.
+        time_count: Number of declared temporal coordinates.
+        time_increment: Increment between count coordinates.
+        time_interval: ISO-8601 date period between ISO dates (e.g. ``"P1M"``).
+        time_instant: Single count coordinate or ISO date for one output slice.
     """
 
     script: Path
@@ -570,6 +580,7 @@ class PreprocessBatchConfig:
     x_coord: str | None = None
     y_coord: str | None = None
     time_dim: str | None = None
+    no_time_dim: bool = False
     timestep: int | None = None
     default_value: float | None = None
     parallel: bool = False
@@ -577,6 +588,13 @@ class PreprocessBatchConfig:
     no_wait: bool = False
     poll_interval: int | None = None
     timeout: int | None = None
+    time_type: str | None = None
+    time_start: str | int | float | None = None
+    time_unit: str | None = None
+    time_count: int | None = None
+    time_increment: int | float | None = None
+    time_interval: str | None = None
+    time_instant: str | int | float | None = None
 
 
 @dataclass(frozen=True)
@@ -1077,7 +1095,9 @@ class JoshCLI:
             args.append(f"--x-coord={config.x_coord}")
         if config.y_coord is not None:
             args.append(f"--y-coord={config.y_coord}")
-        if config.time_dim is not None:
+        if config.no_time_dim:
+            args.append("--no-time-dim")
+        elif config.time_dim is not None:
             args.append(f"--time-dim={config.time_dim}")
         if config.timestep is not None:
             args.append(f"--timestep={config.timestep}")
@@ -1087,6 +1107,20 @@ class JoshCLI:
             args.append("--parallel")
         if config.amend:
             args.append("--amend")
+        if config.time_type is not None:
+            args.append(f"--time-type={config.time_type}")
+        if config.time_start is not None:
+            args.append(f"--time-start={config.time_start}")
+        if config.time_unit is not None:
+            args.append(f"--time-unit={config.time_unit}")
+        if config.time_count is not None:
+            args.append(f"--time-count={config.time_count}")
+        if config.time_increment is not None:
+            args.append(f"--time-increment={config.time_increment}")
+        if config.time_interval is not None:
+            args.append(f"--time-interval={config.time_interval}")
+        if config.time_instant is not None:
+            args.append(f"--time-instant={config.time_instant}")
         if config.no_wait:
             args.append("--no-wait")
         if config.poll_interval is not None:
