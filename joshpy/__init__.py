@@ -39,6 +39,7 @@ from joshpy.cli import (
     ExportPaths,
     InspectImportsConfig,
     ImportInfo,
+    InspectExternalsConfig,
     FlattenConfig,
     StageFromMinioConfig,
     StageToMinioConfig,
@@ -58,13 +59,17 @@ from joshpy.jfr import (
     build_resource_profile,
 )
 
-# JSHD loading module (always available)
-from joshpy.jshd import (
-    JshdMetadata,
-    JshdData,
-    load_jshd,
-    plot_jshd,
-)
+# Optional JSHD loading module (requires numpy, pandas, matplotlib)
+try:
+    from joshpy.jshd import (
+        JshdMetadata,
+        JshdData,
+        load_jshd,
+        plot_jshd,
+    )
+    HAS_JSHD = True
+except ImportError:
+    HAS_JSHD = False
 
 # Config parser (always available, no external deps)
 from joshpy.config_parser import parse_jshc, parse_jshc_content
@@ -214,6 +219,7 @@ __all__ = [
     "ExportPaths",
     "InspectImportsConfig",
     "ImportInfo",
+    "InspectExternalsConfig",
     "FlattenConfig",
     "StageFromMinioConfig",
     "StageToMinioConfig",
@@ -233,6 +239,7 @@ __all__ = [
     "JshdData",
     "load_jshd",
     "plot_jshd",
+    "HAS_JSHD",
     # Config parser
     "parse_jshc",
     "parse_jshc_content",

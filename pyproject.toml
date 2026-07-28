@@ -1,6 +1,6 @@
 [project]
 name = "joshpy"
-version = "0.0.9.18"
+version = "0.0.9.19"
 authors = [
   { name="Nick Gondek", email="npg@berkeley.edu" },
   { name="A Samuel Pottinger", email="sam.pottinger@berkeley.edu" },
@@ -33,6 +33,13 @@ joshpy = ["py.typed"]
 "Changelog" = "https://github.com/SchmidtDSE/josh#version-history"
 
 [project.optional-dependencies]
+# Tier 0: explicit alias for the base install (jar + cli + jfr + config_parser + debug +
+# targets -- only `requests` as a dependency). Empty on purpose: `pip install
+# "joshpy[minimal]"` behaves identically to `pip install joshpy`, but naming it lets a
+# requirements file self-document *why* joshpy is there (e.g. josh's CI/docs tooling,
+# which wants the jar/CLI wrappers without pandas/duckdb/optuna).
+minimal = []
+
 # Tier 1: Job templating (lightweight)
 jobs = [
   "jinja2>=3.0",

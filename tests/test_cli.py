@@ -1321,9 +1321,10 @@ class TestInspectExports(unittest.TestCase):
 
     @patch("subprocess.run")
     def test_inspect_exports_includes_json_flag_when_false(self, mock_run):
-        """inspect_exports includes --json flag when json_output is False.
+        """inspect_exports includes --no-json flag when json_output is False.
 
-        Note: --json is a toggle flag. Default is true, so passing --json toggles it OFF.
+        Note: --json/--no-json both default to false; omitting both already gives
+        JSON, so --no-json is added to request human-readable output instead.
         """
         mock_run.return_value = MagicMock(
             returncode=0,
@@ -1345,7 +1346,7 @@ class TestInspectExports(unittest.TestCase):
             pass  # Expected - can't parse human-readable as JSON
 
         cmd = mock_run.call_args[0][0]
-        self.assertIn("--json", cmd)  # Included to toggle OFF JSON
+        self.assertIn("--no-json", cmd)  # Included to request plain text
 
     @patch("subprocess.run")
     def test_inspect_exports_raises_on_failure(self, mock_run):
@@ -1613,7 +1614,7 @@ class TestInspectImportsArgs(unittest.TestCase):
             cli.inspect_imports(
                 InspectImportsConfig(entry=entry, json_output=False)
             )
-        self.assertIn("--json", mock_execute.call_args[0][0])
+        self.assertIn("--no-json", mock_execute.call_args[0][0])
 
     @patch.object(JoshCLI, "_execute")
     def test_raises_on_failure(self, mock_execute):
@@ -1711,6 +1712,143 @@ class TestInspectImportsIntegration(unittest.TestCase):
             entry.write_text("start simulation Main\nend simulation\n")
             imports = cli.inspect_imports(InspectImportsConfig(entry=entry))
         self.assertEqual(imports, [])
+
+
+class TestInspectExternalsConfig(unittest.TestCase):
+    """Tests for InspectExternalsConfig dataclass."""
+
+    def test_basic_creation(self):
+        """Basic config with only the required entry field."""
+        from joshpy.cli import InspectExternalsConfig
+
+        config = InspectExternalsConfig(entry=Path("simulation.josh"))
+        self.assertEqual(config.entry, Path("simulation.josh"))
+        self.assertIsNone(config.import_base)
+        self.assertTrue(config.json_output)
+
+    def test_frozen(self):
+        """Config should be immutable."""
+        from joshpy.cli import InspectExternalsConfig
+
+        config = InspectExternalsConfig(entry=Path("simulation.josh"))
+        with self.assertRaises(AttributeError):
+            config.entry = Path("other.josh")  # type: ignore
+
+
+class TestInspectExternalsArgs(unittest.TestCase):
+    """Arg-building tests for inspect-externals (mocked execution)."""
+
+    JAR_MODE = JarMode.DEV
+
+    @patch.object(JoshCLI, "_execute")
+    def test_builds_args_and_parses_json(self, mock_execute):
+        from joshpy.cli import InspectExternalsConfig
+
+        mock_execute.return_value = MagicMock(
+            success=True,
+            exit_code=0,
+            stdout='{"entry": "/m/model.josh", "externals": ["precipitation", "temperature"]}',
+            stderr="",
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text("start patch Default\n  temp.init = sample external temperature\n")
+            externals = cli.inspect_externals(
+                InspectExternalsConfig(entry=entry, import_base=Path(tmp))
+            )
+
+        args = mock_execute.call_args[0][0]
+        self.assertEqual(args[0], "inspect-externals")
+        self.assertIn("--import-base", args)
+        # --json/--no-json both default to false; omitting both already gives JSON.
+        self.assertNotIn("--json", args)
+        self.assertNotIn("--no-json", args)
+        self.assertEqual(externals, ["precipitation", "temperature"])
+
+    @patch.object(JoshCLI, "_execute")
+    def test_human_readable_requests_no_json(self, mock_execute):
+        from joshpy.cli import InspectExternalsConfig
+
+        mock_execute.return_value = MagicMock(
+            success=True, exit_code=0, stdout='{"externals": []}', stderr=""
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text("start simulation Main\nend simulation\n")
+            cli.inspect_externals(
+                InspectExternalsConfig(entry=entry, json_output=False)
+            )
+        self.assertIn("--no-json", mock_execute.call_args[0][0])
+
+    @patch.object(JoshCLI, "_execute")
+    def test_raises_on_failure(self, mock_execute):
+        from joshpy.cli import InspectExternalsConfig
+
+        mock_execute.return_value = MagicMock(
+            success=False, exit_code=3, stdout="", stderr="Cannot find imported file"
+        )
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "model.josh"
+            entry.write_text('import "nope.josh"\n')
+            with self.assertRaises(RuntimeError):
+                cli.inspect_externals(InspectExternalsConfig(entry=entry))
+
+
+class TestInspectExternalsIntegration(unittest.TestCase):
+    """Integration tests for inspect-externals using the DEV jar."""
+
+    JAR_MODE = JarMode.DEV
+    JAVA_PATH = Path(__file__).parent.parent / ".pixi" / "envs" / "default" / "bin" / "java"
+
+    def _cli(self):
+        if not self.JAVA_PATH.exists():
+            self.skipTest(f"Java not found at: {self.JAVA_PATH}")
+        cli = JoshCLI(josh_jar=self.JAR_MODE, java_path=str(self.JAVA_PATH))
+        help_result = cli._execute(["--help"])
+        if "inspect-externals" not in help_result.stdout:
+            self.skipTest(
+                "Cached dev jar predates the inspect-externals command "
+                "(run `pixi run get-jars --force` to refresh it)"
+            )
+        return cli
+
+    def test_finds_external_in_imported_file(self):
+        """An external reference in an imported file is still discovered."""
+        from joshpy.cli import InspectExternalsConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "overlays").mkdir()
+            (root / "overlays" / "weather.josh").write_text(
+                "start patch Default\n"
+                "  precipitation.init = sample external precipitation\n"
+                "end patch\n"
+            )
+            entry = root / "model.josh"
+            entry.write_text(
+                'import "overlays/weather.josh"\n\n'
+                "start simulation Main\n"
+                "  grid.size = 10 count\n"
+                "end simulation\n"
+            )
+            externals = cli.inspect_externals(
+                InspectExternalsConfig(entry=entry, import_base=root)
+            )
+        self.assertEqual(externals, ["precipitation"])
+
+    def test_no_external_reference_is_empty(self):
+        from joshpy.cli import InspectExternalsConfig
+
+        cli = self._cli()
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "plain.josh"
+            entry.write_text("start simulation Main\nend simulation\n")
+            externals = cli.inspect_externals(InspectExternalsConfig(entry=entry))
+        self.assertEqual(externals, [])
 
 
 class TestStreamOutput(unittest.TestCase):
