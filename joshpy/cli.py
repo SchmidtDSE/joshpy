@@ -732,6 +732,27 @@ class ImportInfo:
 
 
 @dataclass(frozen=True)
+class InspectExternalsConfig:
+    """Arguments for 'java -jar joshsim.jar inspect-externals' command.
+
+    Lists every external data resource a model reads, including reads that only appear
+    in imported files (imports are flattened first, mirroring InspectImportsConfig).
+    Names are reported without a file extension -- the corresponding preprocessed data
+    file is that name plus ``.jshd`` or ``.jshdz``.
+
+    Attributes:
+        entry: Path to the entry Josh file to inspect.
+        import_base: Directory used as the resolution root for the entry file's relative
+            imports. Defaults to the entry file's own directory.
+        json_output: Request JSON output (default: True).
+    """
+
+    entry: Path
+    import_base: Path | None = None
+    json_output: bool = True
+
+
+@dataclass(frozen=True)
 class FlattenConfig:
     """Arguments for 'java -jar joshsim.jar flatten' command.
 
@@ -1475,10 +1496,10 @@ class JoshCLI:
         """
         args = ["inspect-exports", str(config.script.resolve()), config.simulation]
 
-        # Note: --json is a toggle flag with default=true. Passing --json toggles it OFF.
-        # So we only add --json when json_output is False (to get human-readable output).
+        # --json/--no-json default to false/false; omitting both already gives JSON, so
+        # --no-json is only added to request human-readable output instead.
         if not config.json_output:
-            args.append("--json")
+            args.append("--no-json")
 
         result = self._execute(args, timeout=timeout, jfr=jfr)
 
@@ -1547,11 +1568,11 @@ class JoshCLI:
         if config.import_base is not None:
             args.extend(["--import-base", str(config.import_base.resolve())])
 
-        # --json is a toggle flag with default=true (as in inspect-exports).
-        # Passing --json toggles it OFF, so only add it when the caller wants
-        # the human-readable format instead.
+        # --json/--no-json default to false/false (as in inspect-exports); omitting
+        # both already gives JSON, so --no-json is only added to request the
+        # human-readable format instead.
         if not config.json_output:
-            args.append("--json")
+            args.append("--no-json")
 
         result = self._execute(args, timeout=timeout, jfr=jfr)
 
@@ -1571,6 +1592,49 @@ class JoshCLI:
             )
             for item in data.get("imports", [])
         ]
+
+    def inspect_externals(
+        self,
+        config: InspectExternalsConfig,
+        timeout: float | None = None,
+        jfr: JfrConfig | None = None,
+    ) -> list[str]:
+        """List the external data resources a Josh model reads.
+
+        Wraps ``joshsim inspect-externals``, reusing josh's own import-flattening
+        and discovery pass so a resource read only from an imported file is still
+        reported.
+
+        Args:
+            config: Inspect-externals configuration (entry, optional import_base).
+            timeout: Timeout in seconds.
+            jfr: Optional JFR profiling configuration.
+
+        Returns:
+            Sorted external resource names (no file extension), as the command
+            reports them.
+
+        Raises:
+            RuntimeError: If inspect-externals fails (missing file, parse error,
+                or a rejected import).
+        """
+        args = ["inspect-externals", str(config.entry.resolve())]
+        if config.import_base is not None:
+            args.extend(["--import-base", str(config.import_base.resolve())])
+
+        if not config.json_output:
+            args.append("--no-json")
+
+        result = self._execute(args, timeout=timeout, jfr=jfr)
+
+        if not result.success:
+            raise RuntimeError(
+                f"inspect-externals failed (exit code {result.exit_code}): "
+                f"{result.stderr}"
+            )
+
+        data = json.loads(result.stdout)
+        return [str(name) for name in data.get("externals", [])]
 
     def flatten(
         self,
