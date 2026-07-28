@@ -1,5 +1,6 @@
 """Tests for joshpy.grid (GridSpec)."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -1005,6 +1006,400 @@ class TestGridSpecPreprocessBatch(unittest.TestCase):
             )
 
             self.assertNotIn("cover", grid.files)
+
+
+class TestGridSpecPreprocessBatchStaging(unittest.TestCase):
+    """Tests for the batch staging-directory fix.
+
+    Regression coverage for the bug where preprocess_*_batch() rendered its
+    stub script into bare system /tmp: josh's preprocessBatch derives its
+    upload scope from the script's *parent directory* and requires the data
+    file to resolve as a path inside it (PreprocessBatchCommand.resolveInputDir /
+    resolveDataFileRelativeToInputDir). A script in /tmp with the real data
+    file living elsewhere meant every call staged (uploaded) everything else
+    in /tmp before failing with "dataFile is outside input directory" --
+    burning minutes uploading unrelated files and never succeeding.
+
+    These tests verify the fix directly: the script and data file are
+    colocated in a fresh, isolated directory (via a symlink, not a copy, to
+    avoid duplicating large geospatial files -- matching
+    joshpy.batch_orchestrator.assemble_batch_workdir's existing convention),
+    that directory contains nothing else, and it's cleaned up in every case.
+    Several tests reimplement josh's own validation/staging logic in Python
+    as an executable contract check, since the real logic lives in the JAR
+    and can't be exercised without it.
+    """
+
+    def _make_grid(self, tmpdir):
+        return GridSpec(
+            name="test",
+            output_dir=Path(tmpdir),
+            size_m=30,
+            low=(33.9, -116.05),
+            high=(33.95, -116.0),
+            steps=10,
+        )
+
+    def _mock_cli(self, success=True):
+        cli = MagicMock()
+        mock_result = MagicMock()
+        mock_result.success = success
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        cli.preprocess_batch.return_value = mock_result
+        return cli, mock_result
+
+    def _capture_config(self, cli):
+        """Rig cli.preprocess_batch to capture the config and a directory
+        snapshot while the staging dir still exists (before the finally
+        block removes it).
+
+        Filesystem facts about config.data_file (is_symlink, content, the
+        symlink's resolved target) must be captured *here*, inside the
+        side_effect -- the staging directory is gone by the time the caller
+        inspects the return value, since preprocess_*_batch()'s finally
+        block removes it right after this call returns.
+        """
+        captured: dict = {}
+
+        def _side_effect(config):
+            captured["config"] = config
+            captured["staging_dir"] = config.script.parent
+            captured["staging_dir_existed"] = config.script.parent.is_dir()
+            captured["entries"] = sorted(p.name for p in config.script.parent.iterdir())
+            captured["data_file_is_symlink"] = config.data_file.is_symlink()
+            captured["data_file_resolved_target"] = config.data_file.resolve()
+            captured["data_file_content"] = config.data_file.read_bytes()
+            # Mirrors PreprocessBatchCommand.stageDirectory()'s
+            # Files.walk(inputDir).filter(Files::isRegularFile) -- Python's
+            # Path.is_file() follows symlinks the same way Java's default
+            # Files.isRegularFile(Path) does.
+            input_dir = config.script if config.script.is_dir() else config.script.parent
+            captured["uploaded_files"] = [p for p in input_dir.rglob("*") if p.is_file()]
+            mock_result = MagicMock()
+            mock_result.success = True
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            return mock_result
+
+        cli.preprocess_batch.side_effect = _side_effect
+        return captured
+
+    # -- Colocation: script and data file share one directory -------------
+
+    def test_geotiff_batch_colocates_script_and_data_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "real_data"
+            real_data_dir.mkdir()
+            tif = real_data_dir / "cover.tif"
+            tif.write_bytes(b"fake tif bytes")
+
+            grid.preprocess_geotiff_batch(
+                cli, target="gke-test", josh_name="cover",
+                data_file=tif, band=0, units="percent", timestep=0,
+            )
+
+            config = captured["config"]
+            self.assertEqual(config.script.parent, config.data_file.parent)
+            # And specifically NOT the real data file's own directory --
+            # this is the fix, not an accident of the two dirs matching.
+            self.assertNotEqual(config.data_file.parent, real_data_dir)
+
+    def test_netcdf_batch_colocates_script_and_data_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "real_data"
+            real_data_dir.mkdir()
+            nc = real_data_dir / "tas.nc"
+            nc.write_bytes(b"fake netcdf bytes")
+
+            grid.preprocess_netcdf_batch(
+                cli, target="gke-test", josh_name="futureTemp",
+                data_file=nc, variable="tas", units="K",
+            )
+
+            config = captured["config"]
+            self.assertEqual(config.script.parent, config.data_file.parent)
+            self.assertNotEqual(config.data_file.parent, real_data_dir)
+
+    def test_csv_batch_colocates_script_and_data_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "real_data"
+            real_data_dir.mkdir()
+            csv = real_data_dir / "stations.csv"
+            csv.write_bytes(b"longitude,latitude,precipitation\n")
+
+            grid.preprocess_csv_batch(
+                cli, target="gke-test", josh_name="stations",
+                data_file=csv, variable="precipitation", units="mm", timestep=0,
+            )
+
+            config = captured["config"]
+            self.assertEqual(config.script.parent, config.data_file.parent)
+            self.assertNotEqual(config.data_file.parent, real_data_dir)
+
+    # -- Symlink correctness: right kind of link, right content -----------
+
+    def test_staged_data_file_is_symlink_with_correct_content(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "real_data"
+            real_data_dir.mkdir()
+            nc = real_data_dir / "tas.nc"
+            nc.write_bytes(b"unique-marker-bytes-12345")
+
+            grid.preprocess_netcdf_batch(
+                cli, target="gke-test", josh_name="futureTemp",
+                data_file=nc, variable="tas", units="K",
+            )
+
+            self.assertTrue(captured["data_file_is_symlink"])
+            # Reading through the symlink returns the real file's content --
+            # the fix must not duplicate/truncate/corrupt the source data.
+            self.assertEqual(captured["data_file_content"], b"unique-marker-bytes-12345")
+            # The symlink's basename preserves the original filename/suffix
+            # (ExternalDataReaderFactory dispatches preprocessing by suffix).
+            self.assertEqual(captured["config"].data_file.name, "tas.nc")
+
+    def test_staged_data_file_symlink_target_is_the_real_absolute_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "real_data"
+            real_data_dir.mkdir()
+            tif = real_data_dir / "cover.tif"
+            tif.write_bytes(b"fake tif")
+
+            grid.preprocess_geotiff_batch(
+                cli, target="gke-test", josh_name="cover",
+                data_file=tif, band=0, units="percent", timestep=0,
+            )
+
+            self.assertEqual(captured["data_file_resolved_target"], tif.resolve())
+
+    # -- Minimal upload scope: nothing else in the staging directory ------
+
+    def test_staging_dir_contains_only_script_and_data_file(self):
+        """Directly verifies the fix for the reported bug: staging the
+        directory josh will upload must touch exactly two files, not
+        everything else that happens to share a parent with the script.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "real_data"
+            real_data_dir.mkdir()
+            nc = real_data_dir / "tas.nc"
+            nc.write_bytes(b"data")
+            # A sibling file in the real data directory must NOT get swept
+            # up -- only the one file the caller actually asked to preprocess.
+            (real_data_dir / "unrelated_sibling.nc").write_bytes(b"unrelated")
+
+            grid.preprocess_netcdf_batch(
+                cli, target="gke-test", josh_name="futureTemp",
+                data_file=nc, variable="tas", units="K",
+            )
+
+            self.assertEqual(len(captured["entries"]), 2)
+            self.assertIn("tas.nc", captured["entries"])
+            self.assertNotIn("unrelated_sibling.nc", captured["entries"])
+
+    # -- Cleanup: staging dir never leaks, on any outcome ------------------
+
+    def test_staging_dir_removed_after_success(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli(success=True)
+            captured = self._capture_config(cli)
+
+            tif = Path(tmpdir) / "cover.tif"
+            tif.write_bytes(b"fake tif")
+
+            grid.preprocess_geotiff_batch(
+                cli, target="gke-test", josh_name="cover",
+                data_file=tif, band=0, units="percent", timestep=0,
+            )
+
+            self.assertTrue(captured["staging_dir_existed"])  # existed mid-call
+            self.assertFalse(captured["staging_dir"].exists())  # gone after
+
+    def test_staging_dir_removed_after_dispatch_failure(self):
+        """A failed (not raised) dispatch must still clean up the staging dir."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli(success=False)
+
+            tif = Path(tmpdir) / "cover.tif"
+            tif.write_bytes(b"fake tif")
+
+            result = grid.preprocess_geotiff_batch(
+                cli, target="gke-test", josh_name="cover",
+                data_file=tif, band=0, units="percent", timestep=0,
+            )
+
+            self.assertFalse(result.success)
+            config = cli.preprocess_batch.call_args[0][0]
+            self.assertFalse(config.script.parent.exists())
+
+    def test_staging_dir_removed_when_cli_raises(self):
+        """An exception mid-dispatch must still clean up the staging dir,
+        and the exception must still propagate (no silent swallow)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            staging_dir_holder: dict = {}
+
+            def _raise(config):
+                staging_dir_holder["dir"] = config.script.parent
+                raise RuntimeError("simulated dispatch failure")
+
+            cli.preprocess_batch.side_effect = _raise
+
+            tif = Path(tmpdir) / "cover.tif"
+            tif.write_bytes(b"fake tif")
+
+            with self.assertRaises(RuntimeError):
+                grid.preprocess_geotiff_batch(
+                    cli, target="gke-test", josh_name="cover",
+                    data_file=tif, band=0, units="percent", timestep=0,
+                )
+
+            self.assertFalse(staging_dir_holder["dir"].exists())
+
+    def test_sequential_batch_calls_use_independent_staging_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            seen_dirs = []
+
+            def _side_effect(config):
+                seen_dirs.append(config.script.parent)
+                mock_result = MagicMock(success=True, stdout="", stderr="")
+                return mock_result
+
+            cli.preprocess_batch.side_effect = _side_effect
+
+            tif = Path(tmpdir) / "cover.tif"
+            tif.write_bytes(b"fake tif")
+
+            for _ in range(3):
+                grid.preprocess_geotiff_batch(
+                    cli, target="gke-test", josh_name="cover",
+                    data_file=tif, band=0, units="percent", timestep=0,
+                )
+
+            self.assertEqual(len(set(seen_dirs)), 3)  # all distinct
+            for d in seen_dirs:
+                self.assertFalse(d.exists())  # each cleaned up independently
+
+    # -- Contract tests: reimplement josh's own validation in Python ------
+    #
+    # The real staging/validation logic lives in
+    # PreprocessBatchCommand.java (resolveInputDir, resolveDataFileRelativeToInputDir,
+    # stageDirectory) and can't be exercised without the JAR. These tests port
+    # that logic verbatim into Python and run it against the paths our fix
+    # actually produces, as an executable spec of the remote contract.
+
+    @staticmethod
+    def _resolve_input_dir(script_path):
+        """Mirrors PreprocessBatchCommand.resolveInputDir()."""
+        return script_path if script_path.is_dir() else script_path.parent
+
+    @staticmethod
+    def _resolve_data_file_relative_to_input_dir(data_file_arg, input_dir):
+        """Mirrors PreprocessBatchCommand.resolveDataFileRelativeToInputDir().
+
+        Raises ValueError (standing in for Java's IllegalArgumentException)
+        under the same condition the JAR does.
+        """
+        data_file_path = Path(data_file_arg)
+        if not data_file_path.is_absolute():
+            return data_file_arg
+        input_dir_path = input_dir.absolute()
+        normalized_data_file = Path(os.path.normpath(str(data_file_path)))
+        try:
+            return str(normalized_data_file.relative_to(input_dir_path))
+        except ValueError:
+            raise ValueError(
+                f"dataFile '{data_file_arg}' is outside input directory "
+                f"'{input_dir}'. Data files must live under the input "
+                f"directory for batch dispatch."
+            ) from None
+
+    def test_contract_data_file_resolves_inside_input_dir(self):
+        """The exact check that was failing in the field must now pass."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "data" / "preprocessed"
+            real_data_dir.mkdir(parents=True)
+            nc = real_data_dir / "pr_historical_squeezed.nc"
+            nc.write_bytes(b"data")
+
+            grid.preprocess_netcdf_batch(
+                cli, target="gke-test", josh_name="hist",
+                data_file=nc, variable="pr", units="mm/day",
+            )
+
+            config = captured["config"]
+            # cli.preprocess_batch() passes absolute()-not-resolved paths on
+            # the CLI; reproduce that exact string, not a Python Path object,
+            # since normalize() in Java (unlike Python's relative_to on a
+            # resolved Path) never follows the symlink either.
+            script_arg = str(config.script.absolute())
+            data_file_arg = str(config.data_file.absolute())
+
+            input_dir = self._resolve_input_dir(Path(script_arg))
+            # Must not raise -- this is the exact failure mode reported.
+            relative = self._resolve_data_file_relative_to_input_dir(
+                data_file_arg, input_dir
+            )
+            self.assertEqual(relative, "pr_historical_squeezed.nc")
+
+    def test_contract_stage_directory_walk_uploads_exactly_two_files(self):
+        """Mirrors PreprocessBatchCommand.stageDirectory()'s
+        Files.walk(basePath).filter(Files::isRegularFile) -- Python's
+        Path.is_file() follows symlinks the same way Java's default
+        Files.isRegularFile(Path) does, so this is an accurate stand-in.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+            captured = self._capture_config(cli)
+
+            real_data_dir = Path(tmpdir) / "data" / "preprocessed"
+            real_data_dir.mkdir(parents=True)
+            nc = real_data_dir / "tas.nc"
+            nc.write_bytes(b"data")
+
+            grid.preprocess_netcdf_batch(
+                cli, target="gke-test", josh_name="futureTemp",
+                data_file=nc, variable="tas", units="K",
+            )
+
+            self.assertEqual(len(captured["uploaded_files"]), 2)
 
 
 class TestGridSpecVariants(unittest.TestCase):

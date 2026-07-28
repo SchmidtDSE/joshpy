@@ -1,5 +1,6 @@
 """Unit tests for the cli module."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -2660,6 +2661,60 @@ class TestPreprocessBatchNetcdf(unittest.TestCase):
         cmd = mock_run.call_args[0][0]
         self.assertIn("--no-time-dim", cmd)
         self.assertFalse(any(c.startswith("--time-dim=") for c in cmd))
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_symlinked_data_file_arg_is_not_resolved_through(self, mock_run, _mock_jar):
+        """preprocess_batch() must pass a symlink's own path, not resolve() through it.
+
+        preprocessBatch derives its upload scope from the script's parent
+        directory and requires data_file to resolve as a path inside it
+        (josh's PreprocessBatchCommand). GridSpec's batch methods satisfy
+        that by symlinking the real data file into the same directory as
+        the rendered stub script. If this method used Path.resolve() (which
+        follows symlinks) instead of Path.absolute(), the CLI arg would
+        silently become the symlink's real target -- outside the staged
+        directory -- defeating that colocation and reproducing the original
+        "dataFile is outside input directory" failure after uploading the
+        whole scope regardless.
+        """
+        from joshpy.cli import NetcdfPreprocessBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        with tempfile.TemporaryDirectory() as real_dir, \
+                tempfile.TemporaryDirectory() as staging_dir:
+            real_data_file = Path(real_dir) / "data.nc"
+            real_data_file.write_bytes(b"fake netcdf")
+
+            script_path = Path(staging_dir) / "Preprocess.josh"
+            script_path.write_text("start simulation Preprocess\nend simulation\n")
+
+            staged_data_file = Path(staging_dir) / "data.nc"
+            os.symlink(real_data_file.resolve(), staged_data_file)
+
+            cli.preprocess_batch(
+                NetcdfPreprocessBatchConfig(
+                    script=script_path,
+                    simulation="Preprocess",
+                    data_file=staged_data_file,
+                    variable="tas",
+                    units="K",
+                    output=Path(staging_dir) / "out.jshd",
+                    target="gke-test",
+                ),
+            )
+
+        cmd = mock_run.call_args[0][0]
+        pb_idx = cmd.index("preprocessBatch")
+        data_file_arg = cmd[pb_idx + 3]
+
+        # The passed arg must be the symlink's own path (inside staging_dir),
+        # not the real file it points to (inside real_dir).
+        self.assertEqual(Path(data_file_arg).parent, Path(staging_dir))
+        self.assertNotEqual(Path(data_file_arg).parent, Path(real_dir))
+        self.assertTrue(data_file_arg.endswith("data.nc"))
 
 
 class TestPreprocessBatchGeotiff(unittest.TestCase):

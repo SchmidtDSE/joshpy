@@ -42,6 +42,8 @@ Example::
 from __future__ import annotations
 
 import itertools
+import os
+import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -611,8 +613,8 @@ class GridSpec:
         path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
         return path
 
-    def _render_preprocess_script(self, step_count: int | None = None) -> Path:
-        """Render a minimal .josh file for preprocessing.
+    def _preprocess_script_content(self, step_count: int | None = None) -> str:
+        """Render the minimal .josh script content used to stub preprocessing.
 
         Args:
             step_count: Number of output slices the JAR must produce for
@@ -626,10 +628,10 @@ class GridSpec:
                 this call).
 
         Returns:
-            Path to a temporary .josh file. Caller must delete after use.
+            The .josh script source as a string.
         """
         steps_high = (step_count if step_count is not None else self.timestep_count) - 1
-        content = (
+        return (
             f"start simulation {_PREPROCESS_SIM_NAME}\n"
             f"  grid.size = {self.size_m} m\n"
             f"  grid.low = {self.low[0]} degrees latitude, "
@@ -643,12 +645,73 @@ class GridSpec:
             f"start patch Default\n"
             f"end patch\n"
         )
+
+    def _render_preprocess_script(self, step_count: int | None = None) -> Path:
+        """Render a minimal .josh file for local preprocessing.
+
+        Written directly into the OS temp directory (no directory scoping
+        needed): local ``preprocess()`` takes the script and data file as
+        independent paths with no staging step, unlike batch dispatch. See
+        :meth:`_render_batch_staging_dir` for the batch counterpart.
+
+        Args:
+            step_count: See :meth:`_preprocess_script_content`.
+
+        Returns:
+            Path to a temporary .josh file. Caller must delete after use.
+        """
         fd = tempfile.NamedTemporaryFile(
             mode="w", suffix=".josh", prefix="preprocess_", delete=False
         )
-        fd.write(content)
+        fd.write(self._preprocess_script_content(step_count))
         fd.close()
         return Path(fd.name)
+
+    def _render_batch_staging_dir(
+        self, data_file: str | Path, step_count: int | None = None
+    ) -> tuple[Path, Path]:
+        """Render a stub .josh script colocated with the data file for batch dispatch.
+
+        ``preprocessBatch`` stages (uploads to MinIO) the script's *parent
+        directory* as a unit, then requires the data file argument to
+        resolve as a path inside that same directory -- josh's
+        ``PreprocessBatchCommand`` derives the upload scope from
+        ``scriptFile.getParentFile()`` and rejects a data file outside it.
+        A script rendered into a shared location (e.g. bare ``/tmp``) with
+        the real data file living elsewhere therefore either uploads every
+        unrelated file alongside it before failing, or -- once the script's
+        directory is isolated but still doesn't contain the data file --
+        fails immediately without ever being able to succeed.
+
+        This creates a fresh, isolated temp directory containing only the
+        rendered script and a symlink to ``data_file`` (following
+        :func:`joshpy.batch_orchestrator.assemble_batch_workdir`'s existing
+        convention of symlinking rather than copying, so large geospatial
+        files aren't duplicated on disk). Staging that directory uploads
+        exactly those two entries, and the data file resolves as a direct
+        child of it.
+
+        Args:
+            data_file: Path to the real input data file to be staged
+                alongside the stub script.
+            step_count: See :meth:`_preprocess_script_content`.
+
+        Returns:
+            A ``(script_path, staged_data_file)`` tuple: the rendered
+            script's path, and the symlink path (inside the same directory)
+            the caller should pass as the batch config's ``data_file``.
+            Caller must remove the containing directory
+            (``script_path.parent``) after use.
+        """
+        staging_dir = Path(tempfile.mkdtemp(prefix="joshpy_preprocess_batch_"))
+        script_path = staging_dir / f"{_PREPROCESS_SIM_NAME}.josh"
+        script_path.write_text(self._preprocess_script_content(step_count))
+
+        data_file = Path(data_file)
+        staged_data_file = staging_dir / data_file.name
+        os.symlink(data_file.resolve(), staged_data_file)
+
+        return script_path, staged_data_file
 
     def _compute_output_path(
         self,
@@ -845,12 +908,12 @@ class GridSpec:
             variant,
             compress=compress,
         )
-        script_path = self._render_preprocess_script()
+        script_path, staged_data_file = self._render_batch_staging_dir(data_file)
         try:
             config = GeotiffPreprocessBatchConfig(
                 script=script_path,
                 simulation=_PREPROCESS_SIM_NAME,
-                data_file=Path(data_file),
+                data_file=staged_data_file,
                 band=band,
                 units=units,
                 output=output_path,
@@ -864,7 +927,7 @@ class GridSpec:
             )
             result = cli.preprocess_batch(config)
         finally:
-            script_path.unlink(missing_ok=True)
+            shutil.rmtree(script_path.parent, ignore_errors=True)
 
         if result.success and variant is None:
             self._register_file(josh_name, output_path, units)
@@ -1149,12 +1212,14 @@ class GridSpec:
             variant,
             compress=compress,
         )
-        script_path = self._render_preprocess_script(step_count=step_count)
+        script_path, staged_data_file = self._render_batch_staging_dir(
+            data_file, step_count=step_count
+        )
         try:
             config = NetcdfPreprocessBatchConfig(
                 script=script_path,
                 simulation=_PREPROCESS_SIM_NAME,
-                data_file=Path(data_file),
+                data_file=staged_data_file,
                 variable=variable,
                 units=units,
                 output=output_path,
@@ -1178,7 +1243,7 @@ class GridSpec:
             )
             result = cli.preprocess_batch(config)
         finally:
-            script_path.unlink(missing_ok=True)
+            shutil.rmtree(script_path.parent, ignore_errors=True)
 
         if result.success and variant is None:
             self._register_file(josh_name, output_path, units)
@@ -1315,12 +1380,12 @@ class GridSpec:
             variant,
             compress=compress,
         )
-        script_path = self._render_preprocess_script()
+        script_path, staged_data_file = self._render_batch_staging_dir(data_file)
         try:
             config = CsvPreprocessBatchConfig(
                 script=script_path,
                 simulation=_PREPROCESS_SIM_NAME,
-                data_file=Path(data_file),
+                data_file=staged_data_file,
                 variable=variable,
                 units=units,
                 output=output_path,
@@ -1334,7 +1399,7 @@ class GridSpec:
             )
             result = cli.preprocess_batch(config)
         finally:
-            script_path.unlink(missing_ok=True)
+            shutil.rmtree(script_path.parent, ignore_errors=True)
 
         if result.success and variant is None:
             self._register_file(josh_name, output_path, units)

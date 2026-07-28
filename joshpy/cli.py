@@ -1208,12 +1208,17 @@ class JoshCLI:
         Returns:
             CLIResult with execution details.
         """
-        # Build common args
+        # Build common args. Absolute (not resolved): batch dispatch derives its
+        # upload scope from script.parent, and requires data_file to resolve as a
+        # path inside it -- resolve() would follow a symlinked data_file (e.g. one
+        # GridSpec stages alongside the script to satisfy that scoping) straight
+        # through to its real target, silently stepping outside the intended
+        # directory. absolute() makes the path absolute without touching symlinks.
         args = [
             "preprocessBatch",
-            str(config.script.resolve()),
+            str(config.script.absolute()),
             config.simulation,
-            str(config.data_file.resolve()),
+            str(config.data_file.absolute()),
         ]
 
         # Variable/band differs by format
@@ -1224,7 +1229,7 @@ class JoshCLI:
 
         args.extend([
             config.units,
-            str(config.output.resolve()),
+            str(config.output.absolute()),
             f"--target={config.target}",
         ])
 
