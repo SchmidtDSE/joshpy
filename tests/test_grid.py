@@ -792,6 +792,221 @@ class TestGridSpecPreprocess(unittest.TestCase):
             self.assertEqual(grid.files["cover"]["units"], "fraction")
 
 
+class TestGridSpecPreprocessBatch(unittest.TestCase):
+    """Tests for the batch-dispatch preprocess_*_batch methods."""
+
+    def _make_grid(self, tmpdir):
+        return GridSpec(
+            name="test",
+            output_dir=Path(tmpdir),
+            size_m=30,
+            low=(33.9, -116.05),
+            high=(33.95, -116.0),
+            steps=10,
+        )
+
+    def _mock_cli(self, success=True):
+        cli = MagicMock()
+        mock_result = MagicMock()
+        mock_result.success = success
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+        cli.preprocess_batch.return_value = mock_result
+        return cli, mock_result
+
+    def test_preprocess_geotiff_batch_calls_cli(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            tif = Path(tmpdir) / "test.tif"
+            tif.write_bytes(b"fake tif")
+
+            grid.preprocess_geotiff_batch(
+                cli,
+                target="gke-test",
+                josh_name="cover",
+                data_file=tif,
+                band=0,
+                units="percent",
+                timestep=0,
+            )
+
+            cli.preprocess.assert_not_called()
+            cli.preprocess_batch.assert_called_once()
+            config_arg = cli.preprocess_batch.call_args[0][0]
+            self.assertEqual(config_arg.target, "gke-test")
+            self.assertEqual(config_arg.band, 0)
+            self.assertEqual(config_arg.units, "percent")
+            self.assertEqual(config_arg.simulation, "Preprocess")
+
+    def test_preprocess_geotiff_batch_registers_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli(success=True)
+
+            grid.preprocess_geotiff_batch(
+                cli,
+                target="gke-test",
+                josh_name="cover",
+                data_file=Path(tmpdir) / "test.tif",
+                band=0,
+                units="percent",
+                timestep=0,
+            )
+
+            self.assertIn("cover", grid.files)
+            self.assertEqual(grid.files["cover"]["path"], "cover.jshd")
+            self.assertEqual(grid.files["cover"]["units"], "percent")
+
+    def test_preprocess_geotiff_batch_failure_does_not_register(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli(success=False)
+
+            grid.preprocess_geotiff_batch(
+                cli,
+                target="gke-test",
+                josh_name="cover",
+                data_file=Path(tmpdir) / "test.tif",
+                band=0,
+                units="percent",
+                timestep=0,
+            )
+
+            self.assertNotIn("cover", grid.files)
+
+    def test_preprocess_netcdf_batch_forwards_temporal_axis_options(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_netcdf_batch(
+                cli,
+                target="gke-test",
+                josh_name="futureTemp",
+                data_file=Path(tmpdir) / "tas.nc",
+                variable="tas",
+                units="K",
+                time_type="ISO",
+                time_start="2026-01-01",
+                time_count=12,
+                time_interval="P1M",
+                time_instant="2026-01-01",
+            )
+
+            config = cli.preprocess_batch.call_args[0][0]
+            self.assertEqual(config.target, "gke-test")
+            self.assertEqual(config.time_type, "ISO")
+            self.assertEqual(config.time_start, "2026-01-01")
+            self.assertEqual(config.time_count, 12)
+            self.assertEqual(config.time_interval, "P1M")
+            self.assertEqual(config.time_instant, "2026-01-01")
+
+    def test_preprocess_netcdf_batch_passes_poll_options(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_netcdf_batch(
+                cli,
+                target="gke-test",
+                josh_name="futureTemp",
+                data_file=Path(tmpdir) / "tas.nc",
+                variable="tas",
+                units="K",
+                poll_interval=30,
+                timeout=1800,
+            )
+
+            config = cli.preprocess_batch.call_args[0][0]
+            self.assertEqual(config.poll_interval, 30)
+            self.assertEqual(config.timeout, 1800)
+
+    def _capture_stub_script(self, cli):
+        """Rig a mocked cli.preprocess_batch to capture the stub script's content.
+
+        The script is deleted (see preprocess_netcdf_batch's finally block)
+        before preprocess_netcdf_batch() returns, so content has to be read
+        from inside the mock's side_effect, while the file still exists.
+        """
+        captured: dict[str, str] = {}
+
+        def _side_effect(config):
+            captured["content"] = Path(config.script).read_text()
+            mock_result = MagicMock()
+            mock_result.success = True
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            return mock_result
+
+        cli.preprocess_batch.side_effect = _side_effect
+        return captured
+
+    def test_preprocess_netcdf_batch_stub_uses_per_call_time_count_not_grid_steps(self):
+        """Same stub-sizing behavior as the local preprocess_netcdf()."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)  # steps=10
+            cli, _ = self._mock_cli()
+            captured = self._capture_stub_script(cli)
+
+            grid.preprocess_netcdf_batch(
+                cli,
+                target="gke-test",
+                josh_name="hist",
+                data_file=Path(tmpdir) / "hist.nc",
+                variable="tas",
+                units="K",
+                time_type="count",
+                time_start=1950,
+                time_unit="year",
+                time_count=65,
+            )
+
+            # grid declares steps=10, but the source is 65 steps long
+            self.assertIn("steps.high = 64 count", captured["content"])
+
+    def test_preprocess_csv_batch_calls_cli(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli()
+
+            grid.preprocess_csv_batch(
+                cli,
+                target="gke-test",
+                josh_name="stations",
+                data_file=Path(tmpdir) / "stations.csv",
+                variable="precipitation",
+                units="mm",
+                timestep=0,
+            )
+
+            cli.preprocess.assert_not_called()
+            cli.preprocess_batch.assert_called_once()
+            config_arg = cli.preprocess_batch.call_args[0][0]
+            self.assertEqual(config_arg.target, "gke-test")
+            self.assertEqual(config_arg.variable, "precipitation")
+            self.assertEqual(config_arg.timestep, 0)
+
+    def test_preprocess_batch_with_variant_skips_registration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            grid = self._make_grid(tmpdir)
+            cli, _ = self._mock_cli(success=True)
+
+            grid.preprocess_geotiff_batch(
+                cli,
+                target="gke-test",
+                josh_name="cover",
+                data_file=Path(tmpdir) / "test.tif",
+                band=0,
+                units="percent",
+                timestep=0,
+                variant={"scenario": "ssp370"},
+            )
+
+            self.assertNotIn("cover", grid.files)
+
+
 class TestGridSpecVariants(unittest.TestCase):
     """Tests for variant resolution (file_mappings, file_mappings_for)."""
 

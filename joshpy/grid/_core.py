@@ -787,6 +787,90 @@ class GridSpec:
 
         return result
 
+    def preprocess_geotiff_batch(
+        self,
+        cli: JoshCLI,
+        *,
+        target: str,
+        josh_name: str,
+        data_file: str | Path,
+        band: int,
+        units: str,
+        timestep: int,
+        crs: str | None = None,
+        parallel: bool = False,
+        amend: bool = False,
+        subdirectory: str | None = None,
+        variant: dict[str, str] | None = None,
+        compress: bool = False,
+        poll_interval: int | None = None,
+        timeout: int | None = None,
+    ) -> CLIResult:
+        """Preprocess a GeoTIFF file on a remote target using this grid's geometry.
+
+        Batch-dispatch counterpart of :meth:`preprocess_geotiff`; same output
+        path computation, script sizing, and file registration, dispatched
+        via :meth:`JoshCLI.preprocess_batch` instead of run locally.
+
+        Args:
+            cli: JoshCLI instance.
+            target: Target profile name (required).
+            josh_name: Name the josh model uses for this external data.
+            data_file: Path to the input GeoTIFF.
+            band: Band index (0-based).
+            units: Data units.
+            timestep: Simulation timestep this data maps to.
+            crs: Coordinate reference system (if not embedded in file).
+            parallel: Enable parallel processing.
+            amend: Append to existing .jshd file.
+            subdirectory: Optional subdirectory within output_dir.
+            variant: Variant values to resolve ``template_path``
+                (e.g., ``{"scenario": "ssp370"}``). When provided, the
+                output path is resolved from the file's template_path
+                and ``_register_file()`` is skipped.
+            compress: If True, write XZ-compressed ``.jshdz`` output
+                instead of plain ``.jshd``. See :meth:`preprocess_geotiff`
+                for full semantics and template_path interaction.
+            poll_interval: Polling interval in seconds (optional).
+            timeout: Maximum seconds to wait for completion (optional).
+
+        Returns:
+            CLIResult from the preprocessing command.
+        """
+        from joshpy.cli import GeotiffPreprocessBatchConfig
+
+        output_path = self._compute_output_path(
+            josh_name,
+            subdirectory,
+            variant,
+            compress=compress,
+        )
+        script_path = self._render_preprocess_script()
+        try:
+            config = GeotiffPreprocessBatchConfig(
+                script=script_path,
+                simulation=_PREPROCESS_SIM_NAME,
+                data_file=Path(data_file),
+                band=band,
+                units=units,
+                output=output_path,
+                target=target,
+                timestep=timestep,
+                crs=crs,
+                parallel=parallel,
+                amend=amend,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+            result = cli.preprocess_batch(config)
+        finally:
+            script_path.unlink(missing_ok=True)
+
+        if result.success and variant is None:
+            self._register_file(josh_name, output_path, units)
+
+        return result
+
     def preprocess_netcdf(
         self,
         cli: JoshCLI,
@@ -938,6 +1022,169 @@ class GridSpec:
 
         return result
 
+    def preprocess_netcdf_batch(
+        self,
+        cli: JoshCLI,
+        *,
+        target: str,
+        josh_name: str,
+        data_file: str | Path,
+        variable: str,
+        units: str,
+        x_coord: str = "lon",
+        y_coord: str = "lat",
+        time_coord: str | None = "time",
+        timestep: int | None = None,
+        time_type: str | None = None,
+        time_start: str | int | float | None = None,
+        time_unit: str | None = None,
+        time_count: int | None = None,
+        time_increment: int | float | None = None,
+        time_interval: str | None = None,
+        time_instant: str | int | float | None = None,
+        time: TimeAxis | None = None,
+        crs: str | None = None,
+        parallel: bool = False,
+        amend: bool = False,
+        subdirectory: str | None = None,
+        variant: dict[str, str] | None = None,
+        compress: bool = False,
+        poll_interval: int | None = None,
+        timeout: int | None = None,
+    ) -> CLIResult:
+        """Preprocess a NetCDF file on a remote target using this grid's geometry.
+
+        Batch-dispatch counterpart of :meth:`preprocess_netcdf`; same declared
+        temporal axis resolution, stub-script sizing, and file registration,
+        dispatched via :meth:`JoshCLI.preprocess_batch` instead of run locally.
+
+        Args:
+            cli: JoshCLI instance.
+            target: Target profile name (required).
+            josh_name: Name the josh model uses for this external data.
+            data_file: Path to the input NetCDF file.
+            variable: NetCDF variable name to extract.
+            units: Data units.
+            x_coord: Name of the X/longitude dimension.
+            y_coord: Name of the Y/latitude dimension.
+            time_coord: Name of the time dimension. Set to ``None`` for a
+                source with no time dimension (emits ``--no-time-dim``).
+            timestep: Optional specific time slice to extract.
+            time_type: Temporal axis type: ``"count"`` or ``"ISO"``.
+            time_start: First count coordinate or ISO date.
+            time_unit: Unit for a count axis.
+            time_count: Number of declared temporal coordinates.
+            time_increment: Increment between count coordinates.
+            time_interval: ISO-8601 period between ISO dates.
+            time_instant: Single count coordinate or ISO date for one output slice.
+            time: Per-resource temporal-axis override. When omitted, this
+                GridSpec's ``time`` axis supplies omitted temporal options.
+            crs: Coordinate reference system.
+            parallel: Enable parallel processing.
+            amend: Append to existing .jshd file.
+            subdirectory: Optional subdirectory within output_dir.
+            variant: Variant values to resolve ``template_path``
+                (e.g., ``{"scenario": "ssp370"}``). When provided, the
+                output path is resolved from the file's template_path
+                and ``_register_file()`` is skipped.
+            compress: If True, write XZ-compressed ``.jshdz`` output
+                instead of plain ``.jshd``. See :meth:`preprocess_geotiff`
+                for full semantics and template_path interaction.
+            poll_interval: Polling interval in seconds (optional).
+            timeout: Maximum seconds to wait for completion (optional).
+
+        Returns:
+            CLIResult from the preprocessing command.
+        """
+        from joshpy.cli import NetcdfPreprocessBatchConfig
+
+        explicit_time_options = (
+            time_type,
+            time_start,
+            time_unit,
+            time_count,
+            time_increment,
+            time_interval,
+        )
+        if time is not None:
+            if any(value is not None for value in explicit_time_options):
+                raise ValueError("Specify either time or individual time_* options, not both")
+            axis = time
+        elif self.time is None:
+            axis = None
+        else:
+            axis = TimeAxis(
+                type=time_type if time_type is not None else self.time.type,
+                start=time_start if time_start is not None else self.time.start,
+                count=time_count if time_count is not None else self.time.count,
+                unit=time_unit if time_unit is not None else self.time.unit,
+                increment=(time_increment if time_increment is not None else self.time.increment),
+                interval=(time_interval if time_interval is not None else self.time.interval),
+            )
+
+        if axis is not None:
+            time_type = axis.type
+            time_start = axis.start
+            time_unit = axis.unit
+            time_count = axis.count
+            time_increment = axis.increment
+            time_interval = axis.interval
+
+        # Size the throwaway stub simulation from this call's own declared
+        # slice count, not the grid's nominal timestep_count -- a source
+        # with a different native length (e.g. a shorter historical series
+        # against a grid whose steps match the longer scenario) must
+        # produce that many output slices, or Josh's --time-count
+        # invariant check fails.
+        if time_count is not None:
+            step_count: int | None = time_count
+        elif time_instant is not None:
+            step_count = 1
+        else:
+            step_count = None
+
+        output_path = self._compute_output_path(
+            josh_name,
+            subdirectory,
+            variant,
+            compress=compress,
+        )
+        script_path = self._render_preprocess_script(step_count=step_count)
+        try:
+            config = NetcdfPreprocessBatchConfig(
+                script=script_path,
+                simulation=_PREPROCESS_SIM_NAME,
+                data_file=Path(data_file),
+                variable=variable,
+                units=units,
+                output=output_path,
+                target=target,
+                x_coord=x_coord,
+                y_coord=y_coord,
+                time_coord=time_coord,
+                timestep=timestep,
+                time_type=time_type,
+                time_start=time_start,
+                time_unit=time_unit,
+                time_count=time_count,
+                time_increment=time_increment,
+                time_interval=time_interval,
+                time_instant=time_instant,
+                crs=crs,
+                parallel=parallel,
+                amend=amend,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+            result = cli.preprocess_batch(config)
+        finally:
+            script_path.unlink(missing_ok=True)
+
+        if result.success and variant is None:
+            self._register_file(josh_name, output_path, units)
+
+        return result
+
     def preprocess_csv(
         self,
         cli: JoshCLI,
@@ -1002,6 +1249,90 @@ class GridSpec:
                 amend=amend,
             )
             result = cli.preprocess(config)
+        finally:
+            script_path.unlink(missing_ok=True)
+
+        if result.success and variant is None:
+            self._register_file(josh_name, output_path, units)
+
+        return result
+
+    def preprocess_csv_batch(
+        self,
+        cli: JoshCLI,
+        *,
+        target: str,
+        josh_name: str,
+        data_file: str | Path,
+        variable: str,
+        units: str,
+        timestep: int,
+        crs: str | None = None,
+        parallel: bool = False,
+        amend: bool = False,
+        subdirectory: str | None = None,
+        variant: dict[str, str] | None = None,
+        compress: bool = False,
+        poll_interval: int | None = None,
+        timeout: int | None = None,
+    ) -> CLIResult:
+        """Preprocess a CSV point data file on a remote target using this grid's geometry.
+
+        Batch-dispatch counterpart of :meth:`preprocess_csv`; same output
+        path computation and file registration, dispatched via
+        :meth:`JoshCLI.preprocess_batch` instead of run locally.
+
+        Args:
+            cli: JoshCLI instance.
+            target: Target profile name (required).
+            josh_name: Name the josh model uses for this external data.
+            data_file: Path to the input CSV file.
+            variable: Column name to extract.
+            units: Data units.
+            timestep: Simulation timestep this data maps to.
+            crs: Coordinate reference system.
+            parallel: Enable parallel processing.
+            amend: Append to existing .jshd file.
+            subdirectory: Optional subdirectory within output_dir.
+            variant: Variant values to resolve ``template_path``
+                (e.g., ``{"scenario": "ssp370"}``). When provided, the
+                output path is resolved from the file's template_path
+                and ``_register_file()`` is skipped.
+            compress: If True, write XZ-compressed ``.jshdz`` output
+                instead of plain ``.jshd``. See :meth:`preprocess_geotiff`
+                for full semantics and template_path interaction.
+            poll_interval: Polling interval in seconds (optional).
+            timeout: Maximum seconds to wait for completion (optional).
+
+        Returns:
+            CLIResult from the preprocessing command.
+        """
+        from joshpy.cli import CsvPreprocessBatchConfig
+
+        output_path = self._compute_output_path(
+            josh_name,
+            subdirectory,
+            variant,
+            compress=compress,
+        )
+        script_path = self._render_preprocess_script()
+        try:
+            config = CsvPreprocessBatchConfig(
+                script=script_path,
+                simulation=_PREPROCESS_SIM_NAME,
+                data_file=Path(data_file),
+                variable=variable,
+                units=units,
+                output=output_path,
+                target=target,
+                timestep=timestep,
+                crs=crs,
+                parallel=parallel,
+                amend=amend,
+                poll_interval=poll_interval,
+                timeout=timeout,
+            )
+            result = cli.preprocess_batch(config)
         finally:
             script_path.unlink(missing_ok=True)
 
