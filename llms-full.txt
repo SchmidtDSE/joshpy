@@ -2008,6 +2008,34 @@ single `GridSpec` can preprocess multiple NetCDF sources of different native len
 without their `time_count` needing to match the grid's own `steps`. Only a call with
 no temporal options at all falls back to the grid's `timestep_count`.
 
+### Batch Dispatch
+
+Each `preprocess_*()` method has a `preprocess_*_batch()` counterpart —
+`preprocess_geotiff_batch()`, `preprocess_netcdf_batch()`,
+`preprocess_csv_batch()` — identical in every respect (output-path/variant
+resolution, stub-script sizing, `grid.files` registration) except:
+
+- `target: str` is required (a target profile name, as with `preprocess_batch()`).
+- They accept `poll_interval`/`timeout` and dispatch via `cli.preprocess_batch()`
+  instead of `cli.preprocess()`.
+
+```python
+grid.preprocess_netcdf_batch(
+    cli,
+    target="gke-test",
+    josh_name="futureTempJan",
+    data_file=nc_path,
+    variable="tas",
+    units="K",
+    time_type="count", time_start=2015, time_unit="year", time_count=86,
+    poll_interval=30,
+    timeout=1800,
+)
+```
+
+Blocks until the remote job completes (or fails) and registers `grid.files["futureTempJan"]`
+on success — same as the local method, just dispatched remotely.
+
 ---
 
 ## Run Labels
