@@ -44,7 +44,11 @@ from joshpy.cli import (
     StageFromMinioConfig,
     StageToMinioConfig,
     BatchRemoteConfig,
-    PreprocessBatchConfig,
+    # Format-specific preprocess-batch configs
+    NetcdfPreprocessBatchConfig,
+    GeotiffPreprocessBatchConfig,
+    CsvPreprocessBatchConfig,
+    PreprocessBatchConfig,  # Type alias for Union of the above
     PollBatchConfig,
 )
 
@@ -224,6 +228,9 @@ __all__ = [
     "StageFromMinioConfig",
     "StageToMinioConfig",
     "BatchRemoteConfig",
+    "NetcdfPreprocessBatchConfig",
+    "GeotiffPreprocessBatchConfig",
+    "CsvPreprocessBatchConfig",
     "PreprocessBatchConfig",
     "PollBatchConfig",
     # JFR diagnostics

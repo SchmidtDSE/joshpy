@@ -1580,16 +1580,20 @@ Each subdir is uploaded under `sweeps/<session_id>/jobs/<run_hash>/`, then dispa
 
 ## Preprocess Batch
 
-`preprocess_batch()` offloads heavy geospatial preprocessing (NetCDF → `.jshd`) to a remote target, producing a local `.jshd` that's then referenced in `file_mappings` for sweep jobs.
+`preprocess_batch()` offloads heavy geospatial preprocessing (NetCDF/GeoTIFF/CSV → `.jshd`) to a remote target, producing a local `.jshd` that's then referenced in `file_mappings` for sweep jobs. Like `preprocess()`, it takes one of three format-specific config classes — same field semantics as their local counterparts, plus `target` (required) and the async dispatch controls (`no_wait`/`poll_interval`/`timeout`):
 
-### Basic (blocking)
+- `NetcdfPreprocessBatchConfig` — mirrors `NetcdfPreprocessConfig`
+- `GeotiffPreprocessBatchConfig` — mirrors `GeotiffPreprocessConfig`
+- `CsvPreprocessBatchConfig` — mirrors `CsvPreprocessConfig`
+
+### NetCDF (blocking)
 
 ```python
 from pathlib import Path
-from joshpy import JoshCLI, PreprocessBatchConfig
+from joshpy import JoshCLI, NetcdfPreprocessBatchConfig
 
 cli = JoshCLI()
-cli.preprocess_batch(PreprocessBatchConfig(
+cli.preprocess_batch(NetcdfPreprocessBatchConfig(
     script=Path("sim.josh"),
     simulation="Main",
     data_file=Path("temperature.nc"),
@@ -1597,9 +1601,9 @@ cli.preprocess_batch(PreprocessBatchConfig(
     units="K",
     output=Path("temperature.jshd"),
     target="gke-test",
-    # Optional:
+    # Optional, same as NetcdfPreprocessConfig:
     crs="EPSG:4326",
-    x_coord="lon", y_coord="lat", time_dim="time",
+    x_coord="lon", y_coord="lat", time_coord="time",
     timestep=0,
     default_value=-999.0,
     parallel=True,
@@ -1609,15 +1613,39 @@ cli.preprocess_batch(PreprocessBatchConfig(
 # Blocks until the JAR reports complete; downloads temperature.jshd locally.
 ```
 
+Set `time_coord=None` (instead of the default `"time"`) for a flat, timeless NetCDF — emits `--no-time-dim` and every grid step reads the source's single available slice, exactly as it does for local `preprocess()`.
+
+### GeoTIFF/COG and CSV
+
+`timestep` is required for both (no declared time axis to derive it from):
+
+```python
+from joshpy import GeotiffPreprocessBatchConfig, CsvPreprocessBatchConfig
+
+cli.preprocess_batch(GeotiffPreprocessBatchConfig(
+    script=Path("sim.josh"), simulation="Main",
+    data_file=Path("cover.tif"), band=0, units="percent",
+    output=Path("cover.jshd"), target="gke-test",
+    timestep=0, crs="EPSG:4326",
+))
+
+cli.preprocess_batch(CsvPreprocessBatchConfig(
+    script=Path("sim.josh"), simulation="Main",
+    data_file=Path("stations.csv"), variable="precipitation", units="mm",
+    output=Path("precip.jshd"), target="gke-test",
+    timestep=0,
+))
+```
+
 ### Async (fire-and-forget, then poll)
 
-For large NetCDFs that take many minutes:
+For large sources that take many minutes, any of the three config classes accept `no_wait`/`poll_interval`/`timeout`:
 
 ```python
 import json
 from joshpy import PollBatchConfig
 
-result = cli.preprocess_batch(PreprocessBatchConfig(
+result = cli.preprocess_batch(NetcdfPreprocessBatchConfig(
     script=Path("sim.josh"),
     simulation="Main",
     data_file=Path("climate.nc"),
@@ -1640,17 +1668,26 @@ if poll.exit_code == 0:
 
 ### Flags mapped
 
+Common to all three (plus `script`/`simulation`/`data_file`/`units`/`output` as positional args and `target` as `--target`):
+
 | Field | Flag |
 |-------|------|
 | `crs` | `--crs` |
-| `x_coord` | `--x-coord` |
-| `y_coord` | `--y-coord` |
-| `time_dim` | `--time-dim` |
-| `no_time_dim` | `--no-time-dim` (takes precedence over `time_dim`) |
 | `timestep` | `--timestep` |
 | `default_value` | `--default-value` |
 | `parallel` | `--parallel` |
 | `amend` | `--amend` |
+| `no_wait` | `--no-wait` |
+| `poll_interval` | `--poll-interval` |
+| `timeout` | `--timeout` |
+
+`NetcdfPreprocessBatchConfig`-only:
+
+| Field | Flag |
+|-------|------|
+| `x_coord` | `--x-coord` |
+| `y_coord` | `--y-coord` |
+| `time_coord` | `--time-dim`, or `--no-time-dim` when `None` |
 | `time_type` | `--time-type` |
 | `time_start` | `--time-start` |
 | `time_unit` | `--time-unit` |
@@ -1658,11 +1695,8 @@ if poll.exit_code == 0:
 | `time_increment` | `--time-increment` |
 | `time_interval` | `--time-interval` |
 | `time_instant` | `--time-instant` |
-| `no_wait` | `--no-wait` |
-| `poll_interval` | `--poll-interval` |
-| `timeout` | `--timeout` |
 
-The `time_*` fields declare the temporal axis for a batch-dispatched source — same semantics as `preprocess_netcdf()`'s `time_*` params (see the Preprocess tutorial). `no_time_dim=True` marks a flat, timeless source (e.g. a 2D raster) and suppresses `time_dim` entirely.
+`GeotiffPreprocessBatchConfig` uses `band` (int) in place of `variable`; `CsvPreprocessBatchConfig` uses `variable` as the column name. Neither accepts coordinate/time-axis fields — they don't apply to those formats.
 
 ---
 

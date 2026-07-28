@@ -532,34 +532,27 @@ class BatchRemoteConfig:
 
 
 @dataclass(frozen=True)
-class PreprocessBatchConfig:
-    """Arguments for 'java -jar joshsim.jar preprocessBatch' command.
+class NetcdfPreprocessBatchConfig:
+    """Batch-dispatch a NetCDF file to a remote target as .jshd.
 
-    Preprocesses geospatial data on a remote target, downloads the
-    resulting ``.jshd`` file.
+    The remote counterpart of :class:`NetcdfPreprocessConfig`: same temporal
+    axis semantics, dispatched via ``preprocessBatch`` instead of run locally.
+    For a flat, timeless NetCDF (e.g. a 2D raster), set ``time_coord=None``
+    to emit ``--no-time-dim`` instead of looking for a time dimension.
 
     Attributes:
         script: Path to .josh file.
         simulation: Name of simulation.
-        data_file: Input data file (e.g. .nc).
-        variable: Variable name in the data file.
+        data_file: Path to NetCDF file (.nc, .nc4, .netcdf).
+        variable: NetCDF variable name to extract (e.g., "tas", "pr").
         units: Units of the data.
         output: Output .jshd file path.
         target: Target profile name (required).
-        crs: CRS to use when reading the file.
-        x_coord: Name of X coordinate dimension.
-        y_coord: Name of Y coordinate dimension.
-        time_dim: Name of time dimension. Ignored if ``no_time_dim`` is True.
-        no_time_dim: Treat the source as having no time dimension, such as a
-            flat raster (emits ``--no-time-dim``, takes precedence over
-            ``time_dim``).
-        timestep: Single timestep to process.
-        default_value: Default value to fill grid spaces before copying data.
-        parallel: Enable parallel processing of patches within each timestep.
-        amend: Amend existing output file rather than overwriting.
-        no_wait: If True, dispatch and exit without polling for completion.
-        poll_interval: Polling interval in seconds (optional).
-        timeout: Maximum seconds to wait for completion (optional).
+        x_coord: Name of X/longitude dimension (default: "lon").
+        y_coord: Name of Y/latitude dimension (default: "lat").
+        time_coord: Name of time dimension (default: "time"). Set to
+            ``None`` for a source with no time dimension at all.
+        timestep: Extract specific time slice (optional).
         time_type: Declared JSHD time axis type: ``"count"`` or ``"ISO"``.
         time_start: First count coordinate or ISO start date.
         time_unit: Unit for a count axis.
@@ -567,6 +560,13 @@ class PreprocessBatchConfig:
         time_increment: Increment between count coordinates.
         time_interval: ISO-8601 date period between ISO dates (e.g. ``"P1M"``).
         time_instant: Single count coordinate or ISO date for one output slice.
+        crs: CRS to use when reading the file.
+        default_value: Default value to fill grid spaces before copying data.
+        parallel: Enable parallel processing of patches within each timestep.
+        amend: Amend existing output file rather than overwriting.
+        no_wait: If True, dispatch and exit without polling for completion.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Maximum seconds to wait for completion (optional).
     """
 
     script: Path
@@ -576,18 +576,10 @@ class PreprocessBatchConfig:
     units: str
     output: Path
     target: str
-    crs: str | None = None
-    x_coord: str | None = None
-    y_coord: str | None = None
-    time_dim: str | None = None
-    no_time_dim: bool = False
+    x_coord: str = "lon"
+    y_coord: str = "lat"
+    time_coord: str | None = "time"
     timestep: int | None = None
-    default_value: float | None = None
-    parallel: bool = False
-    amend: bool = False
-    no_wait: bool = False
-    poll_interval: int | None = None
-    timeout: int | None = None
     time_type: str | None = None
     time_start: str | int | float | None = None
     time_unit: str | None = None
@@ -595,6 +587,137 @@ class PreprocessBatchConfig:
     time_increment: int | float | None = None
     time_interval: str | None = None
     time_instant: str | int | float | None = None
+    crs: str | None = None
+    default_value: float | None = None
+    parallel: bool = False
+    amend: bool = False
+    no_wait: bool = False
+    poll_interval: int | None = None
+    timeout: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate config after initialization."""
+        suffix = str(self.data_file).lower()
+        if not any(suffix.endswith(ext) for ext in (".nc", ".nc4", ".netcdf")):
+            raise ValueError(
+                f"NetcdfPreprocessBatchConfig expects .nc/.nc4/.netcdf file, "
+                f"got: {self.data_file.suffix}"
+            )
+
+
+@dataclass(frozen=True)
+class GeotiffPreprocessBatchConfig:
+    """Batch-dispatch a GeoTIFF/COG file to a remote target as .jshd.
+
+    The remote counterpart of :class:`GeotiffPreprocessConfig`. For
+    single-band rasters without a time dimension; ``timestep`` is required
+    to specify which simulation timestep the data maps to.
+
+    Attributes:
+        script: Path to .josh file.
+        simulation: Name of simulation.
+        data_file: Path to GeoTIFF file (.tif, .tiff).
+        band: Band index to extract (0-based).
+        units: Units of the data.
+        output: Output .jshd file path.
+        target: Target profile name (required).
+        timestep: Simulation timestep this data maps to (required).
+        crs: CRS to use when reading the file (if not embedded in TIF).
+        default_value: Default value to fill grid spaces before copying data.
+        parallel: Enable parallel processing of patches within each timestep.
+        amend: Amend existing output file rather than overwriting.
+        no_wait: If True, dispatch and exit without polling for completion.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Maximum seconds to wait for completion (optional).
+    """
+
+    script: Path
+    simulation: str
+    data_file: Path
+    band: int
+    units: str
+    output: Path
+    target: str
+    timestep: int  # Required, no default
+    crs: str | None = None
+    default_value: float | None = None
+    parallel: bool = False
+    amend: bool = False
+    no_wait: bool = False
+    poll_interval: int | None = None
+    timeout: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate config after initialization."""
+        if self.band < 0:
+            raise ValueError(f"band must be >= 0, got: {self.band}")
+        if self.timestep < 0:
+            raise ValueError(f"timestep must be >= 0, got: {self.timestep}")
+        suffix = str(self.data_file).lower()
+        if not any(suffix.endswith(ext) for ext in (".tif", ".tiff", ".geotiff")):
+            raise ValueError(
+                f"GeotiffPreprocessBatchConfig expects .tif/.tiff file, "
+                f"got: {self.data_file.suffix}"
+            )
+
+
+@dataclass(frozen=True)
+class CsvPreprocessBatchConfig:
+    """Batch-dispatch a CSV point-data file to a remote target as .jshd.
+
+    The remote counterpart of :class:`CsvPreprocessConfig`. CSV must have
+    columns named exactly "longitude" and "latitude"; ``timestep`` is
+    required to specify which simulation timestep the data maps to.
+
+    Attributes:
+        script: Path to .josh file.
+        simulation: Name of simulation.
+        data_file: Path to CSV file (.csv).
+        variable: Column name to extract.
+        units: Units of the data.
+        output: Output .jshd file path.
+        target: Target profile name (required).
+        timestep: Simulation timestep this data maps to (required).
+        crs: Coordinate Reference System.
+        default_value: Default value to fill grid spaces before copying data.
+        parallel: Enable parallel processing of patches within each timestep.
+        amend: Amend existing output file rather than overwriting.
+        no_wait: If True, dispatch and exit without polling for completion.
+        poll_interval: Polling interval in seconds (optional).
+        timeout: Maximum seconds to wait for completion (optional).
+    """
+
+    script: Path
+    simulation: str
+    data_file: Path
+    variable: str
+    units: str
+    output: Path
+    target: str
+    timestep: int  # Required, no default
+    crs: str | None = None
+    default_value: float | None = None
+    parallel: bool = False
+    amend: bool = False
+    no_wait: bool = False
+    poll_interval: int | None = None
+    timeout: int | None = None
+
+    def __post_init__(self) -> None:
+        """Validate config after initialization."""
+        if self.timestep < 0:
+            raise ValueError(f"timestep must be >= 0, got: {self.timestep}")
+        if not str(self.data_file).lower().endswith(".csv"):
+            raise ValueError(
+                f"CsvPreprocessBatchConfig expects .csv file, "
+                f"got: {self.data_file.suffix}"
+            )
+
+
+# Type alias for preprocess_batch method parameter
+PreprocessBatchConfig = Union[
+    NetcdfPreprocessBatchConfig, GeotiffPreprocessBatchConfig, CsvPreprocessBatchConfig
+]
 
 
 @dataclass(frozen=True)
@@ -1070,57 +1193,81 @@ class JoshCLI:
     ) -> CLIResult:
         """Preprocess geospatial data on a remote target.
 
+        Supports NetCDF, GeoTIFF/COG, and CSV input formats. Use the
+        appropriate config class for your input format:
+
+        - NetcdfPreprocessBatchConfig: For .nc files with time dimensions
+        - GeotiffPreprocessBatchConfig: For .tif/.tiff/COG rasters
+        - CsvPreprocessBatchConfig: For .csv point data
+
         Args:
-            config: Preprocess-batch configuration.
+            config: Format-specific preprocess-batch configuration.
             timeout: Timeout in seconds.
             jfr: Optional JFR profiling configuration.
 
         Returns:
             CLIResult with execution details.
         """
+        # Build common args
         args = [
             "preprocessBatch",
             str(config.script.resolve()),
             config.simulation,
             str(config.data_file.resolve()),
-            config.variable,
+        ]
+
+        # Variable/band differs by format
+        if isinstance(config, GeotiffPreprocessBatchConfig):
+            args.append(str(config.band))  # Band index as string
+        else:
+            args.append(config.variable)  # Variable name for NetCDF/CSV
+
+        args.extend([
             config.units,
             str(config.output.resolve()),
             f"--target={config.target}",
-        ]
+        ])
 
+        # Format-specific optional arguments
+        if isinstance(config, NetcdfPreprocessBatchConfig):
+            # NetCDF has coordinate dimension names
+            if config.x_coord:
+                args.append(f"--x-coord={config.x_coord}")
+            if config.y_coord:
+                args.append(f"--y-coord={config.y_coord}")
+            if config.time_coord:
+                args.append(f"--time-dim={config.time_coord}")
+            else:
+                args.append("--no-time-dim")
+            if config.timestep is not None:
+                args.append(f"--timestep={config.timestep}")
+            if config.time_type is not None:
+                args.append(f"--time-type={config.time_type}")
+            if config.time_start is not None:
+                args.append(f"--time-start={config.time_start}")
+            if config.time_unit is not None:
+                args.append(f"--time-unit={config.time_unit}")
+            if config.time_count is not None:
+                args.append(f"--time-count={config.time_count}")
+            if config.time_increment is not None:
+                args.append(f"--time-increment={config.time_increment}")
+            if config.time_interval is not None:
+                args.append(f"--time-interval={config.time_interval}")
+            if config.time_instant is not None:
+                args.append(f"--time-instant={config.time_instant}")
+        else:
+            # GeoTIFF and CSV require timestep (validated in __post_init__)
+            args.append(f"--timestep={config.timestep}")
+
+        # Common optional arguments
         if config.crs is not None:
             args.append(f"--crs={config.crs}")
-        if config.x_coord is not None:
-            args.append(f"--x-coord={config.x_coord}")
-        if config.y_coord is not None:
-            args.append(f"--y-coord={config.y_coord}")
-        if config.no_time_dim:
-            args.append("--no-time-dim")
-        elif config.time_dim is not None:
-            args.append(f"--time-dim={config.time_dim}")
-        if config.timestep is not None:
-            args.append(f"--timestep={config.timestep}")
         if config.default_value is not None:
             args.append(f"--default-value={config.default_value}")
         if config.parallel:
             args.append("--parallel")
         if config.amend:
             args.append("--amend")
-        if config.time_type is not None:
-            args.append(f"--time-type={config.time_type}")
-        if config.time_start is not None:
-            args.append(f"--time-start={config.time_start}")
-        if config.time_unit is not None:
-            args.append(f"--time-unit={config.time_unit}")
-        if config.time_count is not None:
-            args.append(f"--time-count={config.time_count}")
-        if config.time_increment is not None:
-            args.append(f"--time-increment={config.time_increment}")
-        if config.time_interval is not None:
-            args.append(f"--time-interval={config.time_interval}")
-        if config.time_instant is not None:
-            args.append(f"--time-instant={config.time_instant}")
         if config.no_wait:
             args.append("--no-wait")
         if config.poll_interval is not None:
