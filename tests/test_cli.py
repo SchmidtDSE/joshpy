@@ -2592,8 +2592,10 @@ class TestPreprocessBatch(unittest.TestCase):
         )
         cmd = mock_run.call_args[0][0]
         for flag in ("--crs=", "--x-coord=", "--y-coord=", "--time-dim=",
-                     "--timestep=", "--default-value=", "--parallel", "--amend",
-                     "--no-wait", "--poll-interval=", "--timeout="):
+                     "--no-time-dim", "--timestep=", "--default-value=", "--parallel",
+                     "--amend", "--no-wait", "--poll-interval=", "--timeout=",
+                     "--time-type=", "--time-start=", "--time-unit=", "--time-count=",
+                     "--time-increment=", "--time-interval=", "--time-instant="):
             self.assertFalse(
                 any(c == flag or c.startswith(flag) for c in cmd),
                 f"unexpected {flag} in defaults",
@@ -2610,6 +2612,9 @@ class TestPreprocessBatch(unittest.TestCase):
                 timestep=0, default_value=-999.0,
                 parallel=True, amend=True,
                 no_wait=True, poll_interval=30, timeout=600,
+                time_type="count", time_start="2015", time_unit="year",
+                time_count=10, time_increment=1, time_interval="P1M",
+                time_instant="2020",
             ),
         )
         cmd = mock_run.call_args[0][0]
@@ -2624,6 +2629,34 @@ class TestPreprocessBatch(unittest.TestCase):
         self.assertIn("--no-wait", cmd)
         self.assertIn("--poll-interval=30", cmd)
         self.assertIn("--timeout=600", cmd)
+        self.assertIn("--time-type=count", cmd)
+        self.assertIn("--time-start=2015", cmd)
+        self.assertIn("--time-unit=year", cmd)
+        self.assertIn("--time-count=10", cmd)
+        self.assertIn("--time-increment=1", cmd)
+        self.assertIn("--time-interval=P1M", cmd)
+        self.assertIn("--time-instant=2020", cmd)
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_no_time_dim_takes_precedence_over_time_dim(self, mock_run, _mock_jar):
+        """no_time_dim=True should emit --no-time-dim and suppress --time-dim."""
+        from joshpy.cli import PreprocessBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+
+        cli.preprocess_batch(
+            PreprocessBatchConfig(
+                script=Path("/s.josh"), simulation="M",
+                data_file=Path("/d.nc"), variable="v", units="u",
+                output=Path("/o.jshd"), target="t",
+                time_dim="time", no_time_dim=True,
+            ),
+        )
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--no-time-dim", cmd)
+        self.assertFalse(any(c.startswith("--time-dim=") for c in cmd))
 
 
 class TestPollBatch(unittest.TestCase):
