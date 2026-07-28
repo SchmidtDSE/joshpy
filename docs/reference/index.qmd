@@ -10,6 +10,9 @@ Josh command-line interface wrapper
 | [cli.CLIResult](cli.CLIResult.qmd#joshpy.cli.CLIResult) | Result of any CLI command execution. |
 | [cli.RunConfig](cli.RunConfig.qmd#joshpy.cli.RunConfig) | Arguments for 'java -jar joshsim.jar run' command. |
 | [cli.RunRemoteConfig](cli.RunRemoteConfig.qmd#joshpy.cli.RunRemoteConfig) | Arguments for 'java -jar joshsim.jar runRemote' command. |
+| [cli.BatchRemoteConfig](cli.BatchRemoteConfig.qmd#joshpy.cli.BatchRemoteConfig) | Arguments for 'java -jar joshsim.jar batchRemote' command. |
+| [cli.PreprocessBatchConfig](cli.PreprocessBatchConfig.qmd#joshpy.cli.PreprocessBatchConfig) | Arguments for 'java -jar joshsim.jar preprocessBatch' command. |
+| [cli.PollBatchConfig](cli.PollBatchConfig.qmd#joshpy.cli.PollBatchConfig) | Arguments for 'java -jar joshsim.jar pollBatch' command. |
 | [cli.NetcdfPreprocessConfig](cli.NetcdfPreprocessConfig.qmd#joshpy.cli.NetcdfPreprocessConfig) | Preprocess NetCDF files into Josh's .jshd format. |
 | [cli.GeotiffPreprocessConfig](cli.GeotiffPreprocessConfig.qmd#joshpy.cli.GeotiffPreprocessConfig) | Preprocess GeoTIFF/COG files into Josh's .jshd format. |
 | [cli.CsvPreprocessConfig](cli.CsvPreprocessConfig.qmd#joshpy.cli.CsvPreprocessConfig) | Preprocess CSV point data into Josh's .jshd format. |

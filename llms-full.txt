@@ -1603,6 +1603,8 @@ cli.preprocess_batch(PreprocessBatchConfig(
     timestep=0,
     default_value=-999.0,
     parallel=True,
+    # Declared temporal axis (same semantics as preprocess_netcdf, see Preprocess tutorial):
+    time_type="count", time_start=2015, time_unit="year", time_count=10,
 ))
 # Blocks until the JAR reports complete; downloads temperature.jshd locally.
 ```
@@ -1644,13 +1646,23 @@ if poll.exit_code == 0:
 | `x_coord` | `--x-coord` |
 | `y_coord` | `--y-coord` |
 | `time_dim` | `--time-dim` |
+| `no_time_dim` | `--no-time-dim` (takes precedence over `time_dim`) |
 | `timestep` | `--timestep` |
 | `default_value` | `--default-value` |
 | `parallel` | `--parallel` |
 | `amend` | `--amend` |
+| `time_type` | `--time-type` |
+| `time_start` | `--time-start` |
+| `time_unit` | `--time-unit` |
+| `time_count` | `--time-count` |
+| `time_increment` | `--time-increment` |
+| `time_interval` | `--time-interval` |
+| `time_instant` | `--time-instant` |
 | `no_wait` | `--no-wait` |
 | `poll_interval` | `--poll-interval` |
 | `timeout` | `--timeout` |
+
+The `time_*` fields declare the temporal axis for a batch-dispatched source — same semantics as `preprocess_netcdf()`'s `time_*` params (see the Preprocess tutorial). `no_time_dim=True` marks a flat, timeless source (e.g. a 2D raster) and suppresses `time_dim` entirely.
 
 ---
 
