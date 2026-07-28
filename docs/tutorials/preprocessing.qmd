@@ -919,6 +919,39 @@ print(f"\n--- {yaml_path.name} ---")
 print(yaml_path.read_text())
 ```
 
+### Batch dispatch (remote)
+
+Each `preprocess_*()` method above has a `preprocess_*_batch()` counterpart --
+`preprocess_geotiff_batch()`, `preprocess_netcdf_batch()`,
+`preprocess_csv_batch()` -- for offloading preprocessing to a remote target
+(Kubernetes or HTTP) instead of running it locally. They're identical in every
+other respect: same output-path/variant/`template_path` resolution, same
+declared-temporal-axis handling and stub-script sizing, same `grid.files`
+registration on success. The only differences are a required `target` (a
+target profile name, same as `JoshCLI.preprocess_batch()`) and optional
+`poll_interval`/`timeout` for how long to wait for the remote job:
+
+```python
+# Same call as the "Temporal grids" example above, dispatched remotely
+grid.preprocess_netcdf_batch(
+    cli,
+    target="gke-test",
+    josh_name="futureTemp",
+    data_file=DATA_DIR / "future_temperature.nc",
+    variable="tas",
+    units="K",
+    compress=True,
+    poll_interval=30,
+    timeout=1800,
+)
+```
+
+This blocks until the remote job completes (or fails) and registers
+`grid.files["futureTemp"]` on success, exactly like the local call -- no
+reaching into `GridSpec`'s internals to reproduce output-path or registration
+logic for the remote path. See [Remote Execution](remote-execution.qmd) for
+target profile setup.
+
 ### Loading back
 
 Once saved, the YAML is the single source of truth for grid geometry and data
@@ -944,9 +977,11 @@ for name, path in loaded.file_mappings_for(pattern="stripes").items():
 |----------|-------------|
 | `cli.preprocess()` | Quick one-off preprocessing, scripts, or non-grid workflows |
 | `grid.preprocess_*()` | Structured projects where you want a `grid.yaml` manifest |
+| `grid.preprocess_*_batch()` | Same as above, offloaded to a remote target instead of run locally |
 
-Both produce identical `.jshd` files -- the difference is whether the inventory
-is tracked in a YAML manifest or managed manually.
+All three produce identical `.jshd` files -- the differences are whether the
+inventory is tracked in a YAML manifest or managed manually, and whether
+preprocessing runs locally or on a remote target.
 :::
 
 ```{python}
@@ -966,6 +1001,8 @@ In this tutorial, we:
 4. **Preprocessed CSV point data** using `CsvPreprocessConfig` (with required `timestep`)
 5. **Verified results** using `cli.inspect_jshd()` and `plot_jshd()`
 6. **Built a GridSpec manifest** using `grid.preprocess_netcdf()` and `grid.save()`
+7. **Offloaded preprocessing to a remote target** using `grid.preprocess_netcdf_batch()`
+   in place of the local call, with identical output-path and manifest semantics
 
 The preprocessed `.jshd` files are now ready for use in simulations. The next
 tutorial, [Sweeping Over External Data](external-data-sweep.qmd), demonstrates
