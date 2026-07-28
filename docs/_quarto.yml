@@ -173,6 +173,10 @@ website:
             - reference/cli.GeotiffPreprocessConfig.qmd
             - reference/cli.CsvPreprocessConfig.qmd
             - reference/cli.ValidateConfig.qmd
+        - section: "Grid"
+          contents:
+            - reference/grid.GridSpec.qmd
+            - reference/grid.TimeAxis.qmd
         - section: "Jobs"
           contents:
             - reference/jobs.JobConfig.qmd
@@ -270,7 +274,13 @@ quartodoc:
         - cli.GeotiffPreprocessConfig
         - cli.CsvPreprocessConfig
         - cli.ValidateConfig
-    
+
+    - title: Grid Module
+      desc: Grid geometry, file inventory, and preprocessing
+      contents:
+        - grid.GridSpec
+        - grid.TimeAxis
+
     - title: Jobs Module
       desc: Job configuration and parameter sweep execution
       contents:

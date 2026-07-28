@@ -20,6 +20,15 @@ Josh command-line interface wrapper
 | [cli.CsvPreprocessConfig](cli.CsvPreprocessConfig.qmd#joshpy.cli.CsvPreprocessConfig) | Preprocess CSV point data into Josh's .jshd format. |
 | [cli.ValidateConfig](cli.ValidateConfig.qmd#joshpy.cli.ValidateConfig) | Arguments for 'java -jar joshsim.jar validate' command. |
 
+## Grid Module
+
+Grid geometry, file inventory, and preprocessing
+
+| | |
+| --- | --- |
+| [grid.GridSpec](grid.GridSpec.qmd#joshpy.grid.GridSpec) | Spatial grid definition plus data file inventory. |
+| [grid.TimeAxis](grid.TimeAxis.qmd#joshpy.grid.TimeAxis) | Declared temporal axis shared by a grid's time-varying resources. |
+
 ## Jobs Module
 
 Job configuration and parameter sweep execution
