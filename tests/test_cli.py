@@ -2507,8 +2507,8 @@ class TestBatchRemoteConfig(unittest.TestCase):
             config.target = "other"
 
 
-class TestPreprocessBatch(unittest.TestCase):
-    """Tests for JoshCLI.preprocess_batch()."""
+class TestPreprocessBatchNetcdf(unittest.TestCase):
+    """Tests for JoshCLI.preprocess_batch() with NetcdfPreprocessBatchConfig."""
 
     JAR_MODE = JarMode.LOCAL
 
@@ -2516,12 +2516,12 @@ class TestPreprocessBatch(unittest.TestCase):
     @patch("subprocess.run")
     def test_basic_args(self, mock_run, _mock_jar):
         """preprocess_batch() should build correct CLI args."""
-        from joshpy.cli import PreprocessBatchConfig
+        from joshpy.cli import NetcdfPreprocessBatchConfig
 
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         cli = JoshCLI(josh_jar=self.JAR_MODE)
-        config = PreprocessBatchConfig(
+        config = NetcdfPreprocessBatchConfig(
             script=Path("/path/to/sim.josh"),
             simulation="Main",
             data_file=Path("/path/to/data.nc"),
@@ -2542,17 +2542,21 @@ class TestPreprocessBatch(unittest.TestCase):
         self.assertIn("K", cmd)
         self.assertTrue(any("output.jshd" in c for c in cmd))
         self.assertIn("--target=gke-test", cmd)
+        # x_coord/y_coord/time_coord default to lon/lat/time and are always emitted
+        self.assertIn("--x-coord=lon", cmd)
+        self.assertIn("--y-coord=lat", cmd)
+        self.assertIn("--time-dim=time", cmd)
 
     @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
     @patch("subprocess.run")
     def test_positional_arg_order(self, mock_run, _mock_jar):
         """preprocessBatch positional args must be in correct order."""
-        from joshpy.cli import PreprocessBatchConfig
+        from joshpy.cli import NetcdfPreprocessBatchConfig
 
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         cli = JoshCLI(josh_jar=self.JAR_MODE)
-        config = PreprocessBatchConfig(
+        config = NetcdfPreprocessBatchConfig(
             script=Path("/path/to/sim.josh"),
             simulation="Main",
             data_file=Path("/path/to/data.nc"),
@@ -2577,22 +2581,21 @@ class TestPreprocessBatch(unittest.TestCase):
     @patch("subprocess.run")
     def test_optional_flags(self, mock_run, _mock_jar):
         """preprocess_batch() should include optional flags only when set."""
-        from joshpy.cli import PreprocessBatchConfig
+        from joshpy.cli import NetcdfPreprocessBatchConfig
 
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         cli = JoshCLI(josh_jar=self.JAR_MODE)
 
-        # Defaults: no optional flags
+        # Defaults: no optional flags beyond x-coord/y-coord/time-dim
         cli.preprocess_batch(
-            PreprocessBatchConfig(
+            NetcdfPreprocessBatchConfig(
                 script=Path("/s.josh"), simulation="M",
                 data_file=Path("/d.nc"), variable="v", units="u",
                 output=Path("/o.jshd"), target="t",
             ),
         )
         cmd = mock_run.call_args[0][0]
-        for flag in ("--crs=", "--x-coord=", "--y-coord=", "--time-dim=",
-                     "--no-time-dim", "--timestep=", "--default-value=", "--parallel",
+        for flag in ("--crs=", "--timestep=", "--default-value=", "--parallel",
                      "--amend", "--no-wait", "--poll-interval=", "--timeout=",
                      "--time-type=", "--time-start=", "--time-unit=", "--time-count=",
                      "--time-increment=", "--time-interval=", "--time-instant="):
@@ -2603,12 +2606,12 @@ class TestPreprocessBatch(unittest.TestCase):
 
         # All set
         cli.preprocess_batch(
-            PreprocessBatchConfig(
+            NetcdfPreprocessBatchConfig(
                 script=Path("/s.josh"), simulation="M",
                 data_file=Path("/d.nc"), variable="v", units="u",
                 output=Path("/o.jshd"), target="t",
                 crs="EPSG:4326",
-                x_coord="lon", y_coord="lat", time_dim="time",
+                x_coord="lon", y_coord="lat", time_coord="time",
                 timestep=0, default_value=-999.0,
                 parallel=True, amend=True,
                 no_wait=True, poll_interval=30, timeout=600,
@@ -2639,24 +2642,100 @@ class TestPreprocessBatch(unittest.TestCase):
 
     @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
     @patch("subprocess.run")
-    def test_no_time_dim_takes_precedence_over_time_dim(self, mock_run, _mock_jar):
-        """no_time_dim=True should emit --no-time-dim and suppress --time-dim."""
-        from joshpy.cli import PreprocessBatchConfig
+    def test_no_time_dim(self, mock_run, _mock_jar):
+        """time_coord=None should emit --no-time-dim and suppress --time-dim."""
+        from joshpy.cli import NetcdfPreprocessBatchConfig
 
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         cli = JoshCLI(josh_jar=self.JAR_MODE)
 
         cli.preprocess_batch(
-            PreprocessBatchConfig(
+            NetcdfPreprocessBatchConfig(
                 script=Path("/s.josh"), simulation="M",
                 data_file=Path("/d.nc"), variable="v", units="u",
                 output=Path("/o.jshd"), target="t",
-                time_dim="time", no_time_dim=True,
+                time_coord=None,
             ),
         )
         cmd = mock_run.call_args[0][0]
         self.assertIn("--no-time-dim", cmd)
         self.assertFalse(any(c.startswith("--time-dim=") for c in cmd))
+
+
+class TestPreprocessBatchGeotiff(unittest.TestCase):
+    """Tests for JoshCLI.preprocess_batch() with GeotiffPreprocessBatchConfig."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """preprocess_batch() should build correct CLI args for GeoTIFF."""
+        from joshpy.cli import GeotiffPreprocessBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = GeotiffPreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/cover.tif"),
+            band=0,
+            units="percent",
+            output=Path("/path/to/cover.jshd"),
+            target="gke-test",
+            timestep=0,
+            crs="EPSG:4326",
+        )
+        result = cli.preprocess_batch(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("preprocessBatch", cmd)
+        self.assertIn("0", cmd)  # band index
+        self.assertIn("percent", cmd)
+        self.assertIn("--target=gke-test", cmd)
+        self.assertIn("--timestep=0", cmd)  # Required for GeoTIFF
+        self.assertIn("--crs=EPSG:4326", cmd)
+        # GeoTIFF should NOT have NetCDF-only coordinate/time-axis flags
+        for flag in ("--x-coord=", "--y-coord=", "--time-dim=", "--no-time-dim",
+                     "--time-type="):
+            self.assertFalse(any(c.startswith(flag) for c in cmd), f"unexpected {flag}")
+
+
+class TestPreprocessBatchCsv(unittest.TestCase):
+    """Tests for JoshCLI.preprocess_batch() with CsvPreprocessBatchConfig."""
+
+    JAR_MODE = JarMode.LOCAL
+
+    @patch("joshpy.jar.JarManager.get_jar", return_value=Path("/fake/joshsim-fat.jar"))
+    @patch("subprocess.run")
+    def test_basic_args(self, mock_run, _mock_jar):
+        """preprocess_batch() should build correct CLI args for CSV."""
+        from joshpy.cli import CsvPreprocessBatchConfig
+
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        cli = JoshCLI(josh_jar=self.JAR_MODE)
+        config = CsvPreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/stations.csv"),
+            variable="precipitation",
+            units="mm",
+            output=Path("/path/to/precip.jshd"),
+            target="gke-test",
+            timestep=0,
+        )
+        result = cli.preprocess_batch(config)
+
+        self.assertTrue(result.success)
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("preprocessBatch", cmd)
+        self.assertIn("precipitation", cmd)  # variable/column name
+        self.assertIn("mm", cmd)
+        self.assertIn("--target=gke-test", cmd)
+        self.assertIn("--timestep=0", cmd)  # Required for CSV
 
 
 class TestPollBatch(unittest.TestCase):
@@ -2726,13 +2805,14 @@ class TestPollBatchConfig(unittest.TestCase):
             config.job_id = "other"
 
 
-class TestPreprocessBatchConfig(unittest.TestCase):
-    """Tests for PreprocessBatchConfig dataclass."""
+class TestNetcdfPreprocessBatchConfig(unittest.TestCase):
+    """Tests for NetcdfPreprocessBatchConfig dataclass."""
 
     def test_basic_creation(self):
-        from joshpy.cli import PreprocessBatchConfig
+        """Basic config with required fields and defaults."""
+        from joshpy.cli import NetcdfPreprocessBatchConfig
 
-        config = PreprocessBatchConfig(
+        config = NetcdfPreprocessBatchConfig(
             script=Path("/path/to/sim.josh"),
             simulation="Main",
             data_file=Path("/path/to/data.nc"),
@@ -2743,11 +2823,15 @@ class TestPreprocessBatchConfig(unittest.TestCase):
         )
         self.assertEqual(config.variable, "temp")
         self.assertEqual(config.target, "gke-test")
+        self.assertEqual(config.x_coord, "lon")
+        self.assertEqual(config.y_coord, "lat")
+        self.assertEqual(config.time_coord, "time")
+        self.assertIsNone(config.timestep)
 
     def test_frozen(self):
-        from joshpy.cli import PreprocessBatchConfig
+        from joshpy.cli import NetcdfPreprocessBatchConfig
 
-        config = PreprocessBatchConfig(
+        config = NetcdfPreprocessBatchConfig(
             script=Path("/path/to/sim.josh"),
             simulation="Main",
             data_file=Path("/path/to/data.nc"),
@@ -2758,6 +2842,151 @@ class TestPreprocessBatchConfig(unittest.TestCase):
         )
         with self.assertRaises(AttributeError):
             config.target = "other"
+
+    def test_invalid_extension(self):
+        """Should raise ValueError for non-NetCDF file."""
+        from joshpy.cli import NetcdfPreprocessBatchConfig
+
+        with self.assertRaises(ValueError) as ctx:
+            NetcdfPreprocessBatchConfig(
+                script=Path("/path/to/sim.josh"),
+                simulation="Main",
+                data_file=Path("/path/to/data.tif"),
+                variable="temp",
+                units="K",
+                output=Path("/path/to/out.jshd"),
+                target="gke-test",
+            )
+        self.assertIn(".nc", str(ctx.exception))
+
+
+class TestGeotiffPreprocessBatchConfig(unittest.TestCase):
+    """Tests for GeotiffPreprocessBatchConfig dataclass."""
+
+    def test_basic_creation(self):
+        """Basic config with required fields."""
+        from joshpy.cli import GeotiffPreprocessBatchConfig
+
+        config = GeotiffPreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/cover.tif"),
+            band=0,
+            units="percent",
+            output=Path("/path/to/cover.jshd"),
+            target="gke-test",
+            timestep=0,
+        )
+        self.assertEqual(config.band, 0)
+        self.assertEqual(config.timestep, 0)
+        self.assertEqual(config.target, "gke-test")
+
+    def test_negative_band(self):
+        """Should raise ValueError for negative band."""
+        from joshpy.cli import GeotiffPreprocessBatchConfig
+
+        with self.assertRaises(ValueError) as ctx:
+            GeotiffPreprocessBatchConfig(
+                script=Path("/path/to/sim.josh"),
+                simulation="Main",
+                data_file=Path("/path/to/cover.tif"),
+                band=-1,
+                units="percent",
+                output=Path("/path/to/cover.jshd"),
+                target="gke-test",
+                timestep=0,
+            )
+        self.assertIn("band", str(ctx.exception))
+
+    def test_negative_timestep(self):
+        """Should raise ValueError for negative timestep."""
+        from joshpy.cli import GeotiffPreprocessBatchConfig
+
+        with self.assertRaises(ValueError) as ctx:
+            GeotiffPreprocessBatchConfig(
+                script=Path("/path/to/sim.josh"),
+                simulation="Main",
+                data_file=Path("/path/to/cover.tif"),
+                band=0,
+                units="percent",
+                output=Path("/path/to/cover.jshd"),
+                target="gke-test",
+                timestep=-1,
+            )
+        self.assertIn("timestep", str(ctx.exception))
+
+    def test_invalid_extension(self):
+        """Should raise ValueError for non-GeoTIFF file."""
+        from joshpy.cli import GeotiffPreprocessBatchConfig
+
+        with self.assertRaises(ValueError) as ctx:
+            GeotiffPreprocessBatchConfig(
+                script=Path("/path/to/sim.josh"),
+                simulation="Main",
+                data_file=Path("/path/to/data.nc"),
+                band=0,
+                units="percent",
+                output=Path("/path/to/out.jshd"),
+                target="gke-test",
+                timestep=0,
+            )
+        self.assertIn(".tif", str(ctx.exception))
+
+
+class TestCsvPreprocessBatchConfig(unittest.TestCase):
+    """Tests for CsvPreprocessBatchConfig dataclass."""
+
+    def test_basic_creation(self):
+        """Basic config with required fields."""
+        from joshpy.cli import CsvPreprocessBatchConfig
+
+        config = CsvPreprocessBatchConfig(
+            script=Path("/path/to/sim.josh"),
+            simulation="Main",
+            data_file=Path("/path/to/stations.csv"),
+            variable="precipitation",
+            units="mm",
+            output=Path("/path/to/precip.jshd"),
+            target="gke-test",
+            timestep=0,
+        )
+        self.assertEqual(config.variable, "precipitation")
+        self.assertEqual(config.timestep, 0)
+        self.assertEqual(config.target, "gke-test")
+
+    def test_negative_timestep(self):
+        """Should raise ValueError for negative timestep."""
+        from joshpy.cli import CsvPreprocessBatchConfig
+
+        with self.assertRaises(ValueError) as ctx:
+            CsvPreprocessBatchConfig(
+                script=Path("/path/to/sim.josh"),
+                simulation="Main",
+                data_file=Path("/path/to/data.csv"),
+                variable="temp",
+                units="K",
+                output=Path("/path/to/out.jshd"),
+                target="gke-test",
+                timestep=-1,
+            )
+        self.assertIn("timestep", str(ctx.exception))
+
+    def test_invalid_extension(self):
+        """Should raise ValueError for non-CSV file."""
+        from joshpy.cli import CsvPreprocessBatchConfig
+
+        with self.assertRaises(ValueError) as ctx:
+            CsvPreprocessBatchConfig(
+                script=Path("/path/to/sim.josh"),
+                simulation="Main",
+                data_file=Path("/path/to/data.nc"),
+                variable="temp",
+                units="K",
+                output=Path("/path/to/out.jshd"),
+                target="gke-test",
+                timestep=0,
+            )
+        self.assertIn(".csv", str(ctx.exception))
 
 
 if __name__ == "__main__":

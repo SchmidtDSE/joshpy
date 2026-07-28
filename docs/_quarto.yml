@@ -165,7 +165,9 @@ website:
             - reference/cli.RunConfig.qmd
             - reference/cli.RunRemoteConfig.qmd
             - reference/cli.BatchRemoteConfig.qmd
-            - reference/cli.PreprocessBatchConfig.qmd
+            - reference/cli.NetcdfPreprocessBatchConfig.qmd
+            - reference/cli.GeotiffPreprocessBatchConfig.qmd
+            - reference/cli.CsvPreprocessBatchConfig.qmd
             - reference/cli.PollBatchConfig.qmd
             - reference/cli.NetcdfPreprocessConfig.qmd
             - reference/cli.GeotiffPreprocessConfig.qmd
@@ -260,7 +262,9 @@ quartodoc:
         - cli.RunConfig
         - cli.RunRemoteConfig
         - cli.BatchRemoteConfig
-        - cli.PreprocessBatchConfig
+        - cli.NetcdfPreprocessBatchConfig
+        - cli.GeotiffPreprocessBatchConfig
+        - cli.CsvPreprocessBatchConfig
         - cli.PollBatchConfig
         - cli.NetcdfPreprocessConfig
         - cli.GeotiffPreprocessConfig
