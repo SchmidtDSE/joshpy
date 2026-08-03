@@ -47,7 +47,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from joshpy.schema import SCHEMA_SQL
+from joshpy.schema import CELL_DATA_CURRENT_VIEW_SQL, SCHEMA_SQL
 
 try:
     import duckdb
@@ -446,6 +446,13 @@ class ConfigInfo:
         parameters: Parameter values used to generate this config.
         label: Optional human-readable label for this run.
         created_at: When the config was registered.
+        status: Lifecycle status, one of ``{"active", "superseded", "bad"}``.
+            ``None`` is stored for runs that have never been marked and is read
+            as ``"active"``; prefer :attr:`effective_status` to normalize it.
+        superseded_by: The run_hash that replaced this run, set when
+            ``status == "superseded"``. ``None`` otherwise.
+        status_reason: Free-text explanation recorded when the status was set.
+        status_updated_at: When the status was last changed.
     """
 
     run_hash: str
@@ -457,6 +464,56 @@ class ConfigInfo:
     parameters: dict[str, Any]
     label: str | None
     created_at: datetime
+    status: str | None = None
+    superseded_by: str | None = None
+    status_reason: str | None = None
+    status_updated_at: datetime | None = None
+
+    @property
+    def effective_status(self) -> str:
+        """Status normalized so ``None`` reads as ``"active"``."""
+        return self.status or "active"
+
+    @property
+    def is_current(self) -> bool:
+        """Whether this run is current (i.e. :attr:`effective_status` is active)."""
+        return self.effective_status == "active"
+
+
+@dataclass
+class RunStatus:
+    """Lifecycle status of a single run.
+
+    "Current" is not a stored flag — it is exactly ``status == "active"``. A run
+    that has never been marked has ``status is None``, which is read as
+    ``"active"`` (see :attr:`effective_status`). See REGISTRY_PROVENANCE.md for
+    the full model.
+
+    Attributes:
+        run_hash: The run this status describes.
+        status: One of ``{"active", "superseded", "bad"}`` or ``None`` (unmarked,
+            treated as active).
+        superseded_by: The run_hash that replaced this run, set when
+            ``status == "superseded"``. ``None`` otherwise.
+        reason: Free-text explanation recorded when the status was set.
+        updated_at: When the status was last changed.
+    """
+
+    run_hash: str
+    status: str | None
+    superseded_by: str | None = None
+    reason: str | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def effective_status(self) -> str:
+        """Status normalized so ``None`` reads as ``"active"``."""
+        return self.status or "active"
+
+    @property
+    def is_current(self) -> bool:
+        """Whether the run is current (i.e. :attr:`effective_status` is active)."""
+        return self.effective_status == "active"
 
 
 @dataclass
@@ -822,6 +879,10 @@ class RunRegistry:
             self._migrate_schema()
             if self.enable_spatial:
                 self._init_spatial()
+            # Create the current view last: it does SELECT c.* over cell_data, so
+            # it must be defined after _init_spatial() has (optionally) added the
+            # geom column, or its captured column set would drift from the table.
+            self._conn.execute(CELL_DATA_CURRENT_VIEW_SQL)
 
     @property
     def conn(self) -> Any:
@@ -846,6 +907,22 @@ class RunRegistry:
             self._conn.execute("SELECT label FROM job_configs LIMIT 0")
         except Exception:
             self._conn.execute("ALTER TABLE job_configs ADD COLUMN label VARCHAR")
+
+        # Run lifecycle status columns (REGISTRY_PROVENANCE.md). Additive and
+        # nullable; NULL status is read as 'active' everywhere via coalesce, so
+        # existing rows keep their behavior. Probe one column and add the whole
+        # set if it is missing.
+        try:
+            self._conn.execute("SELECT status FROM job_configs LIMIT 0")
+        except Exception:
+            self._conn.execute("ALTER TABLE job_configs ADD COLUMN status VARCHAR")
+            self._conn.execute(
+                "ALTER TABLE job_configs ADD COLUMN superseded_by VARCHAR"
+            )
+            self._conn.execute("ALTER TABLE job_configs ADD COLUMN status_reason TEXT")
+            self._conn.execute(
+                "ALTER TABLE job_configs ADD COLUMN status_updated_at TIMESTAMP"
+            )
 
     def _init_spatial(self) -> None:
         """Initialize DuckDB spatial extension and geometry column."""
@@ -1827,7 +1904,8 @@ class RunRegistry:
         result = self.conn.execute(
             """
             SELECT run_hash, session_id, josh_path, josh_content,
-                   config_content, file_mappings, label, created_at
+                   config_content, file_mappings, label, created_at,
+                   status, superseded_by, status_reason, status_updated_at
             FROM job_configs
             WHERE run_hash = ?
             """,
@@ -1850,6 +1928,10 @@ class RunRegistry:
             parameters=parameters,
             label=result[6],
             created_at=result[7],
+            status=result[8],
+            superseded_by=result[9],
+            status_reason=result[10],
+            status_updated_at=result[11],
         )
 
     def get_file_mappings(
@@ -1960,7 +2042,9 @@ class RunRegistry:
         result = self.conn.execute(
             """
             SELECT jc.run_hash, jc.session_id, jc.josh_path, jc.josh_content,
-                   jc.config_content, jc.file_mappings, jc.label, jc.created_at
+                   jc.config_content, jc.file_mappings, jc.label, jc.created_at,
+                   jc.status, jc.superseded_by, jc.status_reason,
+                   jc.status_updated_at
             FROM job_configs jc
             JOIN session_configs sc ON jc.run_hash = sc.run_hash
             WHERE sc.session_id = ?
@@ -1984,6 +2068,10 @@ class RunRegistry:
                     parameters=parameters,
                     label=row[6],
                     created_at=row[7],
+                    status=row[8],
+                    superseded_by=row[9],
+                    status_reason=row[10],
+                    status_updated_at=row[11],
                 )
             )
         return configs
@@ -1996,24 +2084,33 @@ class RunRegistry:
         label: str,
         force: bool = False,
         on_collision: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """Assign a human-readable label to a run configuration.
 
-        Labels are unique within a registry. When a collision occurs, the
-        behavior depends on ``force`` and ``on_collision``:
+        A label is a **pure alias** — the one handle you resolve to a run. It is
+        not where currency or run attributes live: currency is
+        :meth:`mark_run`/``status`` and attributes are tags (see
+        REGISTRY_PROVENANCE.md). Labels are unique within a registry; on
+        collision the behavior depends on ``force`` and ``on_collision``:
 
-        - Default: raise ``ValueError``
-        - ``force=True``: silently drop the old label and reassign
-        - ``on_collision="timestamp"``: rename the old label with a timestamp
-          suffix (e.g., ``baseline`` → ``baseline_20260402_153000``) and assign
-          the bare label to the new run
+        - Default: raise ``ValueError``.
+        - ``force=True``: silently drop the old label and reassign, leaving the
+          old run's status untouched. For "I mislabeled it, just fix it."
+        - ``on_collision="supersede"``: the old run **releases the label**
+          (``label = NULL``) and is marked ``status = 'superseded'`` with
+          ``superseded_by = run_hash`` and the given ``reason``; the new run
+          takes the label. This records real provenance instead of mangling the
+          old label with a timestamp suffix (the retired ``"timestamp"`` mode).
 
         Args:
             run_hash: The run hash to label.
             label: Human-readable label (e.g., "baseline", "high_mortality").
             force: If True, reassign the label even if already taken.
-            on_collision: Collision strategy. ``"timestamp"`` archives the old
-                label with a timestamp suffix. Mutually exclusive with ``force``.
+            on_collision: Collision strategy. ``"supersede"`` archives the old
+                run via supersession. Mutually exclusive with ``force``.
+            reason: Free-text explanation stored on the superseded run. Only
+                meaningful with ``on_collision="supersede"``.
 
         Raises:
             KeyError: If run_hash does not exist.
@@ -2026,12 +2123,12 @@ class RunRegistry:
             raise ValueError(
                 "force and on_collision are mutually exclusive. "
                 "Use force=True to drop the old label, or "
-                "on_collision='timestamp' to archive it."
+                "on_collision='supersede' to archive it."
             )
-        if on_collision is not None and on_collision != "timestamp":
+        if on_collision is not None and on_collision != "supersede":
             raise ValueError(
                 f"Invalid on_collision value: {on_collision!r}. "
-                "Must be 'timestamp' or None."
+                "Must be 'supersede' or None."
             )
 
         # Verify run_hash exists
@@ -2046,27 +2143,19 @@ class RunRegistry:
             "SELECT run_hash FROM job_configs WHERE label = ?", [label]
         ).fetchone()
         if taken is not None and taken[0] != run_hash:
-            if on_collision == "timestamp":
-                # Archive old label with timestamp suffix
-                old_created_at = self.conn.execute(
-                    "SELECT created_at FROM job_configs WHERE run_hash = ?",
-                    [taken[0]],
-                ).fetchone()[0]
-                ts = (
-                    old_created_at.strftime("%Y%m%d_%H%M%S")
-                    if old_created_at
-                    else datetime.now().strftime("%Y%m%d_%H%M%S")
+            if on_collision == "supersede":
+                # Old run releases the label and is marked superseded, pointing
+                # at the run that replaced it. It then falls out of list_labels()
+                # and current-only reads automatically — no timestamp suffix.
+                self.mark_run(
+                    taken[0],
+                    status="superseded",
+                    superseded_by=run_hash,
+                    reason=reason,
                 )
-                new_old_label = f"{label}_{ts}"
-                counter = 2
-                while self.conn.execute(
-                    "SELECT 1 FROM job_configs WHERE label = ?", [new_old_label]
-                ).fetchone() is not None:
-                    new_old_label = f"{label}_{ts}_{counter}"
-                    counter += 1
                 self.conn.execute(
-                    "UPDATE job_configs SET label = ? WHERE run_hash = ?",
-                    [new_old_label, taken[0]],
+                    "UPDATE job_configs SET label = NULL WHERE run_hash = ?",
+                    [taken[0]],
                 )
             elif force:
                 # Clear old assignment
@@ -2078,7 +2167,7 @@ class RunRegistry:
                 raise ValueError(
                     f"Label '{label}' already assigned to run {taken[0]}. "
                     f"Use force=True to reassign, or "
-                    f"on_collision='timestamp' to archive the old label."
+                    f"on_collision='supersede' to archive the old run."
                 )
 
         self.conn.execute(
@@ -2116,30 +2205,174 @@ class RunRegistry:
             raise KeyError(f"No run found with label '{label}'")
         return result[0]
 
-    def resolve_latest(self, prefix: str) -> str:
-        """Get the run_hash of the most recently created run whose label starts with prefix.
+    # ========== Run status / supersession ==========
 
-        Useful after ``on_collision="timestamp"`` to find the latest run among
-        ``"baseline"``, ``"baseline_20260402_153000"``, etc.
+    #: Closed vocabulary for ``job_configs.status``. ``None`` (unmarked) is read
+    #: as ``"active"`` everywhere via ``coalesce``.
+    _RUN_STATUSES = frozenset({"active", "superseded", "bad"})
+
+    def mark_run(
+        self,
+        run_hash: str,
+        status: str,
+        *,
+        superseded_by: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Set a run's lifecycle status.
+
+        ``status`` is a closed enum — ``"active"``, ``"superseded"``, or
+        ``"bad"`` — and is the single source of truth for whether a run should be
+        used. "Current" is exactly ``status == "active"`` (see
+        REGISTRY_PROVENANCE.md); there is no separate currency flag.
 
         Args:
-            prefix: Label prefix to match (e.g., "baseline").
-
-        Returns:
-            The run_hash of the most recently created matching run.
+            run_hash: The run to mark. Also accepts a label (resolved first).
+            status: One of ``{"active", "superseded", "bad"}``.
+            superseded_by: The run_hash that replaces this one. Required when
+                ``status == "superseded"`` and rejected otherwise. The target
+                must exist.
+            reason: Free-text explanation, stored alongside the status.
 
         Raises:
-            KeyError: If no runs have labels starting with prefix.
+            KeyError: If ``run_hash`` (or ``superseded_by``) does not exist.
+            ValueError: If ``status`` is not in the enum, if ``superseded_by`` is
+                given without ``status="superseded"`` (or vice versa), or if a
+                run is superseded by itself.
         """
-        result = self.conn.execute(
-            "SELECT run_hash FROM job_configs "
-            "WHERE label IS NOT NULL AND starts_with(label, ?) "
-            "ORDER BY created_at DESC LIMIT 1",
-            [prefix],
+        if status not in self._RUN_STATUSES:
+            raise ValueError(
+                f"Invalid status {status!r}. "
+                f"Must be one of {sorted(self._RUN_STATUSES)}."
+            )
+        if status == "superseded" and superseded_by is None:
+            raise ValueError(
+                "status='superseded' requires superseded_by (the replacing run_hash)."
+            )
+        if status != "superseded" and superseded_by is not None:
+            raise ValueError(
+                "superseded_by is only valid with status='superseded'."
+            )
+
+        run_hash = self._resolve_label_or_hash(run_hash)
+
+        if superseded_by is not None:
+            if superseded_by == run_hash:
+                raise ValueError("A run cannot supersede itself.")
+            target = self.conn.execute(
+                "SELECT run_hash FROM job_configs WHERE run_hash = ?",
+                [superseded_by],
+            ).fetchone()
+            if target is None:
+                raise KeyError(f"No run found with hash '{superseded_by}'")
+
+        # active is the resting state: clear the supersession link when returning
+        # a run to active so stale provenance doesn't linger.
+        self.conn.execute(
+            """
+            UPDATE job_configs
+            SET status = ?, superseded_by = ?, status_reason = ?,
+                status_updated_at = CURRENT_TIMESTAMP
+            WHERE run_hash = ?
+            """,
+            [status, superseded_by, reason, run_hash],
+        )
+
+    def get_run_status(self, label_or_hash: str) -> RunStatus:
+        """Get a run's lifecycle status.
+
+        Args:
+            label_or_hash: Label or run_hash of the run.
+
+        Returns:
+            A :class:`RunStatus`. Unmarked runs report ``status=None``, which
+            :attr:`RunStatus.effective_status` normalizes to ``"active"``.
+
+        Raises:
+            KeyError: If the label or hash is not found.
+        """
+        run_hash = self._resolve_label_or_hash(label_or_hash)
+        row = self.conn.execute(
+            """
+            SELECT status, superseded_by, status_reason, status_updated_at
+            FROM job_configs WHERE run_hash = ?
+            """,
+            [run_hash],
         ).fetchone()
-        if result is None:
-            raise KeyError(f"No runs found with label prefix '{prefix}'")
-        return result[0]
+        # _resolve_label_or_hash guarantees the row exists.
+        assert row is not None
+        return RunStatus(
+            run_hash=run_hash,
+            status=row[0],
+            superseded_by=row[1],
+            reason=row[2],
+            updated_at=row[3],
+        )
+
+    def supersede(
+        self,
+        run_hash: str,
+        replaces: str,
+        reason: str | None = None,
+    ) -> None:
+        """Mark ``run_hash`` as the replacement for an existing run.
+
+        Convenience wrapper over :meth:`mark_run` for the partial-rerun story:
+        the replaced run becomes ``status='superseded'`` pointing at ``run_hash``.
+        If the replaced run held a label, that label is released so it no longer
+        resolves to the stale run — attach it to the new run with
+        :meth:`label_run` if desired.
+
+        Args:
+            run_hash: The new, replacing run.
+            replaces: Label or run_hash of the run being retired.
+            reason: Free-text explanation stored on the superseded run.
+
+        Raises:
+            KeyError: If either run is not found.
+            ValueError: If a run would supersede itself.
+        """
+        old_hash = self._resolve_label_or_hash(replaces)
+        self.mark_run(
+            old_hash, status="superseded", superseded_by=run_hash, reason=reason
+        )
+        self.conn.execute(
+            "UPDATE job_configs SET label = NULL WHERE run_hash = ?", [old_hash]
+        )
+
+    def run_history(self, label_or_hash: str) -> list[RunDetail]:
+        """Walk the supersession chain for a run, newest (current) first.
+
+        Replaces the retired ``resolve_latest()`` prefix-matching. Starting from
+        the given run, follows ``superseded_by`` backwards to reconstruct the
+        lineage. Because supersession points from old → new, the chain is
+        recovered by finding, at each step, the run that the previous entry
+        supersedes.
+
+        Args:
+            label_or_hash: Label or run_hash of any run in the lineage. Typically
+                the current (active) run.
+
+        Returns:
+            A list of :class:`RunDetail`, current run first, then each run it
+            superseded, oldest last. Length 1 when nothing was superseded.
+
+        Raises:
+            KeyError: If the label or hash is not found.
+        """
+        head = self._resolve_label_or_hash(label_or_hash)
+        history: list[RunDetail] = []
+        seen: set[str] = set()
+        current: str | None = head
+        while current is not None and current not in seen:
+            seen.add(current)
+            history.append(self.get_run_info(current))
+            prev = self.conn.execute(
+                "SELECT run_hash FROM job_configs WHERE superseded_by = ?",
+                [current],
+            ).fetchone()
+            current = prev[0] if prev is not None else None
+        return history
 
     def export_config(self, label_or_hash: str, output_dir: str | Path) -> Path:
         """Export a run's config content to a file for IDE diffing.

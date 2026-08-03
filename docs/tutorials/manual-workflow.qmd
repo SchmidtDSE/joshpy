@@ -133,8 +133,9 @@ registry.close()
 
 What happens if we double `maxGrowth` from 50 to 100? Edit `baseline.jshc`
 (or use a second config file) and re-run with the **same label**. The
-`on_collision="timestamp"` option automatically archives the old run so the
-bare `"baseline"` label always points to your latest attempt:
+`on_collision="supersede"` option retires the old run — it releases the label
+and is marked `status="superseded"` pointing at the new run — so the bare
+`"baseline"` label always points to your latest attempt:
 
 ```{python}
 HIGH_GROWTH_CONFIG = Path("../../examples/configs/high_growth.jshc")
@@ -154,7 +155,7 @@ manager = (
     SweepManager.builder(config2)
     .with_registry(REGISTRY_PATH, experiment_name="high_growth")
     .with_cli(cli)
-    .with_label("baseline", on_collision="timestamp")
+    .with_label("baseline", on_collision="supersede", reason="doubled maxGrowth")
     .with_catalog(catalog, experiment_name="iteration_demo")
     .build()
 )
@@ -175,15 +176,17 @@ finally:
     manager.close()
 ```
 
-Both runs now live in the same DuckDB file. The old baseline was archived with
-a timestamp suffix, and `"baseline"` points to the new run:
+Both runs still live in the same DuckDB file, but the old baseline is now
+**superseded**: it released the `"baseline"` label (which points to the new run)
+and carries `status="superseded"` with a `superseded_by` link back to the new
+run. Its results stay queryable for provenance, but "current" reads skip it.
 
 ::: {.callout-tip title="Alternatives to on_collision"}
 If you prefer explicit control, you can use a separate `.jshc` file with its
 own label (e.g., `.with_label("high_growth")`), or call
-`registry.label_run(run_hash, "name")` after the fact. The `on_collision`
-approach is convenient when you're iterating quickly and want the bare label to
-always mean "latest."
+`registry.label_run(run_hash, "name")` after the fact. Use `force=True` instead
+of `on_collision="supersede"` when you simply mislabeled a run and want to move
+the label without recording a supersession.
 :::
 
 ## Step 3: Compare
@@ -210,27 +213,28 @@ affect the simulation; it identifies the run for downstream comparison and
 analysis.
 :::
 
-### Compare by Label
+### Trace the Supersession Lineage
 
-One line per labeled run. The archived run shows its timestamp suffix:
+`list_labels()` shows only the current `"baseline"`, because the old run
+released its label. To see the full iteration history — current run first, then
+each run it superseded — walk the lineage with `run_history()`:
 
 ```{python}
-#| label: fig-label-comparison
-#| fig-cap: "Average tree height by label: current baseline vs archived baseline."
-
-diag = SimulationDiagnostics(registry)
-
-diag.plot_comparison(
-    "averageHeight",
-    group_by="label",
-    title="Baseline Iterations",
-)
+for detail in registry.run_history("baseline"):
+    status = registry.get_run_status(detail.run_hash)
+    print(f"{detail.run_hash}  status={status.effective_status}  "
+          f"maxGrowth={detail.parameters.get('maxGrowth')}")
 ```
 
 ### Compare by Parameter Value
 
-Since `.jshc` parameters were auto-parsed, you can group by the parameter
-that actually changed -- often more useful than label grouping:
+Currency retires the *label*, not the *data*: both runs' results are still in
+the registry, so you can compare them by the parameter that actually changed.
+Since `.jshc` parameters were auto-parsed, group by that parameter directly:
+
+```{python}
+diag = SimulationDiagnostics(registry)
+```
 
 ```{python}
 #| label: fig-param-comparison
@@ -301,12 +305,29 @@ Labels are human-readable names for individual runs. Set them upfront with
 - **Single-job configs**: `.with_label("name")` works at build time
 - **Multi-job sweeps**: Label individual runs after the fact with
   `registry.label_run(run_hash, "name")`
-- **Re-running with the same label** (shown in Step 2): `on_collision="timestamp"`
-  archives the old holder with a timestamp suffix. `resolve_label("baseline")`
-  always returns the latest run, and `resolve_latest("baseline")` finds the
-  most recent among all `baseline*`-prefixed labels.
+- **Re-running with the same label** (shown in Step 2): `on_collision="supersede"`
+  retires the old holder — it releases the label and is marked
+  `status="superseded"` pointing at the new run — so `resolve_label("baseline")`
+  always returns the current run. Walk the lineage with
+  `registry.run_history("baseline")` (current first, then each superseded run).
 - **Force-reassigning a label**: `force=True` silently drops the old label
-  instead of archiving it.
+  without recording supersession — for the "I mislabeled it, just fix it" case.
+
+### Run status (currency)
+
+Every run has a lifecycle `status` — `active` (the default; also what an unmarked
+run reads as), `superseded`, or `bad`. "Current" is exactly `status = "active"`.
+Mark runs explicitly:
+
+- `registry.mark_run(run_hash, "bad", reason="...")` — exclude a run you no
+  longer trust.
+- `registry.supersede(new_hash, replaces="baseline", reason="...")` — record that
+  `new_hash` replaced an existing run (releasing its label).
+- `registry.get_run_status(label_or_hash)` — inspect a run's status,
+  `superseded_by` link, and reason.
+
+The `cell_data_current` view (`SELECT ... FROM cell_data_current`) restricts
+local SQL to rows from active runs only.
 
 ### Auto-Parsed Config Parameters
 
