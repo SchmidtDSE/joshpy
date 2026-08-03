@@ -29,9 +29,12 @@ start patch Default
   # Create trees in each patch
   ForeverTree.init = create 10 count of ForeverTree
 
-  # Read soil quality from external preprocessed data
-  # This value varies spatially based on the .jshd file content
-  soil_quality.step = external soil_quality
+  # Read soil quality from external preprocessed data.
+  # This value varies spatially based on the .jshd file content and is static
+  # in time, so pin it to record 0 with the explicit `at index 0` form. A bare
+  # `external soil_quality` now indexes by the current raw timestep (and warns),
+  # which would walk past a single-record spatial map on later steps.
+  soil_quality.step = external soil_quality at index 0
 
   # Export patch-level averages
   export.average_height.step = mean(ForeverTree.height)

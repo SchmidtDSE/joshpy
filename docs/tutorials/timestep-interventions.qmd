@@ -59,17 +59,17 @@ print(SOURCE_PATH.read_text())
 
 **Pattern 1: Init-time external data**
 ```josh
-# Read once at patch creation
-initial_density.init = external initial_density
+# Read once at patch creation (static flat-time data → pin to record 0)
+initial_density.init = external initial_density at index 0
 
 # Use to create variable populations (density/5 gives 0-20 trees)
-ForeverTree.init = create (initial_density / 5 percent) of ForeverTree
+ForeverTree.init = create round(initial_density / 5 percent) of ForeverTree
 ```
 
 **Pattern 2: Conditional timestep events**
 ```josh
-# Read severity at init (flat-time data), persist through steps
-fire_severity.init = external fire_severity
+# Read severity at init (flat-time data → pin to record 0), persist through steps
+fire_severity.init = external fire_severity at index 0
 fire_severity.step = prior.fire_severity
 
 # Detect fire step using meta.stepCount
@@ -539,7 +539,7 @@ plt.show()
 
 | Pattern | Event | Josh Syntax |
 |---------|-------|-------------|
-| **Init-time** | `*.init` | `density.init = external initial_density` |
+| **Init-time** | `*.init` | `density.init = external initial_density at index 0` |
 | **Conditional step** | `*.step` with guard | `is_fire.step = meta.stepCount == 5 count` |
 
 ### Organism Removal Pattern

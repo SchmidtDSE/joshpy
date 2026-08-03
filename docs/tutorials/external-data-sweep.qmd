@@ -54,10 +54,13 @@ print(SOURCE_PATH.read_text())
 
 **The `external` keyword:**
 ```josh
-soil_quality.step = external soil_quality
+soil_quality.step = external soil_quality at index 0
 ```
 This reads the `soil_quality` variable from a preprocessed `.jshd` file. The
-value varies spatially across the grid based on the file content.
+value varies spatially across the grid based on the file content. The soil map
+is static in time, so we pin the read to record 0 with `at index 0`: a bare
+`external soil_quality` indexes by the current raw timestep (and warns), which
+would walk past a single-record spatial map on later steps.
 
 **Accessing patch data from organisms:**
 ```josh
