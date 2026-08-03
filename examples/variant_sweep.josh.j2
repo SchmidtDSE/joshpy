@@ -24,7 +24,10 @@ start patch Default
 
   ForeverTree.init = create 10 count of ForeverTree
 
-  soil_quality.step = external soil_quality
+  # Static spatial soil map: pin to record 0. A bare `external soil_quality`
+  # now indexes by the current raw timestep (and warns), which would walk past
+  # a single-record map on later steps and collapse growth.
+  soil_quality.step = external soil_quality at index 0
 
   export.average_height.step = mean(ForeverTree.height)
   export.average_age.step = mean(ForeverTree.age)

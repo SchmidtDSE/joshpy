@@ -1499,43 +1499,30 @@ class TestLabelSystem(unittest.TestCase):
         config = self.registry.get_config_by_hash("hash_aaa111")
         self.assertIsNone(config.label)
 
-    def test_label_on_collision_timestamp(self):
-        """on_collision='timestamp' archives the old label with a timestamp suffix."""
+    def test_label_on_collision_supersede(self):
+        """on_collision='supersede' retires the old run and hands over the label."""
         self.registry.label_run("hash_aaa111", "baseline")
-        self.registry.label_run("hash_bbb222", "baseline", on_collision="timestamp")
+        self.registry.label_run(
+            "hash_bbb222", "baseline", on_collision="supersede",
+            reason="rerun with corrected scenario",
+        )
         # Bare label now points to the new run
         self.assertEqual(self.registry.resolve_label("baseline"), "hash_bbb222")
-        # Old run has a timestamped label
-        labels = self.registry.list_labels()
-        old_labels = [l for l, h in labels if h == "hash_aaa111"]
-        self.assertEqual(len(old_labels), 1)
-        self.assertRegex(old_labels[0], r"^baseline_\d{8}_\d{6}$")
-
-    def test_label_on_collision_timestamp_disambiguation(self):
-        """Same-second collisions get _2, _3 suffixes."""
-        # Register a third run
-        self.registry.register_run(
-            self.session_id, "hash_ccc333", "/sim.josh",
-            "param = 30 count", None, {"param": 30},
-        )
-        self.registry.label_run("hash_aaa111", "baseline")
-        self.registry.label_run("hash_bbb222", "baseline", on_collision="timestamp")
-        self.registry.label_run("hash_ccc333", "baseline", on_collision="timestamp")
-        # Bare label -> hash_ccc333
-        self.assertEqual(self.registry.resolve_label("baseline"), "hash_ccc333")
-        # Two archived labels, one with _2 suffix if same second
-        labels = {l: h for l, h in self.registry.list_labels()}
-        archived = [l for l in labels if l.startswith("baseline_")]
-        self.assertEqual(len(archived), 2)
-        # All three hashes should be labeled
-        self.assertEqual(len(labels), 3)
+        # Old run released its label and is superseded, pointing at the new run
+        old = self.registry.get_run_status("hash_aaa111")
+        self.assertEqual(old.status, "superseded")
+        self.assertEqual(old.superseded_by, "hash_bbb222")
+        self.assertEqual(old.reason, "rerun with corrected scenario")
+        self.assertIsNone(self.registry.get_config_by_hash("hash_aaa111").label)
+        # Only the current run appears in list_labels
+        self.assertEqual(self.registry.list_labels(), [("baseline", "hash_bbb222")])
 
     def test_label_force_and_on_collision_mutually_exclusive(self):
         """force=True and on_collision cannot be used together."""
         self.registry.label_run("hash_aaa111", "baseline")
         with self.assertRaises(ValueError) as ctx:
             self.registry.label_run(
-                "hash_bbb222", "baseline", force=True, on_collision="timestamp"
+                "hash_bbb222", "baseline", force=True, on_collision="supersede"
             )
         self.assertIn("mutually exclusive", str(ctx.exception))
 
@@ -1545,22 +1532,139 @@ class TestLabelSystem(unittest.TestCase):
             self.registry.label_run("hash_aaa111", "test", on_collision="invalid")
         self.assertIn("Invalid on_collision", str(ctx.exception))
 
-    def test_resolve_latest_single_match(self):
-        """resolve_latest returns the only matching run."""
-        self.registry.label_run("hash_aaa111", "baseline")
-        self.assertEqual(self.registry.resolve_latest("baseline"), "hash_aaa111")
+    def test_mark_run_bad(self):
+        """mark_run records a 'bad' status with a reason."""
+        self.registry.mark_run("hash_aaa111", "bad", reason="wrong forcing data")
+        status = self.registry.get_run_status("hash_aaa111")
+        self.assertEqual(status.status, "bad")
+        self.assertEqual(status.reason, "wrong forcing data")
+        self.assertIsNone(status.superseded_by)
+        self.assertIsNotNone(status.updated_at)
 
-    def test_resolve_latest_multiple_matches(self):
-        """resolve_latest returns the most recently created run."""
-        self.registry.label_run("hash_aaa111", "baseline")
-        self.registry.label_run("hash_bbb222", "baseline", on_collision="timestamp")
-        # hash_bbb222 was registered after hash_aaa111 so it has a later created_at
-        self.assertEqual(self.registry.resolve_latest("baseline"), "hash_bbb222")
+    def test_get_run_status_unmarked_is_active(self):
+        """An unmarked run reports status=None, read as active."""
+        status = self.registry.get_run_status("hash_aaa111")
+        self.assertIsNone(status.status)
+        self.assertEqual(status.effective_status, "active")
+        self.assertTrue(status.is_current)
 
-    def test_resolve_latest_no_match(self):
-        """resolve_latest raises KeyError when no labels match."""
+    def test_mark_run_invalid_status(self):
+        """An out-of-enum status raises ValueError."""
+        with self.assertRaises(ValueError):
+            self.registry.mark_run("hash_aaa111", "retired")
+
+    def test_mark_run_superseded_requires_target(self):
+        """status='superseded' without superseded_by is rejected."""
+        with self.assertRaises(ValueError):
+            self.registry.mark_run("hash_aaa111", "superseded")
+
+    def test_mark_run_superseded_target_must_exist(self):
+        """superseded_by must reference an existing run."""
         with self.assertRaises(KeyError):
-            self.registry.resolve_latest("nonexistent")
+            self.registry.mark_run(
+                "hash_aaa111", "superseded", superseded_by="nope"
+            )
+
+    def test_mark_run_cannot_supersede_self(self):
+        """A run cannot supersede itself."""
+        with self.assertRaises(ValueError):
+            self.registry.mark_run(
+                "hash_aaa111", "superseded", superseded_by="hash_aaa111"
+            )
+
+    def test_mark_run_back_to_active_clears_link(self):
+        """Returning a run to active clears its supersession link and reason."""
+        self.registry.mark_run(
+            "hash_aaa111", "superseded", superseded_by="hash_bbb222", reason="x"
+        )
+        self.registry.mark_run("hash_aaa111", "active")
+        status = self.registry.get_run_status("hash_aaa111")
+        self.assertEqual(status.status, "active")
+        self.assertIsNone(status.superseded_by)
+        self.assertIsNone(status.reason)
+
+    def test_supersede_sugar(self):
+        """supersede() retires the replaced run and releases its label."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.supersede("hash_bbb222", replaces="baseline", reason="rerun")
+        old = self.registry.get_run_status("hash_aaa111")
+        self.assertEqual(old.status, "superseded")
+        self.assertEqual(old.superseded_by, "hash_bbb222")
+        self.assertIsNone(self.registry.get_config_by_hash("hash_aaa111").label)
+
+    def test_run_history_walks_chain(self):
+        """run_history returns the lineage current-first."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        self.registry.label_run(
+            "hash_bbb222", "baseline", on_collision="supersede"
+        )
+        history = self.registry.run_history("baseline")
+        self.assertEqual(
+            [d.run_hash for d in history], ["hash_bbb222", "hash_aaa111"]
+        )
+
+    def test_run_history_single(self):
+        """run_history of a run that superseded nothing is length 1."""
+        self.registry.label_run("hash_aaa111", "baseline")
+        history = self.registry.run_history("baseline")
+        self.assertEqual([d.run_hash for d in history], ["hash_aaa111"])
+
+
+@unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")
+class TestStatusMigration(unittest.TestCase):
+    """Tests that older databases (no status columns) migrate forward."""
+
+    def test_old_db_gets_status_columns_and_view(self):
+        """Opening a pre-status database adds the columns and the current view."""
+        from joshpy.registry import RunRegistry
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "old.duckdb")
+
+            # Simulate a database created before the status columns existed:
+            # a job_configs with only the legacy column set, plus a row.
+            conn = duckdb.connect(db_path)
+            conn.execute(
+                """
+                CREATE TABLE job_configs (
+                    run_hash        VARCHAR(12) PRIMARY KEY,
+                    session_id      VARCHAR,
+                    josh_path       TEXT,
+                    josh_content    TEXT,
+                    config_content  TEXT,
+                    file_mappings   JSON,
+                    label           VARCHAR,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO job_configs (run_hash, config_content) VALUES (?, ?)",
+                ["legacyhash01", "content"],
+            )
+            conn.close()
+
+            # Opening through RunRegistry should migrate it in place.
+            registry = RunRegistry(db_path)
+            try:
+                # Columns exist and the legacy row reads as active.
+                status = registry.get_run_status("legacyhash01")
+                self.assertIsNone(status.status)
+                self.assertEqual(status.effective_status, "active")
+
+                # The current view exists and includes the legacy (active) row.
+                rows = registry.conn.execute(
+                    "SELECT COUNT(*) FROM cell_data_current"
+                ).fetchone()
+                self.assertEqual(rows[0], 0)  # no cell_data yet, but view resolves
+
+                # Marking it bad still works post-migration.
+                registry.mark_run("legacyhash01", "bad", reason="legacy")
+                self.assertEqual(
+                    registry.get_run_status("legacyhash01").status, "bad"
+                )
+            finally:
+                registry.close()
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb not installed")

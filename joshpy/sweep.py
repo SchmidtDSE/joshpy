@@ -1875,6 +1875,7 @@ class SweepManagerBuilder:
         self._label: str | None = None
         self._label_force: bool = False
         self._label_on_collision: str | None = None
+        self._label_reason: str | None = None
         # Batch-remote dispatch defaults (set via with_batch_remote()).
         self._batch_remote_target: str | None = None
         self._batch_no_wait: bool = False
@@ -2017,6 +2018,7 @@ class SweepManagerBuilder:
         label: str,
         force: bool = False,
         on_collision: str | None = None,
+        reason: str | None = None,
     ) -> SweepManagerBuilder:
         """Set a label for this run.
 
@@ -2034,9 +2036,14 @@ class SweepManagerBuilder:
             label: Human-readable label for this run.
             force: If True, reassign the label even if already taken
                 (drops the old label).
-            on_collision: Collision strategy. ``"timestamp"`` archives the
-                old label with a timestamp suffix so the bare label always
-                points to the latest run. Mutually exclusive with ``force``.
+            on_collision: Collision strategy. ``"supersede"`` archives the old
+                run via supersession — the old run releases the label and is
+                marked ``status='superseded'`` pointing at the new run — so the
+                bare label always points to the current run. Mutually exclusive
+                with ``force``. See ``registry.label_run`` and
+                REGISTRY_PROVENANCE.md.
+            reason: Free-text explanation stored on the superseded run when
+                ``on_collision="supersede"``.
 
         Returns:
             Self for chaining.
@@ -2049,17 +2056,19 @@ class SweepManagerBuilder:
             ...     .build()
             ... )
 
-            >>> # Re-run with same label, archive the old one
+            >>> # Re-run with same label, supersede the old run
             >>> manager = (
             ...     SweepManager.builder(config)
             ...     .with_registry("experiment.duckdb")
-            ...     .with_label("baseline", on_collision="timestamp")
+            ...     .with_label("baseline", on_collision="supersede",
+            ...                 reason="rerun with corrected scenario")
             ...     .build()
             ... )
         """
         self._label = label
         self._label_force = force
         self._label_on_collision = on_collision
+        self._label_reason = reason
         return self
 
     def with_batch_remote(
@@ -2266,6 +2275,7 @@ class SweepManagerBuilder:
                             effective_label,
                             force=self._label_force,
                             on_collision=self._label_on_collision,
+                            reason=self._label_reason,
                         )
                         job.label = effective_label
                         job.custom_tags["label"] = effective_label

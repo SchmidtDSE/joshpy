@@ -575,6 +575,17 @@ def format_run_info(registry: RunRegistry, label_or_hash: str) -> str:
     )
     lines.append(f"Created:  {created}")
 
+    # Status: only show when not the default 'active', so unmarked runs stay
+    # uncluttered. Superseded/bad runs surface why and (for supersession) what
+    # replaced them.
+    if not config.is_current:
+        status_line = f"Status:   {config.effective_status}"
+        if config.superseded_by:
+            status_line += f" (by {config.superseded_by})"
+        lines.append(status_line)
+        if config.status_reason:
+            lines.append(f"  reason: {config.status_reason}")
+
     # Parameters
     lines.append("")
     lines.append("Parameters:")

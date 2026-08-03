@@ -2061,7 +2061,47 @@ registry.export_config("high_mortality", Path("tmp/"))
 # $ code --diff tmp/baseline.jshc tmp/high_mortality.jshc
 ```
 
-Labels are unique within a registry. `force=True` reassigns an existing label.
+Labels are unique within a registry. A label is a **pure alias** — the one
+handle you resolve to a run. It is not where currency or run attributes live:
+currency is `status` (below) and attributes are tags. `force=True` reassigns an
+existing label without recording provenance (for a plain mislabel fix).
+
+### Run Status and Supersession
+
+Every run has a lifecycle `status` — a closed enum `{active, superseded, bad}`.
+"Current" is exactly `status == "active"`; an unmarked run stores `NULL`, read as
+`active`. Status is the single source of truth for whether a run should be used.
+
+```python
+# Mark a run you no longer trust
+registry.mark_run("abc123", "bad", reason="wrong forcing data")
+
+# Record that a rerun replaces an existing run (old run releases its label,
+# becomes status='superseded' with a superseded_by link)
+registry.supersede("def456", replaces="baseline", reason="rerun w/ historical scenario")
+
+# Inspect status
+st = registry.get_run_status("abc123")
+st.status, st.superseded_by, st.reason, st.effective_status  # None -> "active"
+
+# Walk the supersession lineage, current run first (replaces resolve_latest)
+registry.run_history("baseline")   # [RunDetail(current), RunDetail(older), ...]
+```
+
+Re-running under the same label supersedes the old holder automatically:
+
+```python
+registry.label_run("def456", "baseline", on_collision="supersede",
+                   reason="rerun with corrected scenario")
+# old run: label=NULL, status='superseded', superseded_by='def456'
+# new run: label='baseline', status='active'
+```
+
+The old `on_collision="timestamp"` mode and `resolve_latest()` are **removed** —
+supersession records real provenance instead of mangling label strings. Because
+the archived run releases its label, it disappears from `list_labels()` and
+current-only reads automatically. A non-materialized `cell_data_current` view
+(`SELECT ... FROM cell_data_current`) restricts local SQL to active runs.
 
 ### SweepManager Integration
 
@@ -2071,6 +2111,7 @@ manager = (
     .with_registry("experiment.duckdb", experiment_name="baseline")
     .with_cli(cli)
     .with_label("baseline")    # applied at build() time
+    # re-run: .with_label("baseline", on_collision="supersede", reason="...")
     .build()
 )
 ```

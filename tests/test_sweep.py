@@ -1105,8 +1105,8 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
         self.assertIsNone(config_info.label)
         registry.close()
 
-    def test_with_label_on_collision_timestamp(self):
-        """with_label(on_collision='timestamp') should archive old label."""
+    def test_with_label_on_collision_supersede(self):
+        """with_label(on_collision='supersede') should retire the old run."""
         from joshpy.registry import RunRegistry
 
         registry = RunRegistry(":memory:")
@@ -1131,7 +1131,7 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
         m2 = (
             SweepManagerBuilder(config2)
             .with_registry(registry, experiment_name="test2")
-            .with_label("baseline", on_collision="timestamp")
+            .with_label("baseline", on_collision="supersede", reason="rerun")
             .build()
         )
         hash2 = m2.job_set.jobs[0].run_hash
@@ -1139,10 +1139,13 @@ class TestSweepManagerCatalogIntegration(unittest.TestCase):
 
         # Bare label points to new run
         self.assertEqual(registry.resolve_label("baseline"), hash2)
-        # Old run has a timestamped label
+        # Old run released its label and is superseded, pointing at the new run
         old_config = registry.get_config_by_hash(hash1)
-        self.assertIsNotNone(old_config.label)
-        self.assertRegex(old_config.label, r"^baseline_\d{8}_\d{6}")
+        self.assertIsNone(old_config.label)
+        old_status = registry.get_run_status(hash1)
+        self.assertEqual(old_status.status, "superseded")
+        self.assertEqual(old_status.superseded_by, hash2)
+        self.assertEqual(old_status.reason, "rerun")
         registry.close()
 
 

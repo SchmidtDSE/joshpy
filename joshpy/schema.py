@@ -21,7 +21,14 @@ CREATE TABLE IF NOT EXISTS job_configs (
     config_content  TEXT,
     file_mappings   JSON,
     label           VARCHAR,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- Lifecycle status: closed enum {active, superseded, bad}. NULL == 'active'
+    -- (read via coalesce(status,'active')). Drives default read filtering and
+    -- supersession provenance. See REGISTRY_PROVENANCE.md.
+    status            VARCHAR,
+    superseded_by     VARCHAR(12),
+    status_reason     TEXT,
+    status_updated_at TIMESTAMP
 );
 
 
@@ -88,4 +95,17 @@ CREATE TABLE IF NOT EXISTS run_tags (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (scope, key)
 );
+"""
+
+# "Current" cell_data: rows belonging to active runs only. "Current" collapses
+# entirely into status='active' (NULL read as active). Non-materialized, so there
+# is no refresh cost. Created after the status columns are guaranteed to exist
+# (see RunRegistry._migrate_schema), since older databases predate them and the
+# view references status. See REGISTRY_PROVENANCE.md.
+CELL_DATA_CURRENT_VIEW_SQL = """
+CREATE OR REPLACE VIEW cell_data_current AS
+    SELECT c.*
+    FROM cell_data c
+    JOIN job_configs j USING (run_hash)
+    WHERE coalesce(j.status, 'active') = 'active';
 """

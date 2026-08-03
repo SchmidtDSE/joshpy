@@ -213,8 +213,9 @@ finally:
 ### Run 3: Re-run gradient with tweaked growth (same label)
 
 What if you want to iterate on the gradient run but keep calling it
-`"gradient_low"`? Use `on_collision="timestamp"` to automatically archive the
-old label:
+`"gradient_low"`? Use `on_collision="supersede"` to retire the old run — it
+releases the label and is marked superseded — so the bare label always points
+to your latest attempt:
 
 ```{python}
 config_gradient_v2 = JobConfig(
@@ -231,7 +232,7 @@ manager = (
     SweepManager.builder(config_gradient_v2)
     .with_registry(ADHOC_REGISTRY, experiment_name="gradient_low_v2")
     .with_cli(cli)
-    .with_label("gradient_low", on_collision="timestamp")
+    .with_label("gradient_low", on_collision="supersede", reason="tweaked maxGrowth")
     .with_catalog(catalog, experiment_name="adhoc_iteration")
     .build()
 )
@@ -250,12 +251,14 @@ finally:
     manager.close()
 ```
 
-The old `"gradient_low"` run is now archived under a timestamped label. The
-bare label points to the new run:
+The old `"gradient_low"` run is now superseded — it released its label, and the
+bare label points to the new run. The superseded run stays in the registry for
+provenance (walk it with `run_history("gradient_low")`) but no longer appears in
+`list_labels()`:
 
 ```{python}
 registry = RunRegistry(ADHOC_REGISTRY)
-print("Labels after collision:")
+print("Labels after supersession:")
 for label, run_hash in registry.list_labels():
     print(f"  {label} -> {run_hash}")
 registry.close()
@@ -263,8 +266,8 @@ registry.close()
 
 ### Compare
 
-All three labeled runs (the archived timestamped one, the new `gradient_low`,
-and `stripes_high`) appear in the comparison:
+Both current labeled runs (the latest `gradient_low` and `stripes_high`) appear
+in the comparison; the superseded run dropped its label and is excluded:
 
 ```{python}
 #| label: fig-adhoc-comparison

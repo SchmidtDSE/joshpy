@@ -41,12 +41,13 @@ start patch Default
   # =========================================================================
   # Read initial tree density from preprocessed spatial data at init time.
   # This value is read once at patch creation and determines tree creation.
-  initial_density.init = external initial_density
+  initial_density.init = external initial_density at index 0
   
   # Create trees based on the spatial initial density data
   # Density is 0-100%, we create trees proportional to density
-  # Using a simple scaling: density/5 gives 0-20 trees per patch
-  ForeverTree.init = create (initial_density / 5 percent) of ForeverTree
+  # Using a simple scaling: density/5 gives 0-20 trees per patch.
+  # `create ... of` requires a whole number, so round the scaled density.
+  ForeverTree.init = create round(initial_density / 5 percent) of ForeverTree
 
   # =========================================================================
   # ORGANISM REMOVAL PATTERN: Filter out dead organisms at start of step
@@ -63,7 +64,7 @@ start patch Default
   # =========================================================================
   # Read fire severity from external data at INIT time (flat-time data)
   # This loads the spatial pattern once, then we use it when fire occurs
-  fire_severity.init = external fire_severity
+  fire_severity.init = external fire_severity at index 0
   fire_severity.step = prior.fire_severity
   
   # Detect when fire event should occur
