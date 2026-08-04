@@ -721,7 +721,7 @@ def _make_synced_registry(run_hash, replicate_steps=(0, 1)):
             "VALUES (?, ?, ?, 0, ?)",
             [run_id, run_hash, step, 5.0 + step],
         )
-    registry.tag_by_run_hash(run_hash, site="JOTR001")
+    registry.set_attributes(run_hash, site="JOTR001")
     return registry
 
 
@@ -754,7 +754,7 @@ class TestMinioRegistrySync:
             "SELECT run_hash, step, averageHeight FROM cell_data ORDER BY step"
         ).fetchall()
         assert rows == [(run_hash, 0, 5.0), (run_hash, 1, 6.0)]
-        assert dst.get_tags_by_run_hash(run_hash) == {"site": "JOTR001"}
+        assert dst.get_attributes(run_hash) == {"site": "JOTR001"}
         dst.close()
 
     def test_pull_restore_replaces_local_state(self, minio_available, test_bucket):

@@ -314,6 +314,12 @@ quartodoc:
         - registry.ConfigInfo
         - registry.RunInfo
         - registry.RunDetail
+        - registry.RunStatus
+        - registry.AttributeMatch
+        - registry.TargetDesign
+        - registry.Requirement
+        - registry.RequirementCoverage
+        - registry.TargetCoverageReport
         - registry.DropSummary
         - registry.ConsistencyIssue
         - registry.DataSummary

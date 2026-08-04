@@ -312,12 +312,13 @@ Key design decisions:
   (e.g., `averageHeight DOUBLE`), added when data is loaded.
 - **Labels.** The `label` column on `job_configs` gives human-readable names to
   runs for ad-hoc iteration workflows.
-- **Tags are a sidecar, not a foreign key.** `run_tags` (`scope`, `key`) → JSON
-  is deliberately undeclared as a relationship: `tag_by_run_hash`/
-  `tag_by_session_id`/`tag_by_run_id` validate the target exists in Python,
-  then join by value equality (e.g. `rt.key = cd.run_hash`) -- the same
-  run_hash value is already denormalized across several tables, so there's no
-  single "owning" table to point a real FK at.
+- **Attributes/tags are a sidecar, not a foreign key.** `run_tags` (`scope`,
+  `key`) → JSON is deliberately undeclared as a relationship: `set_attributes`
+  (the run-level `run_hash` slice) / `tag_by_session_id` / `tag_by_run_id`
+  validate the target exists in Python, then join by value equality (e.g.
+  `rt.key = cd.run_hash`) -- the same run_hash value is already denormalized
+  across several tables, so there's no single "owning" table to point a real FK
+  at.
 
 ::: {.callout-tip title="Git provenance"}
 `create_session()` automatically records the current git HEAD hash (plus dirty

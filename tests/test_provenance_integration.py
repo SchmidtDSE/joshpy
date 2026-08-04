@@ -164,3 +164,144 @@ class TestSupersessionEndToEnd:
             assert raw == before
         finally:
             registry.close()
+
+
+@pytest.mark.skipif(
+    not SOURCE_PATH.exists() or not HIGH_GROWTH_CONFIG.exists(),
+    reason="tutorial example files not present",
+)
+class TestAttributeCurrencyEndToEnd:
+    """Real-JAR attribute currency + coverage (REGISTRY_PROVENANCE.md §7, §12)."""
+
+    def _two_runs(self, josh_cli, registry_path):
+        baseline_cfg = JobConfig(
+            source_path=SOURCE_PATH, config_path=BASELINE_CONFIG,
+            simulation="Main", replicates=2,
+        )
+        old_hash = _run(
+            josh_cli, registry_path, baseline_cfg,
+            experiment="baseline", label="spin",
+        )
+        high_cfg = JobConfig(
+            source_path=SOURCE_PATH, config_path=HIGH_GROWTH_CONFIG,
+            simulation="Main", replicates=2,
+        )
+        new_hash = _run(
+            josh_cli, registry_path, high_cfg,
+            experiment="high_growth", label="nospin",
+        )
+        return old_hash, new_hash
+
+    def test_find_by_attribute_honors_currency(self, josh_cli, tmp_path):
+        from joshpy.registry import AttributeMatch
+
+        registry_path = str(tmp_path / "attrs.duckdb")
+        old_hash, new_hash = self._two_runs(josh_cli, registry_path)
+
+        registry = RunRegistry(registry_path)
+        try:
+            registry.set_attributes(old_hash, scenario="historical")
+            registry.set_attributes(new_hash, scenario="historical")
+
+            # Both match until one is retired.
+            assert set(registry.find_by_attribute("scenario", "historical")) == {
+                old_hash, new_hash,
+            }
+            registry.mark_run(old_hash, "bad", reason="wrong forcing data")
+
+            assert registry.find_by_attribute("scenario", "historical") == [new_hash]
+            assert set(
+                registry.find_by_attribute("scenario", "historical", current_only=False)
+            ) == {old_hash, new_hash}
+            assert registry.find_current_by_attribute("scenario", "historical") == [
+                AttributeMatch(new_hash, "nospin", {"scenario": "historical"}),
+            ]
+        finally:
+            registry.close()
+
+    def test_check_design_over_real_runs(self, josh_cli, tmp_path):
+        from joshpy.registry import Requirement, TargetDesign
+
+        registry_path = str(tmp_path / "coverage.duckdb")
+        spin_hash, nospin_hash = self._two_runs(josh_cli, registry_path)
+
+        registry = RunRegistry(registry_path)
+        try:
+            registry.set_attributes(
+                spin_hash, scenario="historical", treatment="spinup"
+            )
+            registry.set_attributes(
+                nospin_hash, scenario="historical", treatment="no_spinup"
+            )
+            design = TargetDesign(
+                "jotr",
+                [
+                    Requirement({"scenario": "historical", "treatment": "spinup"}),
+                    Requirement({"scenario": "historical", "treatment": "no_spinup"}),
+                ],
+            )
+            registry.register_design(design)
+            assert registry.check_design("jotr").complete
+
+            # Marking one cell's only run bad makes the design incomplete, but the
+            # bad run is surfaced so the cell reads "present but bad".
+            registry.mark_run(nospin_hash, "bad", reason="corrupt")
+            report = registry.check_design("jotr")
+            assert not report.complete
+            unmet = report.unmet
+            assert len(unmet) == 1
+            assert unmet[0].attributes["treatment"] == "no_spinup"
+            assert unmet[0].non_active_matches == [(nospin_hash, "bad")]
+        finally:
+            registry.close()
+
+
+@pytest.mark.skipif(
+    not SOURCE_PATH.exists() or not BASELINE_CONFIG.exists(),
+    reason="tutorial example files not present",
+)
+class TestBadRedispatchEndToEnd:
+    """A run marked bad is dropped and re-dispatched fresh (REGISTRY_PROVENANCE §11.1)."""
+
+    def test_bad_run_is_redone_on_rerun(self, josh_cli, tmp_path):
+        registry_path = str(tmp_path / "redo.duckdb")
+        cfg = JobConfig(
+            source_path=SOURCE_PATH, config_path=BASELINE_CONFIG,
+            simulation="Main", replicates=2,
+        )
+        first_hash = _run(
+            josh_cli, registry_path, cfg, experiment="baseline", label="baseline",
+        )
+
+        # Capture the original executions, then condemn the run.
+        registry = RunRegistry(registry_path)
+        try:
+            original_run_ids = {
+                r.run_id for r in registry.get_runs_for_hash(first_hash)
+            }
+            assert original_run_ids
+            registry.mark_run(first_hash, "bad", reason="transient failure")
+        finally:
+            registry.close()
+
+        # Re-running the identical config yields the same hash; the bad run is
+        # dropped and re-dispatched, so it comes back active with fresh rows.
+        second_hash = _run(
+            josh_cli, registry_path, cfg, experiment="baseline", label="baseline",
+        )
+        assert second_hash == first_hash
+
+        registry = RunRegistry(registry_path)
+        try:
+            status = registry.get_run_status(first_hash)
+            assert status.effective_status == "active", status
+            # Fresh executions replaced the dropped ones (no lingering bad rows).
+            new_run_ids = {r.run_id for r in registry.get_runs_for_hash(first_hash)}
+            assert new_run_ids and new_run_ids.isdisjoint(original_run_ids)
+            current_rows = registry.conn.execute(
+                "SELECT COUNT(*) FROM cell_data_current WHERE run_hash = ?",
+                [first_hash],
+            ).fetchone()[0]
+            assert current_rows > 0
+        finally:
+            registry.close()

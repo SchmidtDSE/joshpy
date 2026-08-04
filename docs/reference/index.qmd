@@ -71,6 +71,12 @@ DuckDB-backed experiment tracking
 | [registry.ConfigInfo](registry.ConfigInfo.qmd#joshpy.registry.ConfigInfo) | Information about a job configuration. |
 | [registry.RunInfo](registry.RunInfo.qmd#joshpy.registry.RunInfo) | Information about a job run. |
 | [registry.RunDetail](registry.RunDetail.qmd#joshpy.registry.RunDetail) | Aggregated detail for a single run. |
+| [registry.RunStatus](registry.RunStatus.qmd#joshpy.registry.RunStatus) | Lifecycle status of a single run. |
+| [registry.AttributeMatch](registry.AttributeMatch.qmd#joshpy.registry.AttributeMatch) | A current run matched by an analysis attribute. |
+| [registry.TargetDesign](registry.TargetDesign.qmd#joshpy.registry.TargetDesign) | A named, standing completeness expectation over run attributes. |
+| [registry.Requirement](registry.Requirement.qmd#joshpy.registry.Requirement) | One cell of a :class:`TargetDesign`: a required attribute conjunction. |
+| [registry.RequirementCoverage](registry.RequirementCoverage.qmd#joshpy.registry.RequirementCoverage) | Coverage of a single :class:`Requirement`, as computed by check_design. |
+| [registry.TargetCoverageReport](registry.TargetCoverageReport.qmd#joshpy.registry.TargetCoverageReport) | Result of checking a :class:`TargetDesign` against the registry. |
 | [registry.DropSummary](registry.DropSummary.qmd#joshpy.registry.DropSummary) | Rows removed by :meth:`RunRegistry.drop_run`, per table. |
 | [registry.ConsistencyIssue](registry.ConsistencyIssue.qmd#joshpy.registry.ConsistencyIssue) | A run<->analysis consistency problem found by :meth:`RunRegistry.check_consistency`. |
 | [registry.DataSummary](registry.DataSummary.qmd#joshpy.registry.DataSummary) | Summary of data loaded in the registry. |

@@ -2063,8 +2063,9 @@ registry.export_config("high_mortality", Path("tmp/"))
 
 Labels are unique within a registry. A label is a **pure alias** — the one
 handle you resolve to a run. It is not where currency or run attributes live:
-currency is `status` (below) and attributes are tags. `force=True` reassigns an
-existing label without recording provenance (for a plain mislabel fix).
+currency is `status` (below) and factors are **attributes** (`set_attributes`,
+below). `force=True` reassigns an existing label without recording provenance
+(for a plain mislabel fix).
 
 ### Run Status and Supersession
 
@@ -2101,7 +2102,71 @@ The old `on_collision="timestamp"` mode and `resolve_latest()` are **removed** �
 supersession records real provenance instead of mangling label strings. Because
 the archived run releases its label, it disappears from `list_labels()` and
 current-only reads automatically. A non-materialized `cell_data_current` view
-(`SELECT ... FROM cell_data_current`) restricts local SQL to active runs.
+(`SELECT ... FROM cell_data_current`) restricts local SQL to active runs, and the
+`DiagnosticQueries` convenience methods read through it so diagnostics honor
+currency by default.
+
+### Run Attributes (what a run is *about*)
+
+Attributes are the sanctioned home for run-level factors (site, treatment,
+scenario) and the join keys linking runs to CSV output — the run-level slice of
+the `run_tags` sidecar (`run_hash` scope). They replace encoding factors into
+label strings.
+
+```python
+registry.set_attributes("abc123", scenario="historical", treatment="spinup")
+registry.get_attributes("abc123")          # {"scenario": "historical", "treatment": "spinup"}
+registry.list_attribute_keys()             # ["scenario", "treatment"]
+
+# Reverse lookup, currency-aware: active runs only by default.
+registry.find_by_attribute("scenario", "historical")                    # [run_hash, ...]
+registry.find_by_attribute("scenario", "historical", current_only=False)  # include superseded/bad
+registry.find_current_by_attribute("scenario", "historical")            # [AttributeMatch(run_hash, label, attributes), ...]
+```
+
+The general `run_tags` facility remains for non-run metadata:
+`tag_by_session_id` / `tag_by_run_id` (validated scopes) and `tag_custom` /
+`get_custom_tags` / `find_tagged` (open synthetic scopes, e.g. a `site` shared by
+many runs).
+
+### Target Designs (attribute-based completeness)
+
+A `TargetDesign` is a named, persisted expectation: a set of `Requirement`s, each
+a conjunction of required attributes plus a `min_active` count. Completeness is
+asserted over **attributes, not run_hashes**, against active runs only — so it
+makes no claim on how runs were produced (a yaml job, an interactive run, and a
+sweep all count identically), resting on diligent tagging.
+
+```python
+from joshpy import TargetDesign, Requirement
+
+design = TargetDesign("jotr_fire_2026", requirements=[
+    Requirement({"scenario": "historical", "treatment": "spinup"}),
+    Requirement({"scenario": "historical", "treatment": "no_spinup"}),
+])
+registry.register_design(design)              # persisted; re-register replaces
+report = registry.check_design("jotr_fire_2026")
+report.complete                               # every requirement satisfied?
+for rc in report.unmet:
+    rc.attributes, rc.found, rc.min_active    # which cell is short, and by how much
+    rc.non_active_matches                     # [(run_hash, "bad"), ...] — present but retired
+```
+
+A requirement matches by **superset** (a run with extra attributes still
+counts); `bad`/`superseded` runs never satisfy but are surfaced, so an unmet cell
+that *has* runs reads as "present but retired", not "nothing ran". Replicate
+adequacy stays with `check_consistency`; coverage answers "enough *current* runs
+for this cell". `list_designs()` / `get_design()` / `delete_design()` manage them.
+
+### `bad` triggers re-dispatch
+
+Marking a run `bad` is the one status that affects dispatch: on the next sweep,
+a run whose only occupant is `bad` is **not** a satisfied cell, so it is
+re-dispatched regardless of collision policy. The registry `reset_run`s it (clears
+its executions/results and reactivates it, keeping the config row) and dispatches
+in full, so the fresh run is active and overwrites the stale outputs. The
+wrong-inputs case needs nothing: a corrected input changes the content hash, so
+it simply dispatches as a brand-new run and the old `bad` run stays excluded.
 
 ### SweepManager Integration
 

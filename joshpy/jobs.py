@@ -2152,7 +2152,11 @@ def run_sweep(
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
 
             from joshpy.cli import CLIResult
-            from joshpy.sweep import SweepCollisionError, resolve_collision_action
+            from joshpy.sweep import (
+                SweepCollisionError,
+                _run_hash_is_bad,
+                resolve_collision_action,
+            )
 
             mode = "batch-remote" if batch_remote else ("remote" if remote else "local")
 
@@ -2161,9 +2165,29 @@ def run_sweep(
             # 'skip'/'pool' apply to local and Josh Cloud too. Evaluate only when
             # it can change behavior, to avoid an extra inspect_exports on the
             # default local path.
+            resolves_collision = batch_remote or collision_policy in ("skip", "pool")
+
+            # A run explicitly marked bad is redone regardless of policy
+            # (REGISTRY_PROVENANCE.md §11.1). When resolve_collision_action runs
+            # it performs the reset+full-dispatch itself (before listing outputs,
+            # so stale files can't trigger a skip). The default local 'fail' path
+            # dedups nothing and never calls resolve, so handle the reset here for
+            # it — a cheap status probe, no inspect_exports.
+            if (
+                not resolves_collision
+                and registry is not None
+                and _run_hash_is_bad(registry, job.run_hash)
+            ):
+                registry.reset_run(job.run_hash)
+                if not quiet:
+                    print(
+                        f"  [POLICY] {job.run_hash} was marked bad; reset and "
+                        f"re-dispatching in full."
+                    )
+
             action = None
             patch_info = None
-            if batch_remote or collision_policy in ("skip", "pool"):
+            if resolves_collision:
                 action, patch_info = resolve_collision_action(
                     cli, job, registry, collision_policy, quiet=quiet,
                 )
