@@ -1905,22 +1905,22 @@ def _register_job_outputs(
         "run_hash": job.run_hash,
     }
 
-    output_specs: list[tuple[str, str]] = []
+    output_specs: list[tuple[str, Any]] = []
     for export_type, info in paths.export_files.items():
         if info is not None:
-            output_specs.append((f"export.{export_type}", info.path))
+            output_specs.append((f"export.{export_type}", info))
     for debug_type, info in paths.debug_files.items():
         if info is not None:
-            output_specs.append((f"debug.{debug_type}", info.path))
+            output_specs.append((f"debug.{debug_type}", info))
 
     seen: set[tuple[str, str]] = set()
     replicates = max(job.replicates, 1)
 
-    for output_type, template in output_specs:
+    for output_type, info in output_specs:
         for replicate in range(replicates):
             kwargs = {**resolve_kwargs, "replicate": replicate}
             try:
-                resolved = paths.resolve_path(template, **kwargs)
+                resolved = paths.resolve_path(info.path, **kwargs)
             except KeyError as e:
                 if not quiet:
                     print(
@@ -1933,7 +1933,15 @@ def _register_job_outputs(
                     print(f"  [WARN] Could not resolve {output_type} path: {e}")
                 continue
 
-            key = (output_type, str(resolved))
+            # Store a full URI, not just the path component. For remote exports
+            # (minio/s3) ExportFileInfo.path drops the bucket (host), so the bare
+            # resolved path is not addressable; reattach protocol+host. Local
+            # paths are stored as-is. This makes run_outputs.file_path the
+            # authoritative, jar-free source of export URIs for remote
+            # aggregation (REGISTRY_PROVENANCE.md §8).
+            file_path = _resolved_output_uri(info, resolved)
+
+            key = (output_type, file_path)
             if key in seen:
                 continue
             seen.add(key)
@@ -1948,11 +1956,27 @@ def _register_job_outputs(
             registry.register_output(
                 run_id=run_id,
                 output_type=output_type,
-                file_path=str(resolved),
+                file_path=file_path,
                 file_size=file_size,
             )
 
     return paths
+
+
+def _resolved_output_uri(info: Any, resolved: Path) -> str:
+    """Build the stored ``run_outputs.file_path`` for one resolved output.
+
+    Remote exports (``minio://`` / ``s3://``) parse to an ``ExportFileInfo``
+    whose ``.path`` is only the object key — the bucket lives in ``.host`` and
+    the scheme in ``.protocol``. Storing the bare path would lose the bucket, so
+    reattach both into a full URI. Local (``file`` / no protocol) exports are
+    stored verbatim, preserving prior behavior. See REGISTRY_PROVENANCE.md §8.
+    """
+    protocol = (getattr(info, "protocol", "") or "").lower()
+    host = getattr(info, "host", "") or ""
+    if protocol in ("minio", "s3") and host:
+        return f"{protocol}://{host}/{str(resolved).lstrip('/')}"
+    return str(resolved)
 
 
 def run_sweep(

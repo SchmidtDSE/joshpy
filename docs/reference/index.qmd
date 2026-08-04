@@ -77,6 +77,7 @@ DuckDB-backed experiment tracking
 | [registry.Requirement](registry.Requirement.qmd#joshpy.registry.Requirement) | One cell of a :class:`TargetDesign`: a required attribute conjunction. |
 | [registry.RequirementCoverage](registry.RequirementCoverage.qmd#joshpy.registry.RequirementCoverage) | Coverage of a single :class:`Requirement`, as computed by check_design. |
 | [registry.TargetCoverageReport](registry.TargetCoverageReport.qmd#joshpy.registry.TargetCoverageReport) | Result of checking a :class:`TargetDesign` against the registry. |
+| [registry.OutputURI](registry.OutputURI.qmd#joshpy.registry.OutputURI) | A registered export output location for a run. |
 | [registry.DropSummary](registry.DropSummary.qmd#joshpy.registry.DropSummary) | Rows removed by :meth:`RunRegistry.drop_run`, per table. |
 | [registry.ConsistencyIssue](registry.ConsistencyIssue.qmd#joshpy.registry.ConsistencyIssue) | A run<->analysis consistency problem found by :meth:`RunRegistry.check_consistency`. |
 | [registry.DataSummary](registry.DataSummary.qmd#joshpy.registry.DataSummary) | Summary of data loaded in the registry. |

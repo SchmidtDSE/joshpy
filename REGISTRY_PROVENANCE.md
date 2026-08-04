@@ -215,6 +215,15 @@ are deleting. Ask 2 sits **on** §5, not beside it.
 
 ## 8. Bucket-resident aggregation without ingest (downstream ask 1)
 
+> **✅ IMPLEMENTED (v0.0.9.26).** As-built notes vs. this spec: (1) `run_outputs`
+> did not actually store a usable URI for remote exports — `ExportFileInfo.path`
+> is only the object key, so `_register_job_outputs` was fixed to store the full
+> `minio://host/key`; (2) there is one `job_run` per job (not per replicate), so
+> `jr.replicate` is nominal — the replicate is parsed best-effort from the
+> filename and, for `query_remote`, taken from each CSV's own `replicate` column;
+> (3) URIs normalize `minio://` → `s3://` at read time; (4) the jar fallback
+> (§8a) proved unnecessary. Verified against a real bucket.
+
 This is the ask most worth getting right, and the new model plus *existing*
 machinery makes it far cleaner than the current workaround (scan `s3://.../*/*.csv`
 with `filename=true`, `regexp_extract` run_hash from the filename, join a
@@ -350,9 +359,16 @@ on it plus the URIs `run_outputs` already stores. No concept is defined twice.
    coverage layer (§12) with `target_designs`/`target_requirements` tables. The
    one dispatch-side rule (§11.1): a `bad` run is `reset_run`'d (results cleared,
    status reactivated, config kept) and re-dispatched in full.
-3. **Phase 3 — remote aggregation.** `get_output_uris` →
-   `SweepManager.remote_export_uri` (fallback) → `query_remote` →
-   `check_remote_consistency`.
+3. **Phase 3 — remote aggregation. ✅ IMPLEMENTED (v0.0.9.26).**
+   `get_output_uris` → `query_remote` → `check_remote_consistency`, plus
+   `OutputURI`. Building it surfaced that `run_outputs.file_path` stored only the
+   *path component* for remote exports (`ExportFileInfo.path` drops the bucket),
+   so `_register_job_outputs` was fixed to store the full `minio://host/key` URI
+   — the jar-free primary path §8a assumed. The `SweepManager.remote_export_uri`
+   jar fallback was **not** needed: `run_outputs` is populated on every
+   registry-attached run, so the jar-free path is the only path in practice.
+   Validated against a real S3-compatible bucket (see
+   `tests/test_remote_aggregation_integration.py`).
 
 ## 11. Resolved decisions (superseding the open questions)
 

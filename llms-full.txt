@@ -2168,6 +2168,41 @@ in full, so the fresh run is active and overwrites the stale outputs. The
 wrong-inputs case needs nothing: a corrected input changes the content hash, so
 it simply dispatches as a brand-new run and the old `bad` run stays excluded.
 
+### Remote (bucket-resident) aggregation
+
+For sweeps that export to a bucket (`exportFiles.patch = "minio://..."`) and run
+with `load_results=False`, you can aggregate results **without ingesting** them
+into `cell_data`. The registry already records the resolved export URI of every
+registry-attached run (`run_outputs`), so it is the current-URI index — no
+filename regex, no hand-maintained label→hash dict.
+
+```python
+# The export URIs the registry knows about (jar-free), active runs by default.
+registry.get_output_uris(output_type="patch")            # [OutputURI(run_hash, label, replicate, uri), ...]
+registry.get_output_uris("baseline")                     # one run, by label/hash
+
+# Aggregate a variable straight from the bucket CSVs, one scan, no ingest.
+df = registry.query_remote(
+    "treeCount", agg="mean",
+    group_by=["label", "step", "replicate"],   # label/run_hash from registry; rest are CSV columns
+    current_only=True,                          # superseded/bad runs excluded from the manifest
+    where=None,                                 # optional raw SQL predicate on CSV columns
+    cache="agg.parquet",                        # optional local cache
+)
+
+# Did every current run's outputs actually land in the bucket?
+for issue in registry.check_remote_consistency():
+    issue.kind        # missing_remote_output | remote_count_mismatch | orphan_remote_output
+    issue.severity    # error | warning
+```
+
+Provenance is attached by joining on the registry-supplied filename, never by
+parsing the path. `query_remote` reads only the current runs' URIs, so stale
+files in the same folder (from superseded/bad runs) are excluded for free;
+`check_remote_consistency` reports those as `orphan_remote_output`. S3 creds come
+from args or `MINIO_*` env vars, shared with `ingest_results`. Requires
+`joshpy[full]` (duckdb + pandas).
+
 ### SweepManager Integration
 
 ```python

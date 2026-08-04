@@ -38,9 +38,10 @@ Example usage:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -147,6 +148,34 @@ def configure_s3(
         """,
         [access_key, secret_key, host, url_style, resolved_ssl],
     )
+
+
+def _minio_to_s3_uri(uri: str) -> str:
+    """Normalize a stored export URI to the ``s3://`` form DuckDB httpfs reads.
+
+    Josh writes exports under its own ``minio://bucket/key`` convention (and
+    older registries may hold a ``minio:/bucket/key`` form mangled by
+    ``pathlib``). DuckDB addresses the same object as ``s3://bucket/key``. Local
+    paths and already-``s3://`` URIs pass through unchanged. See
+    REGISTRY_PROVENANCE.md §8.
+    """
+    for prefix in ("minio://", "minio:/"):
+        if uri.startswith(prefix):
+            return "s3://" + uri[len(prefix):]
+    return uri
+
+
+def _replicate_from_uri(uri: str) -> int | None:
+    """Best-effort replicate index parsed from an output URI's filename.
+
+    Josh writes one file per replicate with the index as the last integer before
+    the extension (e.g. ``output_50_0.csv`` -> 0). Returns ``None`` when no such
+    integer is present (e.g. a consolidated single-file export). Provenance
+    (run_hash/label) always comes from the registry join, never the path — this
+    index is a convenience only.
+    """
+    match = re.search(r"(\d+)(?=\.[^./]+$)", uri)
+    return int(match.group(1)) if match else None
 
 
 def _resolve_s3_credentials(
@@ -616,6 +645,29 @@ class TargetCoverageReport:
     def unmet(self) -> list[RequirementCoverage]:
         """The requirements that are not yet satisfied."""
         return [r for r in self.requirements if not r.satisfied]
+
+
+@dataclass
+class OutputURI:
+    """A registered export output location for a run.
+
+    Returned by :meth:`RunRegistry.get_output_uris`. The URI is taken verbatim
+    from ``run_outputs`` (the full export URI as written); provenance
+    (``run_hash`` / ``label``) comes from the registry, never from parsing the
+    path. See REGISTRY_PROVENANCE.md §8.
+
+    Attributes:
+        run_hash: The run that produced this output.
+        label: The run's label, or ``None``.
+        replicate: Best-effort replicate index parsed from the filename, or
+            ``None`` for consolidated single-file exports.
+        uri: The stored export URI (e.g. ``minio://bucket/key`` or a local path).
+    """
+
+    run_hash: str
+    label: str | None
+    replicate: int | None
+    uri: str
 
 
 @dataclass
@@ -3378,6 +3430,295 @@ class RunRegistry:
             """,
             [run_hash],
         )
+
+    # ========== Remote (bucket-resident) aggregation ==========
+
+    def get_output_uris(
+        self,
+        label_or_hash: str | None = None,
+        *,
+        output_type: str = "patch",
+        current_only: bool = True,
+    ) -> list[OutputURI]:
+        """Resolve registered export URIs for runs, jar-free from ``run_outputs``.
+
+        The registry records the resolved export URI of every registry-attached
+        run (on any ``load_results`` setting), so it *is* the current-URI index —
+        no filename regex, no hand-maintained label→hash dict. See
+        REGISTRY_PROVENANCE.md §8a.
+
+        Args:
+            label_or_hash: Restrict to one run (by label or hash). ``None`` (the
+                default) returns outputs across all matching runs.
+            output_type: Export type. A bare name (``"patch"``) maps to the
+                stored ``export.<name>``; pass a dotted name (``"debug.organism"``)
+                to target that namespace directly.
+            current_only: When ``True`` (default), only active runs are included.
+
+        Returns:
+            A list of :class:`OutputURI`, ordered by run_hash then URI.
+        """
+        stored_type = output_type if "." in output_type else f"export.{output_type}"
+        clauses = ["ro.output_type = ?"]
+        params: list[Any] = [stored_type]
+        if label_or_hash is not None:
+            clauses.append("jr.run_hash = ?")
+            params.append(self._resolve_label_or_hash(label_or_hash))
+        if current_only:
+            clauses.append("coalesce(jc.status, 'active') = 'active'")
+        where = " AND ".join(clauses)
+        rows = self.conn.execute(
+            f"""
+            SELECT DISTINCT jr.run_hash, jc.label, ro.file_path
+            FROM run_outputs ro
+            JOIN job_runs jr ON jr.run_id = ro.run_id
+            JOIN job_configs jc ON jc.run_hash = jr.run_hash
+            WHERE {where}
+            ORDER BY jr.run_hash, ro.file_path
+            """,
+            params,
+        ).fetchall()
+        return [
+            OutputURI(
+                run_hash=r[0],
+                label=r[1],
+                replicate=_replicate_from_uri(r[2]),
+                uri=r[2],
+            )
+            for r in rows
+        ]
+
+    _REMOTE_AGGS = {
+        "mean": "AVG", "avg": "AVG", "sum": "SUM", "min": "MIN", "max": "MAX",
+        "count": "COUNT", "median": "MEDIAN", "stddev": "STDDEV",
+    }
+
+    def query_remote(
+        self,
+        variable: str,
+        *,
+        agg: str = "mean",
+        group_by: Sequence[str] = ("label", "step", "replicate"),
+        output_type: str = "patch",
+        current_only: bool = True,
+        label_or_hash: str | None = None,
+        where: str | None = None,
+        cache: str | Path | None = None,
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        use_ssl: bool | None = None,
+    ) -> Any:
+        """Aggregate a variable directly against bucket-resident CSVs, no ingest.
+
+        Builds a URI manifest of the current runs (:meth:`get_output_uris`),
+        scans exactly those CSVs once with DuckDB, and attaches provenance by
+        joining on the (registry-supplied) filename — never by parsing the path.
+        Nothing touches ``cell_data``; this is the read path for the
+        ``load_results=False`` batch (REGISTRY_PROVENANCE.md §8b).
+
+        Args:
+            variable: CSV column to aggregate (e.g. ``"treeCount"``).
+            agg: One of mean/avg/sum/min/max/count/median/stddev.
+            group_by: Columns to group by. ``label``/``run_hash`` come from the
+                registry; any other name is a CSV column (``step``, ``replicate``,
+                position, ...).
+            output_type: Export type (see :meth:`get_output_uris`).
+            current_only: Aggregate active runs only (default). Archived URIs are
+                simply absent from the manifest, so stale files in the same folder
+                are excluded for free.
+            label_or_hash: Restrict to one run.
+            where: Optional raw SQL predicate on the CSV columns (a passthrough,
+                like :meth:`query`).
+            cache: Optional path to also write the result to (``.parquet`` or
+                ``.csv`` by extension).
+            endpoint: S3 endpoint; falls back to ``MINIO_ENDPOINT``.
+            access_key: S3 access key; falls back to ``MINIO_ACCESS_KEY``.
+            secret_key: S3 secret key; falls back to ``MINIO_SECRET_KEY``.
+            use_ssl: Use HTTPS (see :func:`configure_s3`).
+
+        Returns:
+            A pandas DataFrame: the ``group_by`` columns, ``value`` (the
+            aggregate), and ``n_rows``.
+
+        Raises:
+            ValueError: If ``agg`` is unknown or no output URIs are found.
+        """
+        try:
+            import pandas  # noqa: F401
+        except ImportError as e:
+            raise ImportError(
+                "query_remote requires pandas — install joshpy[full]."
+            ) from e
+        fn = self._REMOTE_AGGS.get(agg.lower())
+        if fn is None:
+            raise ValueError(
+                f"Unknown agg {agg!r}; must be one of {sorted(self._REMOTE_AGGS)}."
+            )
+
+        manifest = self.get_output_uris(
+            label_or_hash, output_type=output_type, current_only=current_only
+        )
+        if not manifest:
+            raise ValueError(
+                "No output URIs found for the requested runs — nothing to query. "
+                "(Are the runs registered, active, and of this output_type?)"
+            )
+        entries = [(_minio_to_s3_uri(o.uri), o.run_hash, o.label) for o in manifest]
+        uris = [e[0] for e in entries]
+        if any(u.startswith("s3://") for u in uris):
+            ep, ak, sk = _resolve_s3_credentials(endpoint, access_key, secret_key)
+            configure_s3(self.conn, ep, ak, sk, use_ssl=use_ssl)
+
+        self.conn.execute(
+            "CREATE OR REPLACE TEMP TABLE _remote_manifest "
+            "(uri VARCHAR, run_hash VARCHAR, label VARCHAR)"
+        )
+        self.conn.executemany(
+            "INSERT INTO _remote_manifest VALUES (?, ?, ?)", entries
+        )
+
+        manifest_cols = {"run_hash", "label", "uri"}
+
+        def _q(col: str) -> str:
+            return '"' + col.replace('"', '""') + '"'
+
+        def _qual(col: str) -> str:
+            return f"m.{_q(col)}" if col in manifest_cols else f"csv.{_q(col)}"
+
+        gb = list(group_by)
+        select_gb = ", ".join(f"{_qual(c)} AS {_q(c)}" for c in gb)
+        group_gb = ", ".join(_qual(c) for c in gb)
+        array_lit = "[" + ", ".join("'" + u.replace("'", "''") + "'" for u in uris) + "]"
+        where_sql = f"WHERE {where}" if where else ""
+
+        sql = f"""
+            SELECT {select_gb},
+                   {fn}(csv.{_q(variable)}) AS value,
+                   COUNT(*) AS n_rows
+            FROM read_csv_auto({array_lit}, filename=true, union_by_name=true) csv
+            JOIN _remote_manifest m ON csv.filename = m.uri
+            {where_sql}
+            GROUP BY {group_gb}
+            ORDER BY {group_gb}
+        """
+        df = self.conn.execute(sql).df()
+
+        if cache is not None:
+            cache_str = str(cache)
+            if cache_str.endswith(".parquet"):
+                df.to_parquet(cache_str, index=False)
+            else:
+                df.to_csv(cache_str, index=False)
+        return df
+
+    def check_remote_consistency(
+        self,
+        *,
+        output_type: str = "patch",
+        current_only: bool = True,
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        use_ssl: bool | None = None,
+    ) -> list[ConsistencyIssue]:
+        """Check that current runs' expected outputs actually landed in the bucket.
+
+        The bucket-aware sibling of :meth:`check_consistency`: for every active
+        run, the registered export URIs (the expected set) are checked against
+        what is actually present in the bucket. See REGISTRY_PROVENANCE.md §8c.
+
+        Issue kinds:
+
+        - ``missing_remote_output`` (**error**) — a registered active URI absent
+          from the bucket (a replicate that never landed).
+        - ``remote_count_mismatch`` (**error**) — fewer present files than the
+          run's registered output count.
+        - ``orphan_remote_output`` (**warning**) — a bucket file in a tracked
+          folder that belongs to a non-active run (or no registered run): the
+          stale/superseded files the manual workaround filters by hand.
+
+        Args:
+            output_type: Export type (see :meth:`get_output_uris`).
+            current_only: Reserved for symmetry; the expected set is always the
+                active runs. Non-active runs are used only to explain orphans.
+            endpoint: S3 endpoint; falls back to ``MINIO_ENDPOINT``.
+            access_key: S3 access key; falls back to ``MINIO_ACCESS_KEY``.
+            secret_key: S3 secret key; falls back to ``MINIO_SECRET_KEY``.
+            use_ssl: Use HTTPS (see :func:`configure_s3`).
+
+        Returns:
+            A list of :class:`ConsistencyIssue`, most-actionable first (errors
+            before warnings).
+        """
+        active = self.get_output_uris(None, output_type=output_type, current_only=True)
+        every = self.get_output_uris(None, output_type=output_type, current_only=False)
+        active_by_uri = {_minio_to_s3_uri(o.uri): o for o in active}
+        all_by_uri = {_minio_to_s3_uri(o.uri): o for o in every}
+
+        remote_uris = [u for u in all_by_uri if u.startswith("s3://")]
+        issues: list[ConsistencyIssue] = []
+        if not remote_uris:
+            return issues  # nothing remote to verify
+
+        ep, ak, sk = _resolve_s3_credentials(endpoint, access_key, secret_key)
+        configure_s3(self.conn, ep, ak, sk, use_ssl=use_ssl)
+
+        actual: set[str] = set()
+        for folder in sorted({u.rsplit("/", 1)[0] for u in remote_uris}):
+            try:
+                rows = self.conn.execute(
+                    "SELECT file FROM glob(?)", [folder + "/*"]
+                ).fetchall()
+            except Exception:
+                continue
+            actual.update(r[0] for r in rows)
+
+        active_remote = {u: o for u, o in active_by_uri.items() if u.startswith("s3://")}
+
+        # missing_remote_output + per-run counts
+        expected_by_run: dict[str, set[str]] = {}
+        present_by_run: dict[str, set[str]] = {}
+        for uri, o in sorted(active_remote.items()):
+            expected_by_run.setdefault(o.run_hash, set()).add(uri)
+            if uri in actual:
+                present_by_run.setdefault(o.run_hash, set()).add(uri)
+            else:
+                issues.append(
+                    ConsistencyIssue(
+                        "missing_remote_output", o.run_hash,
+                        f"expected output missing from bucket: {uri}", "error",
+                    )
+                )
+        for run_hash, expected in expected_by_run.items():
+            present = present_by_run.get(run_hash, set())
+            if len(present) != len(expected):
+                issues.append(
+                    ConsistencyIssue(
+                        "remote_count_mismatch", run_hash,
+                        f"{len(present)}/{len(expected)} expected outputs present "
+                        f"in bucket", "error",
+                    )
+                )
+
+        # orphan_remote_output: present files not attributable to an active run
+        for file in sorted(actual - set(active_remote)):
+            owner = all_by_uri.get(file)
+            if owner is not None:
+                detail = (
+                    f"bucket file belongs to non-active run {owner.run_hash} "
+                    f"(status {self.get_run_status(owner.run_hash).effective_status}): {file}"
+                )
+                run_hash = owner.run_hash
+            else:
+                detail = f"bucket file not tracked by any registered run: {file}"
+                run_hash = None
+            issues.append(
+                ConsistencyIssue("orphan_remote_output", run_hash, detail, "warning")
+            )
+
+        issues.sort(key=lambda i: (i.severity != "error", i.kind))
+        return issues
 
     def check_consistency(
         self,

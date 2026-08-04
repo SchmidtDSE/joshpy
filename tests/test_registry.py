@@ -2841,5 +2841,114 @@ class TestResetRun(unittest.TestCase):
             self.registry.reset_run("nonexistent")
 
 
+class TestRemoteHelpers(unittest.TestCase):
+    """Pure helpers behind remote aggregation (REGISTRY_PROVENANCE.md §8)."""
+
+    def test_minio_to_s3_uri(self):
+        from joshpy.registry import _minio_to_s3_uri
+
+        self.assertEqual(_minio_to_s3_uri("minio://b/k/o_0.csv"), "s3://b/k/o_0.csv")
+        # pathlib-mangled single-slash form (older data).
+        self.assertEqual(_minio_to_s3_uri("minio:/b/k/o_0.csv"), "s3://b/k/o_0.csv")
+        self.assertEqual(_minio_to_s3_uri("s3://b/k.csv"), "s3://b/k.csv")
+        self.assertEqual(_minio_to_s3_uri("/tmp/x_2.csv"), "/tmp/x_2.csv")
+
+    def test_replicate_from_uri(self):
+        from joshpy.registry import _replicate_from_uri
+
+        self.assertEqual(_replicate_from_uri("/tmp/tutorial_sweep_50_2.csv"), 2)
+        self.assertEqual(_replicate_from_uri("minio://b/k/output_10.csv"), 10)
+        self.assertIsNone(_replicate_from_uri("consolidated.csv"))
+
+
+class TestRemoteAggregation(unittest.TestCase):
+    """get_output_uris / query_remote / check_remote_consistency over local files."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        config = _make_config()
+        self.session_id = self.registry.create_session(config=config)
+
+    def tearDown(self):
+        self.registry.close()
+
+    def _run_with_outputs(self, run_hash, uris, *, label=None):
+        self.registry.register_run(
+            self.session_id, run_hash, "/sim.josh",
+            "param = 10 count", None, {"param": 10},
+        )
+        if label:
+            self.registry.label_run(run_hash, label)
+        run_id = self.registry.start_run(run_hash, session_id=self.session_id)
+        self.registry.complete_run(run_id, exit_code=0)
+        for uri in uris:
+            self.registry.register_output(
+                run_id=run_id, output_type="export.patch", file_path=uri
+            )
+        return run_id
+
+    def test_get_output_uris_maps_and_filters_currency(self):
+        self._run_with_outputs(
+            "hash_a",
+            ["minio://bkt/exp/hash_a/output_0.csv", "minio://bkt/exp/hash_a/output_1.csv"],
+            label="a",
+        )
+        self._run_with_outputs("hash_b", ["minio://bkt/exp/hash_b/output_0.csv"], label="b")
+
+        uris = self.registry.get_output_uris()
+        by_hash = {(u.run_hash, u.replicate): u for u in uris}
+        self.assertEqual(len(uris), 3)
+        self.assertEqual(by_hash[("hash_a", 0)].label, "a")
+        self.assertEqual(by_hash[("hash_a", 1)].replicate, 1)
+
+        # Currency: superseding hash_b drops its outputs from the default view.
+        self.registry.mark_run("hash_b", "superseded", superseded_by="hash_a")
+        current = self.registry.get_output_uris()
+        self.assertEqual({u.run_hash for u in current}, {"hash_a"})
+        # ...but include-all still sees it.
+        allu = self.registry.get_output_uris(current_only=False)
+        self.assertEqual({u.run_hash for u in allu}, {"hash_a", "hash_b"})
+
+    def test_get_output_uris_by_label(self):
+        self._run_with_outputs("hash_a", ["minio://bkt/a_0.csv"], label="a")
+        self._run_with_outputs("hash_b", ["minio://bkt/b_0.csv"], label="b")
+        uris = self.registry.get_output_uris("a")
+        self.assertEqual([u.run_hash for u in uris], ["hash_a"])
+
+    def test_query_remote_over_local_csvs(self):
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp())
+        uris = []
+        for rep in range(2):
+            p = tmp / f"out_{rep}.csv"
+            # value = 10 at step 0, 20 at step 1 (same for both reps)
+            p.write_text("step,replicate,val\n0,%d,10\n1,%d,20\n" % (rep, rep))
+            uris.append(str(p))
+        self._run_with_outputs("hash_a", uris, label="a")
+
+        df = self.registry.query_remote("val", agg="mean", group_by=["label", "step"])
+        self.assertEqual(list(df["label"]), ["a", "a"])
+        self.assertEqual(list(df["step"]), [0, 1])
+        self.assertEqual(list(df["value"]), [10.0, 20.0])
+        self.assertEqual(list(df["n_rows"]), [2, 2])  # 2 replicates per step
+
+    def test_query_remote_raises_when_no_uris(self):
+        with self.assertRaises(ValueError):
+            self.registry.query_remote("val")
+
+    def test_query_remote_unknown_agg(self):
+        self._run_with_outputs("hash_a", ["/tmp/x_0.csv"])
+        with self.assertRaises(ValueError):
+            self.registry.query_remote("val", agg="bogus")
+
+    def test_check_remote_consistency_ignores_local(self):
+        # Local (non-s3) outputs are out of scope -> no issues, no S3 config.
+        self._run_with_outputs("hash_a", ["/tmp/out_0.csv"])
+        self.assertEqual(self.registry.check_remote_consistency(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

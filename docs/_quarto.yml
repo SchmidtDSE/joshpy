@@ -320,6 +320,7 @@ quartodoc:
         - registry.Requirement
         - registry.RequirementCoverage
         - registry.TargetCoverageReport
+        - registry.OutputURI
         - registry.DropSummary
         - registry.ConsistencyIssue
         - registry.DataSummary
