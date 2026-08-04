@@ -1051,6 +1051,10 @@ def run_adaptive_sweep(
                 josh_content=josh_content,
             )
 
+            # Forward JobConfig-declared attributes (see SweepManager.run).
+            if job.attributes:
+                registry.set_attributes(job.run_hash, **job.attributes)
+
             # 5. Execute CLI
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
             if batch_remote:
@@ -1332,6 +1336,7 @@ def _create_single_job(
         file_mappings=file_mappings,
         custom_tags=custom_tags,
         label=config.label,
+        attributes=dict(config.attributes),
         upload_source_path=config.upload_source_path,
         upload_config_path=config.upload_config_path,
         upload_data_path=config.upload_data_path,

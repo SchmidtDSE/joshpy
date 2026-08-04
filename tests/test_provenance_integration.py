@@ -192,6 +192,50 @@ class TestAttributeCurrencyEndToEnd:
         )
         return old_hash, new_hash
 
+    def test_jobconfig_attributes_persist_through_dispatch(self, josh_cli, tmp_path):
+        """Attributes declared on the JobConfig land in the registry with no
+        post-run tagging step, and drive coverage directly."""
+        from joshpy.registry import Requirement, TargetDesign
+
+        registry_path = str(tmp_path / "declared_attrs.duckdb")
+        spin_cfg = JobConfig(
+            source_path=SOURCE_PATH, config_path=BASELINE_CONFIG,
+            simulation="Main", replicates=1,
+            attributes={"scenario": "historical", "treatment": "spinup"},
+        )
+        spin_hash = _run(
+            josh_cli, registry_path, spin_cfg, experiment="spin", label="spin",
+        )
+        nospin_cfg = JobConfig(
+            source_path=SOURCE_PATH, config_path=HIGH_GROWTH_CONFIG,
+            simulation="Main", replicates=1,
+            attributes={"scenario": "historical", "treatment": "no_spinup"},
+        )
+        nospin_hash = _run(
+            josh_cli, registry_path, nospin_cfg, experiment="nospin", label="nospin",
+        )
+
+        registry = RunRegistry(registry_path)
+        try:
+            # Persisted verbatim, no set_attributes() call anywhere above.
+            assert registry.get_attributes(spin_hash) == {
+                "scenario": "historical", "treatment": "spinup",
+            }
+            assert registry.get_attributes(nospin_hash) == {
+                "scenario": "historical", "treatment": "no_spinup",
+            }
+            design = TargetDesign(
+                "declared",
+                [
+                    Requirement({"scenario": "historical", "treatment": "spinup"}),
+                    Requirement({"scenario": "historical", "treatment": "no_spinup"}),
+                ],
+            )
+            registry.register_design(design)
+            assert registry.check_design("declared").complete
+        finally:
+            registry.close()
+
     def test_find_by_attribute_honors_currency(self, josh_cli, tmp_path):
         from joshpy.registry import AttributeMatch
 

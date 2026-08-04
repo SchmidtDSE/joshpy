@@ -2287,6 +2287,12 @@ class SweepManagerBuilder:
                         josh_content=josh_content,
                     )
 
+                    # Forward JobConfig-declared attributes (what this job is
+                    # trying to accomplish) as run-level attributes, so coverage
+                    # matches without a post-run tagging step.
+                    if job.attributes:
+                        self._registry.set_attributes(job.run_hash, **job.attributes)
+
                 # Inject a label as a --custom-tag so export paths containing
                 # {label} always resolve (with_label() takes precedence over
                 # JobConfig.label).

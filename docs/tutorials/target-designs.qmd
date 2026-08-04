@@ -22,11 +22,14 @@ run hashes**: it makes no claim on *how* a run was produced (a `SweepManager`
 sweep, a one-off dispatch, a colleague's job), only that enough *active* runs
 carry the required attributes. Superseded and `bad` runs never count.
 
-## Setup: a couple of tagged runs
+## Setup: a couple of attributed runs
 
-We stand in two field scenarios with the tutorial model, tagging each run with
-the factors we care about. (`baseline.jshc` and `high_growth.jshc` play the role
-of two treatments here — real runs, not fabricated rows.)
+We run the tutorial model under two treatments, declaring the factors we care
+about **on the `JobConfig` itself** via `attributes`. Those attributes are
+forwarded to the registry when the job is registered, so there is no separate
+tagging step after the run — you say what a job is *for* at the point you define
+it. (`baseline.jshc` and `high_growth.jshc` play the role of two treatments
+here — real runs, not fabricated rows.)
 
 ```{python}
 #| label: setup
@@ -50,6 +53,11 @@ for treatment, config_path in CONFIGS.items():
     config = JobConfig(
         source_path=SOURCE, config_path=config_path,
         simulation="Main", replicates=1,
+        # Declare *what this job is for* on the config itself. These attributes
+        # are forwarded to the registry at registration — no post-run tagging.
+        # They describe intent, not config values: the config need not know
+        # which requirement it fulfills.
+        attributes={"scenario": "historical", "treatment": treatment},
     )
     manager = (
         SweepManager.builder(config)
@@ -57,13 +65,11 @@ for treatment, config_path in CONFIGS.items():
         .with_cli(cli)
         .build()
     )
-    manager.run(quiet=True)
-    run_hash = manager.job_set.jobs[0].run_hash
-    # Tag the run with its factors — this is what coverage matches on.
-    manager.registry.set_attributes(
-        run_hash, scenario="historical", treatment=treatment
-    )
-    run_hashes[treatment] = run_hash
+    result = manager.run(quiet=True)
+    # The attributes are already recorded; we just keep the hash to reference
+    # the run later when we mark one bad.
+    for job, _ in result:
+        run_hashes[treatment] = job.run_hash
     manager.cleanup()
     manager.close()
 
