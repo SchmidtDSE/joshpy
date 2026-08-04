@@ -480,6 +480,29 @@ class TestJobConfig(unittest.TestCase):
         restored = JobConfig.from_dict(result)
         self.assertEqual(restored.output_steps, "0-10,50,100")
 
+    def test_attributes_default_empty(self):
+        """attributes should default to an empty dict and stay out of to_dict."""
+        config = JobConfig()
+        self.assertEqual(config.attributes, {})
+        self.assertNotIn("attributes", config.to_dict())
+
+    def test_attributes_roundtrip(self):
+        """attributes should survive to_dict/from_dict and YAML serialization."""
+        config = JobConfig(
+            template_string="x = {{ v }}",
+            attributes={"scenario": "historical", "treatment": "spinup"},
+        )
+        result = config.to_dict()
+        self.assertEqual(
+            result["attributes"], {"scenario": "historical", "treatment": "spinup"}
+        )
+        restored = JobConfig.from_dict(result)
+        self.assertEqual(
+            restored.attributes, {"scenario": "historical", "treatment": "spinup"}
+        )
+        from_yaml = JobConfig.from_yaml(config.to_yaml())
+        self.assertEqual(from_yaml.attributes, config.attributes)
+
     def test_to_yaml_from_yaml_roundtrip(self):
         """YAML serialization should round-trip correctly."""
         original = JobConfig(
@@ -515,6 +538,24 @@ class TestJobExpander(unittest.TestCase):
         self.assertEqual(len(job_set), 1)
         self.assertEqual(job_set.jobs[0].config_content, "value = 42")
         self.assertEqual(job_set.jobs[0].parameters, {})
+
+    def test_expand_propagates_attributes(self):
+        """Config attributes should ride onto every expanded job."""
+        config = JobConfig(
+            template_string="value = {{ x }}",
+            attributes={"scenario": "historical", "treatment": "spinup"},
+            sweep=SweepConfig(config_parameters=[
+                ConfigSweepParameter(name="x", values=[1, 2])
+            ])
+        )
+        job_set = JobExpander().expand(config)
+        self.assertEqual(len(job_set), 2)
+        for job in job_set.jobs:
+            self.assertEqual(
+                job.attributes, {"scenario": "historical", "treatment": "spinup"}
+            )
+        # Each job gets its own copy, not a shared reference to config.attributes.
+        self.assertIsNot(job_set.jobs[0].attributes, config.attributes)
 
     def test_expand_with_sweep(self):
         """Expanding with sweep should produce multiple jobs."""

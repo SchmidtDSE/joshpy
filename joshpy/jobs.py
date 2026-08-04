@@ -858,6 +858,15 @@ class JobConfig:
     # export paths can use {label}).  Also forwarded to the registry.
     label: str | None = None
 
+    # Semantic attributes describing what this job is trying to accomplish
+    # (e.g. {"scenario": "historical", "treatment": "spinup"}). Forwarded to
+    # the registry as run-level attributes at registration, so coverage
+    # (TargetDesign) matches without a post-run tagging step. Distinct from
+    # sweep parameters: this records intent, not config values, and the config
+    # need not know which requirement it fulfills. A run so attributed becomes
+    # bad if it fails or if you later mark it bad. See REGISTRY_PROVENANCE.md.
+    attributes: dict[str, Any] = field(default_factory=dict)
+
     # Additional CLI options
     output_steps: str | None = None
     seed: int | None = None
@@ -926,6 +935,8 @@ class JobConfig:
             result["crs"] = self.crs
         if self.use_float64:
             result["use_float64"] = self.use_float64
+        if self.attributes:
+            result["attributes"] = self.attributes
 
         return result
 
@@ -972,6 +983,8 @@ class JobConfig:
             kwargs["crs"] = data["crs"]
         if "use_float64" in data:
             kwargs["use_float64"] = data["use_float64"]
+        if "attributes" in data:
+            kwargs["attributes"] = data["attributes"]
 
         return cls(**kwargs)
 
@@ -1019,6 +1032,8 @@ class ExpandedJob:
             absolute path}, co-located with source_path. Empty for single-file
             models. Bottling copies these preserving relative layout.
         custom_tags: Tags for CLI (derived from parameters).
+        attributes: Semantic attributes forwarded to the registry as run-level
+            attributes at registration (inherited from JobConfig.attributes).
         upload_source_path: Resolved upload path for source.
         upload_config_path: Resolved upload path for config.
         upload_data_path: Resolved upload path for data.
@@ -1040,6 +1055,7 @@ class ExpandedJob:
     import_files: dict[str, Path] = field(default_factory=dict)
     custom_tags: dict[str, str] = field(default_factory=dict)
     label: str | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
     upload_source_path: str | None = None
     upload_config_path: str | None = None
     upload_data_path: str | None = None
@@ -1468,6 +1484,7 @@ class JobExpander:
                 import_files=dict(import_manifest),
                 custom_tags=custom_tags,
                 label=config.label,
+                attributes=dict(config.attributes),
                 upload_source_path=config.upload_source_path,
                 upload_config_path=config.upload_config_path,
                 upload_data_path=config.upload_data_path,

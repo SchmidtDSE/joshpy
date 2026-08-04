@@ -2117,6 +2117,16 @@ label strings.
 registry.set_attributes("abc123", scenario="historical", treatment="spinup")
 registry.get_attributes("abc123")          # {"scenario": "historical", "treatment": "spinup"}
 registry.list_attribute_keys()             # ["scenario", "treatment"]
+```
+
+Declare attributes up front on the `JobConfig` — *what this job is trying to
+accomplish* — and they are forwarded to the registry at registration, so there is
+no post-run tagging step (works for programmatic and YAML-defined jobs alike):
+
+```python
+config = JobConfig(source_path=..., config_path=...,
+                   attributes={"scenario": "historical", "treatment": "spinup"})
+# SweepManager.run() persists them; coverage matches immediately afterward.
 
 # Reverse lookup, currency-aware: active runs only by default.
 registry.find_by_attribute("scenario", "historical")                    # [run_hash, ...]
