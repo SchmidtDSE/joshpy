@@ -244,3 +244,61 @@ class TestRemoteAggregation:
         kinds = {i.kind for i in issues}
         assert "missing_remote_output" in kinds
         assert "remote_count_mismatch" in kinds
+
+
+@requires_remote
+class TestDesignSyncRoundtrip:
+    """A registered TargetDesign survives push_to_s3 -> pull_from_s3 (no jar)."""
+
+    def test_design_survives_push_pull(self, tmp_path):
+        from joshpy.registry import (
+            REGISTRY_SYNC_TABLES,
+            Requirement,
+            RunRegistry,
+            TargetDesign,
+        )
+
+        creds = REMOTE_CREDS
+        assert creds is not None
+        bucket = creds["MINIO_BUCKET"]
+        prefix = f"joshpy-phase3-test/design-{uuid.uuid4().hex[:10]}"
+        s3_kwargs = dict(
+            endpoint=creds["MINIO_ENDPOINT"],
+            access_key=creds["MINIO_ACCESS_KEY"],
+            secret_key=creds["MINIO_SECRET_KEY"],
+        )
+
+        # Source registry: a run tagged to satisfy one cell, plus the design.
+        src = RunRegistry(str(tmp_path / "src.duckdb"))
+        try:
+            session_id = src.create_session(config=JobConfig(simulation="Main"))
+            src.register_run(
+                session_id, "hash_hist", "/sim.josh", "p = 1 count", None, {"p": 1}
+            )
+            src.set_attributes("hash_hist", scenario="historical", treatment="spinup")
+            design = TargetDesign("jotr", [
+                Requirement({"scenario": "historical", "treatment": "spinup"}),
+                Requirement({"scenario": "historical", "treatment": "no_spinup"}),
+            ])
+            src.register_design(design)
+            assert not src.check_design("jotr").complete  # no_spinup unmet
+            src.push_to_s3(bucket=bucket, prefix=prefix, **s3_kwargs)
+        finally:
+            src.close()
+
+        # Fresh registry: restore from the bucket, design + attributes intact.
+        dst = RunRegistry(":memory:")
+        try:
+            dst.pull_from_s3(bucket=bucket, prefix=prefix, mode="restore", **s3_kwargs)
+            loaded = dst.get_design("jotr")
+            assert loaded is not None
+            assert loaded.requirements == design.requirements
+            # The run + its attributes travelled too, so coverage recomputes.
+            report = dst.check_design("jotr")
+            assert not report.complete
+            assert report.requirements[0].active_run_hashes == ["hash_hist"]
+            assert report.unmet[0].attributes["treatment"] == "no_spinup"
+        finally:
+            dst.close()
+            for table in REGISTRY_SYNC_TABLES:
+                _s3_delete(creds, f"{prefix}/{table}.parquet")

@@ -236,6 +236,11 @@ REGISTRY_SYNC_TABLES: tuple[str, ...] = (
     "run_outputs",
     "cell_data",
     "run_tags",
+    # Target designs travel with the registry too. Parent-first: target_designs
+    # before target_requirements (FK), so restore's reversed-delete and
+    # forward-insert both respect the constraint.
+    "target_designs",
+    "target_requirements",
 )
 
 
@@ -1830,10 +1835,13 @@ class RunRegistry:
             "DELETE FROM target_requirements WHERE design_name = ?", [design.name]
         )
         for req in design.requirements:
+            # Canonical (sorted-key) JSON so the same attribute conjunction
+            # serializes identically everywhere -- the primary key dedups it on
+            # re-register and on merge-mode S3 sync (REGISTRY_SYNC_TABLES).
             self.conn.execute(
-                "INSERT INTO target_requirements (design_name, attributes, min_active) "
-                "VALUES (?, ?, ?)",
-                [design.name, json.dumps(req.attributes), req.min_active],
+                "INSERT OR IGNORE INTO target_requirements "
+                "(design_name, attributes, min_active) VALUES (?, ?, ?)",
+                [design.name, json.dumps(req.attributes, sort_keys=True), req.min_active],
             )
 
     def list_designs(self) -> list[str]:

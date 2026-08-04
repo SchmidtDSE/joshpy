@@ -2719,6 +2719,51 @@ class TestTargetDesigns(unittest.TestCase):
         self.assertFalse(self.registry.delete_design("jotr_fire_2026"))
         self.assertEqual(self.registry.list_designs(), [])
 
+    def test_register_dedups_duplicate_requirement_cells(self):
+        """Two requirements with the same attribute conjunction collapse to one."""
+        from joshpy.registry import Requirement, TargetDesign
+
+        self.registry.register_design(
+            TargetDesign("d", [
+                Requirement({"scenario": "historical"}),
+                Requirement({"scenario": "historical"}, min_active=5),
+            ])
+        )
+        loaded = self.registry.get_design("d")
+        self.assertEqual(len(loaded.requirements), 1)
+        rows = self.registry.conn.execute(
+            "SELECT COUNT(*) FROM target_requirements WHERE design_name = 'd'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 1)
+
+    def test_attributes_stored_canonically(self):
+        """Attributes serialize with sorted keys for cross-registry dedup."""
+        from joshpy.registry import Requirement, TargetDesign
+
+        self.registry.register_design(
+            TargetDesign("d", [Requirement({"treatment": "spinup", "scenario": "hist"})])
+        )
+        stored = self.registry.conn.execute(
+            "SELECT attributes FROM target_requirements WHERE design_name = 'd'"
+        ).fetchone()[0]
+        self.assertEqual(stored, '{"scenario": "hist", "treatment": "spinup"}')
+        # And it round-trips back to the dict regardless of key order.
+        self.assertEqual(
+            self.registry.get_design("d").requirements[0].attributes,
+            {"scenario": "hist", "treatment": "spinup"},
+        )
+
+    def test_design_tables_in_sync_list_parent_first(self):
+        from joshpy.registry import REGISTRY_SYNC_TABLES
+
+        self.assertIn("target_designs", REGISTRY_SYNC_TABLES)
+        self.assertIn("target_requirements", REGISTRY_SYNC_TABLES)
+        # Parent before child so restore's reversed-delete/forward-insert hold.
+        self.assertLess(
+            REGISTRY_SYNC_TABLES.index("target_designs"),
+            REGISTRY_SYNC_TABLES.index("target_requirements"),
+        )
+
     def test_register_rejects_empty_requirements(self):
         from joshpy.registry import TargetDesign
 

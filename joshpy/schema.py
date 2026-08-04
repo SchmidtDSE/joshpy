@@ -109,7 +109,12 @@ CREATE TABLE IF NOT EXISTS target_designs (
 CREATE TABLE IF NOT EXISTS target_requirements (
     design_name VARCHAR REFERENCES target_designs(name),
     attributes  JSON NOT NULL,       -- {key: value, ...}, the required conjunction
-    min_active  INTEGER DEFAULT 1
+    min_active  INTEGER DEFAULT 1,
+    -- A cell is identified by (design, attribute conjunction); this both forbids
+    -- redundant cells and lets merge-mode S3 sync dedup via INSERT OR IGNORE.
+    -- Requires canonical (sorted-key) JSON so identical conjunctions compare
+    -- equal across registries -- see register_design.
+    PRIMARY KEY (design_name, attributes)
 );
 """
 
