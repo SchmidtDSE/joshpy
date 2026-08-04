@@ -11,6 +11,7 @@ project:
     - tutorials/manual-workflow.qmd      # Creates demo_registry.duckdb
     - tutorials/sweep-manager.qmd        # Also creates demo_registry.duckdb
     - tutorials/project-organization.qmd # Non-executable guide
+    - tutorials/target-designs.qmd       # Runs tiny sims; coverage over attributes
     - tutorials/analysis.qmd             # Depends on demo_registry.duckdb
     - tutorials/inspecting-runs.qmd      # View/diff stored configs and josh sources
     - tutorials/preprocessing.qmd           # Creates .jshd files
@@ -66,6 +67,8 @@ website:
           - text: "Project Structure"
           - text: "Project Organization"
             href: tutorials/project-organization.qmd
+          - text: "Target Designs & Coverage"
+            href: tutorials/target-designs.qmd
           - text: "Complete Example"
             href: tutorials/complete-example.qmd
           - text: "Multi-Session Sweeps"
@@ -314,6 +317,13 @@ quartodoc:
         - registry.ConfigInfo
         - registry.RunInfo
         - registry.RunDetail
+        - registry.RunStatus
+        - registry.AttributeMatch
+        - registry.TargetDesign
+        - registry.Requirement
+        - registry.RequirementCoverage
+        - registry.TargetCoverageReport
+        - registry.OutputURI
         - registry.DropSummary
         - registry.ConsistencyIssue
         - registry.DataSummary

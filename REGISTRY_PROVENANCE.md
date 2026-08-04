@@ -87,13 +87,18 @@ as a typed column on `job_configs`, right next to `label` — the row already ke
 
 1. **Retire `on_collision="timestamp"` and `resolve_latest()`** in favor of
    explicit supersession semantics (§5).
-2. **Tags are the sanctioned place** for analysis factors and join keys; `label`
-   becomes a pure alias. Name stays **"tags"** ("metadata" is too broad — it
-   re-blurs what we're separating; "attributes" is the only rename worth
-   considering, and only if desired).
+2. **Attributes are the sanctioned place** for analysis factors and join keys;
+   `label` becomes a pure alias. The vocabulary is **renamed `tags` →
+   `attributes`** (§11.3) — done now while there are no real users. Throughout
+   this memo, "tags" refers to the renamed `attributes` API.
 3. **Read "current" by default**, via a non-materialized `cell_data_current`
    **view** (zero storage/refresh cost) for local reads and a
    `current_only=True` default on structured/remote read methods (§6).
+4. **Completeness is a read-side concept keyed on attributes, not run_hashes**,
+   asserted by a persisted external `TargetDesign` (§12). It never dispatches.
+5. **The only dispatch-side change is one collision rule** — sweep dedup treats
+   a cell whose only occupant is `bad` (or missing) as unsatisfied (§11.1).
+6. **Attribute keys stay open** — documented conventions only (§11.2).
 
 ## 4. Schema changes (additive, backward-compatible)
 
@@ -209,6 +214,15 @@ reconstruct "current" from the bare-label heuristic — the exact fragile thing 
 are deleting. Ask 2 sits **on** §5, not beside it.
 
 ## 8. Bucket-resident aggregation without ingest (downstream ask 1)
+
+> **✅ IMPLEMENTED (v0.0.9.26).** As-built notes vs. this spec: (1) `run_outputs`
+> did not actually store a usable URI for remote exports — `ExportFileInfo.path`
+> is only the object key, so `_register_job_outputs` was fixed to store the full
+> `minio://host/key`; (2) there is one `job_run` per job (not per replicate), so
+> `jr.replicate` is nominal — the replicate is parsed best-effort from the
+> filename and, for `query_remote`, taken from each CSV's own `replicate` column;
+> (3) URIs normalize `minio://` → `s3://` at read time; (4) the jar fallback
+> (§8a) proved unnecessary. Verified against a real bucket.
 
 This is the ask most worth getting right, and the new model plus *existing*
 machinery makes it far cleaner than the current workaround (scan `s3://.../*/*.csv`
@@ -334,22 +348,136 @@ on it plus the URIs `run_outputs` already stores. No concept is defined twice.
    and `supersede` sugar); `cell_data_current` view; `status` surfaced in
    `ConfigInfo`/`describe_run`; `SweepManager.with_label(on_collision=,
    reason=)` wired. *Useful standalone.*
-2. **Phase 2 — tag currency.** `find_tagged(current_only=…)`,
-   `find_current_tagged`; point cell_data convenience queries at the view;
-   document tags as the sanctioned attribute/join-key home.
-3. **Phase 3 — remote aggregation.** `get_output_uris` →
-   `SweepManager.remote_export_uri` (fallback) → `query_remote` →
-   `check_remote_consistency`.
+2. **Phase 2 — attribute currency + target coverage. ✅ IMPLEMENTED
+   (v0.0.9.25).** Run-level `attributes` slice (`set_attributes`/
+   `get_attributes`/`list_attribute_keys`, currency-aware `find_by_attribute`/
+   `find_current_by_attribute` + `AttributeMatch`); the general `run_tags`
+   facility (session/run_id/custom scopes) kept as `tags` (§11.3).
+   `DiagnosticQueries` reads through the `cell_data_current` view (with a
+   `_refresh_current_view` hook so dynamically-added variable columns stay
+   visible). `TargetDesign`/`Requirement`/`check_design`/`TargetCoverageReport`
+   coverage layer (§12) with `target_designs`/`target_requirements` tables. The
+   one dispatch-side rule (§11.1): a `bad` run is `reset_run`'d (results cleared,
+   status reactivated, config kept) and re-dispatched in full.
+3. **Phase 3 — remote aggregation. ✅ IMPLEMENTED (v0.0.9.26).**
+   `get_output_uris` → `query_remote` → `check_remote_consistency`, plus
+   `OutputURI`. Building it surfaced that `run_outputs.file_path` stored only the
+   *path component* for remote exports (`ExportFileInfo.path` drops the bucket),
+   so `_register_job_outputs` was fixed to store the full `minio://host/key` URI
+   — the jar-free primary path §8a assumed. The `SweepManager.remote_export_uri`
+   jar fallback was **not** needed: `run_outputs` is populated on every
+   registry-attached run, so the jar-free path is the only path in practice.
+   Validated against a real S3-compatible bucket (see
+   `tests/test_remote_aggregation_integration.py`).
 
-## 11. Open questions
+## 11. Resolved decisions (superseding the open questions)
 
-- **`bad` vs `superseded` semantics for reruns.** Should the collision/pool policy
-  auto-treat `bad` as "rerun me" (gap-fill onto a fresh hash) the way the ask
-  implies? Recommend: `bad` excludes from all reads by default; whether it also
-  *triggers* a rerun is a `collision_policy` concern, specced in Phase 1's
-  SweepManager wiring.
-- **Tag key reservations.** With tags sanctioned as join keys, do we reserve a
-  small set (`run_hash` is already auto-injected as a custom tag) or stay fully
-  open? Recommend open, documented conventions only.
-- **Rename `tags` → `attributes`?** Low-stakes but now-or-never. Default: keep
-  `tags`.
+The three open questions are now decided.
+
+### 11.1 `bad` vs `superseded`, and what actually triggers a rerun
+
+Currency (`status`) and **completeness** are different questions. `status`
+answers "is *this* occupant usable"; completeness answers "does every required
+factor combination have enough usable occupants" — and it is keyed on
+**attributes, not run_hashes** (§12).
+
+Content hashing already handles the most common badness cause for free. If a run
+was `bad` because it used the wrong external data, correcting that data changes
+its inputs → **new run_hash**, so a re-dispatch runs it as a fresh run with no
+collision at all; the old run stays `bad` and drops out of every read. So "bad
+triggers a rerun" splits into two cases, and only one needs new machinery:
+
+| Why it's bad | Re-dispatch behavior | New mechanism? |
+|---|---|---|
+| **Wrong inputs** (e.g. corrected external data) | fixed inputs → new hash → dispatched as a fresh run; old `bad` run excluded | **None** — content addressing does it |
+| **Same inputs** (transient failure, partial output) | identical hash → dedup currently *skips* it | **Yes** — dedup must treat an existing-`bad` occupant as unsatisfied → redo |
+
+So the only dispatch-side change is one precise rule in the SweepManager
+collision wiring: **a grid cell whose only occupant is `bad` (or missing) is
+unsatisfied and gets dispatched.** Everything else falls out of hashing +
+`status`. Completeness itself is a **read-side** concern (§12), never triggers a
+run, and makes no assumption that a sweep exists.
+
+### 11.2 Attribute key reservations
+
+**Stay open.** Documented conventions only; no reserved key set beyond the
+auto-injected `run_hash` custom tag.
+
+### 11.3 Rename `tags` → `attributes`
+
+**Done as a run-level slice** (v0.0.9.25), not a blanket rename. On building it,
+"tags" turned out to be a whole *scoped* metadata subsystem (`run_hash` +
+`session_id` + `run_id` + custom synthetic scopes, ~12 methods, a JSON
+`run_tags` table) — genuinely metadata, and "attribute_by_run_id" reads wrong.
+So `attributes` is the sanctioned name for the **`run_hash` slice only** — what
+the memo's model actually means by attributes (run factors + join keys):
+`set_attributes` / `get_attributes` / `list_attribute_keys` /
+`find_by_attribute` / `find_current_by_attribute`. The general
+`tag_by_session_id` / `tag_by_run_id` / `tag_custom` / `find_tagged` facility
+keeps the `tags` name and the underlying `run_tags` store is unchanged (no
+migration). Throughout this memo, "attributes" = that run-level slice; "tags" =
+the general facility.
+
+## 12. Target designs — coverage over attributes (Phase 2 rider)
+
+Completeness is asserted by an **external, persisted `TargetDesign`** that makes
+no claim on how runs were produced. It relies on the user tagging runs
+diligently, and in exchange assumes nothing about JobConfig/sweep construction —
+so yaml-dispatched jobs, interactive runs, and sweeps all count toward the same
+requirement identically. This is the deliberate trade: fewer assumptions, at the
+cost of resting on the user's tagging discipline.
+
+### Model
+
+A `TargetDesign` is a named set of `Requirement`s. Each requirement is a
+conjunction of required `attributes` plus a `min_active` count:
+
+```python
+design = TargetDesign("jotr_fire_2026", requirements=[
+    Requirement(attributes={"scenario": "historical", "treatment": "spinup"},    min_active=1),
+    Requirement(attributes={"scenario": "historical", "treatment": "no_spinup"}, min_active=1),
+])
+registry.register_design(design)                      # persisted (see schema below)
+registry.check_design("jotr_fire_2026") -> TargetCoverageReport
+```
+
+### Satisfaction
+
+- **Superset match** — a run tagged `{scenario:historical, treatment:spinup,
+  site:JOTR001}` satisfies `{scenario:historical, treatment:spinup}`. A
+  requirement is as specific as it is written.
+- **Count = distinct `active` run_hashes** matching; `min_active` default 1.
+  `bad`/`superseded` runs never count — regardless of their hashes.
+- **Replicate adequacy is out of scope here** — that is `check_consistency`'s job
+  (replicates per hash). Coverage answers "is this cell occupied by enough
+  *current* runs"; consistency answers "did each run land all its replicates."
+  Orthogonal axes.
+
+### `TargetCoverageReport`
+
+Per requirement: `satisfied: bool`, `found` vs `required`, the matching active
+run_hashes, and — crucially — the **non-active matches with their status**, so an
+empty cell that *does* have runs reads as "2 runs present but both `bad`," not
+"nothing ran." Top level: `complete: bool` plus the list of unmet requirements.
+The unmet list is plain data; a caller (or SweepManager) may feed it into a
+dispatch, but coverage never triggers one.
+
+### Persistence
+
+Two additive tables:
+
+```sql
+CREATE TABLE target_designs (
+  name        VARCHAR PRIMARY KEY,
+  created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE target_requirements (
+  design_name VARCHAR REFERENCES target_designs(name),
+  attributes  JSON,          -- {key: value, ...}, the required conjunction
+  min_active  INTEGER DEFAULT 1
+);
+```
+
+`check_design` joins `target_requirements` against `run_tags ⋈ job_configs`
+(active only) by attribute-superset, counts distinct current hashes per
+requirement, and assembles the report. Pure read path; jar-free.

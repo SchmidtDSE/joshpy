@@ -95,6 +95,27 @@ CREATE TABLE IF NOT EXISTS run_tags (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (scope, key)
 );
+
+-- Target designs: standing, attribute-keyed completeness expectations. A design
+-- is a named set of requirements; each requirement is a conjunction of required
+-- run-level attributes plus a min_active count. Completeness is checked over
+-- attributes (not run_hashes) against active runs only, so it makes no claim on
+-- how runs were produced. See REGISTRY_PROVENANCE.md §12.
+CREATE TABLE IF NOT EXISTS target_designs (
+    name        VARCHAR PRIMARY KEY,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS target_requirements (
+    design_name VARCHAR REFERENCES target_designs(name),
+    attributes  JSON NOT NULL,       -- {key: value, ...}, the required conjunction
+    min_active  INTEGER DEFAULT 1,
+    -- A cell is identified by (design, attribute conjunction); this both forbids
+    -- redundant cells and lets merge-mode S3 sync dedup via INSERT OR IGNORE.
+    -- Requires canonical (sorted-key) JSON so identical conjunctions compare
+    -- equal across registries -- see register_design.
+    PRIMARY KEY (design_name, attributes)
+);
 """
 
 # "Current" cell_data: rows belonging to active runs only. "Current" collapses

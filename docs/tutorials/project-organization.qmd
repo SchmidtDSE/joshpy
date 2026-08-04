@@ -282,7 +282,7 @@ for site, config_path in site_configs.items():
     manager.load_results(quiet=True)
 
     run_hash = manager.job_set.jobs[0].run_hash
-    manager.registry.tag_by_run_hash(run_hash, site=site)
+    manager.registry.set_attributes(run_hash, site=site)
     run_hashes[site] = run_hash
     manager.cleanup()
     manager.close()
@@ -295,12 +295,15 @@ print(run_hashes)
 from joshpy.registry import RunRegistry
 
 registry = RunRegistry(registry_path)
-print(registry.get_tags_by_run_hash(run_hashes["JOTR001"]))
+print(registry.get_attributes(run_hashes["JOTR001"]))
 ```
 
+Run-level factors like `site` are **attributes** -- `set_attributes` /
+`get_attributes` are the sanctioned home for what a run is *about* (see
+[Best Practices](../best-practices.qmd)). For metadata scoped to a whole sweep
+session or a single execution rather than a run's configuration,
 `tag_by_session_id(session_id, **tags)` and `tag_by_run_id(run_id, **tags)`
-work the same way, for metadata scoped to a whole sweep session or a single
-execution rather than a run's configuration.
+work the same way against the general `run_tags` store.
 
 ### Grouping by a tag
 
@@ -319,36 +322,40 @@ print(diag.get_parameter_comparison("averageHeight", "site", step=10))
 
 ### Synthetic groupings and the reverse lookup
 
-`site="JOTR001"` above is a *value* shared by many run_hashes -- it isn't a
-column anywhere in the schema by itself. To attach metadata to the site
-*itself* (plot count, elevation) rather than to one particular run, use
-`tag_custom()` with your own scope name, and `find_tagged()` to go the other
-direction -- from a tag value back to every run_hash that carries it:
+`site="JOTR001"` above is a *value* shared by many run_hashes. To recover every
+current run carrying it -- the reverse of `get_attributes` -- use
+`find_by_attribute()`, which returns active runs only by default (superseded/bad
+runs drop out; pass `current_only=False` to include them):
+
+```{python}
+#| label: attrs-reverse
+print(registry.find_by_attribute("site", "JOTR001"))
+```
+
+To attach metadata to the site *itself* (plot count, elevation) rather than to
+any one run -- a grouping that's no column in the schema -- use `tag_custom()`
+with your own scope name, recovered with `find_tagged()`:
 
 ```{python}
 #| label: tags-custom
 registry.tag_custom("JOTR001", scope="site", n_plots=12, elevation_m=850)
 print(registry.get_custom_tags("JOTR001", scope="site"))
 
-print(registry.find_tagged("site", "JOTR001"))
+print(registry.find_tagged("biome", "desert", scope="site") or "no biome tag set")
 ```
 
-`tag_custom()` and `find_tagged()` aren't magic -- `run_tags` is a plain
-`(scope, key) -> JSON` table, and both methods just run SQL against it.
-Here's exactly what happened above, expressed as raw queries:
+None of this is magic -- `run_tags` is a plain `(scope, key) -> JSON` table.
+Here's what `find_by_attribute` runs: a JSON-path match over the `run_hash`
+scope, joined to `job_configs` so only active runs come back:
 
 ```{python}
-#| label: tags-raw-sql
-# What tag_custom("JOTR001", scope="site", ...) actually wrote:
+#| label: attrs-raw-sql
 print(registry.conn.execute(
-    "SELECT scope, key, tags FROM run_tags WHERE scope = 'site' AND key = 'JOTR001'"
-).fetchone())
-
-# What find_tagged("site", "JOTR001") actually runs -- a JSON-path match
-# against every row in the "run_hash" scope:
-print(registry.conn.execute(
-    "SELECT key FROM run_tags WHERE scope = 'run_hash' "
-    "AND json_extract_string(tags, '$.site') = ?", ["JOTR001"]
+    "SELECT rt.key FROM run_tags rt "
+    "JOIN job_configs jc ON jc.run_hash = rt.key "
+    "WHERE rt.scope = 'run_hash' "
+    "AND json_extract_string(rt.tags, '$.site') = ? "
+    "AND coalesce(jc.status, 'active') = 'active'", ["JOTR001"]
 ).fetchall())
 ```
 

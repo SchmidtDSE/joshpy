@@ -2770,5 +2770,113 @@ class TestCollisionPolicyLocalDispatch(unittest.TestCase):
             cli.run.assert_called_once()
 
 
+class TestBadRunRedispatch(unittest.TestCase):
+    """bad -> drop + full redispatch in the collision gates (REGISTRY_PROVENANCE §11.1)."""
+
+    def _job(self, tmp, run_hash="abcdef012345"):
+        from joshpy.jobs import ExpandedJob
+
+        src = Path(tmp) / "sim.josh"
+        src.write_text("x")
+        return ExpandedJob(
+            config_content="",
+            config_path=src.parent / "c.jshc",
+            config_name="c",
+            run_hash=run_hash,
+            parameters={},
+            simulation="Main",
+            replicates=2,
+            source_path=src,
+            file_mappings={},
+        )
+
+    def _minio_exports(self, path="/bucket/output_{replicate}.csv"):
+        export_info = MagicMock()
+        export_info.protocol = "minio"
+        export_info.path = path
+        exports = MagicMock()
+        exports.export_files = {"patch": export_info}
+        return exports
+
+    def _job_set(self, jobs):
+        job_set = MagicMock()
+        job_set.__iter__ = lambda self: iter(jobs)
+        return job_set
+
+    def test_run_hash_is_bad_variants(self):
+        from joshpy.sweep import _run_hash_is_bad
+
+        reg = MagicMock()
+        reg.get_config_by_hash.return_value.effective_status = "active"
+        self.assertFalse(_run_hash_is_bad(reg, "h"))
+        reg.get_config_by_hash.return_value.effective_status = "bad"
+        self.assertTrue(_run_hash_is_bad(reg, "h"))
+        reg.get_config_by_hash.return_value = None
+        self.assertFalse(_run_hash_is_bad(reg, "h"))
+        self.assertFalse(_run_hash_is_bad(None, "h"))
+
+    def test_resolve_drops_bad_and_dispatches_full(self):
+        """A bad run is dropped and dispatched in full, before any output listing."""
+        from joshpy.sweep import resolve_collision_action
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._job(tmp)
+            reg = MagicMock()
+            reg.get_config_by_hash.return_value.effective_status = "bad"
+            cli = MagicMock()
+
+            action, patch_info = resolve_collision_action(cli, job, reg, "skip")
+
+            reg.reset_run.assert_called_once_with(job.run_hash)
+            self.assertIsNone(action)
+            self.assertIsNone(patch_info)
+            # Returned before listing outputs, so stale files can't force a skip.
+            cli.inspect_exports.assert_not_called()
+
+    def test_resolve_active_run_takes_normal_path(self):
+        from joshpy.sweep import resolve_collision_action
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._job(tmp)
+            reg = MagicMock()
+            reg.get_config_by_hash.return_value.effective_status = "active"
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._minio_exports()
+
+            resolve_collision_action(cli, job, reg, "skip")
+
+            reg.reset_run.assert_not_called()
+            cli.inspect_exports.assert_called_once()
+
+    def test_check_export_path_safety_ignores_bad_prior(self):
+        """A bad prior run is not a blocking conflict (it will be redone)."""
+        from joshpy.sweep import _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._job(tmp)
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._minio_exports()
+            reg = MagicMock()
+            reg.get_runs_for_hash.return_value = [MagicMock()]  # has prior runs
+            reg.get_config_by_hash.return_value.effective_status = "bad"
+
+            # Must not raise despite prior runs, because the run is bad.
+            _check_export_path_safety(cli, self._job_set([job]), reg)
+
+    def test_check_export_path_safety_still_flags_active_prior(self):
+        from joshpy.sweep import SweepCollisionError, _check_export_path_safety
+
+        with tempfile.TemporaryDirectory() as tmp:
+            job = self._job(tmp)
+            cli = MagicMock()
+            cli.inspect_exports.return_value = self._minio_exports()
+            reg = MagicMock()
+            reg.get_runs_for_hash.return_value = [MagicMock()]
+            reg.get_config_by_hash.return_value.effective_status = "active"
+
+            with self.assertRaises(SweepCollisionError):
+                _check_export_path_safety(cli, self._job_set([job]), reg)
+
+
 if __name__ == "__main__":
     unittest.main()

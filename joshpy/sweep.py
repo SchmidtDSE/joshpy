@@ -239,8 +239,10 @@ def _check_export_path_safety(
         if "{timestamp}" in path_template or "{run_hash}" in path_template:
             continue
 
+        # A run marked bad is not a real conflict: it will be dropped and
+        # re-dispatched by resolve_collision_action (REGISTRY_PROVENANCE.md §11.1).
         prior_runs = registry.get_runs_for_hash(job.run_hash)
-        if prior_runs:
+        if prior_runs and not _run_hash_is_bad(registry, job.run_hash):
             conflicts.append((job, path_template, list(prior_runs)))
 
     if conflicts:
@@ -549,6 +551,21 @@ def _apply_collision_policy(
     )
 
 
+def _run_hash_is_bad(registry: RunRegistry | None, run_hash: str) -> bool:
+    """Whether *run_hash* is registered and explicitly marked ``status='bad'``.
+
+    Unregistered or unmarked runs return ``False`` (an unknown hash is not bad).
+    Used to trigger the ``bad``-run redo path in the collision gates.
+    """
+    if registry is None:
+        return False
+    try:
+        config = registry.get_config_by_hash(run_hash)
+    except Exception:
+        return False
+    return config is not None and config.effective_status == "bad"
+
+
 def resolve_collision_action(
     cli: JoshCLI,
     job: Any,  # ExpandedJob
@@ -564,11 +581,31 @@ def resolve_collision_action(
     Shared by local, Josh Cloud, and batch-remote dispatch so the same
     ``fail``/``pool``/``skip`` semantics apply everywhere.
 
+    A run explicitly marked ``status='bad'`` is never a satisfied cell,
+    regardless of policy: its stale executions/results are cleared and its status
+    reactivated (:meth:`RunRegistry.reset_run`) and it is dispatched in full, so
+    the fresh run is active and overwrites the stale outputs. This is the one
+    dispatch-side effect of the provenance model (REGISTRY_PROVENANCE.md §11.1);
+    content hashing already handles the wrong-inputs case (a corrected input
+    yields a new hash that simply dispatches as a fresh run).
+
     Returns ``(action, patch_info)``. ``action`` is None when the policy can't be
     evaluated (no registry, no source_path, no patch export, or a listing error),
     which callers treat as "dispatch in full".
     """
     if registry is None or job.source_path is None:
+        return None, None
+    if _run_hash_is_bad(registry, job.run_hash):
+        # Redo: clear the bad run's stale executions/results and reactivate it,
+        # then dispatch in full. reset_run keeps the (identical) config row so the
+        # fresh executions attach to it; the re-dispatch overwrites the stale
+        # {run_hash}_{replicate} outputs, so nothing stale lingers.
+        registry.reset_run(job.run_hash)
+        if not quiet:
+            print(
+                f"  [POLICY] {job.run_hash} was marked bad; reset and "
+                f"re-dispatching in full."
+            )
         return None, None
     try:
         from joshpy.cli import InspectExportsConfig

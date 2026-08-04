@@ -256,49 +256,53 @@ that wasn't a sweep parameter at all -- and doing that by `ALTER TABLE`-ing
 blurs "what I swept" with "what I annotated afterward". The `run_tags` table
 is a separate, additive-only sidecar for exactly this.
 
-Three scopes are validated -- each checks its target actually exists, and
-each is documented against exactly what it joins:
-
-| Scope | Set with | Joins against |
-|-------|----------|----------------|
-| `run_hash` | `tag_by_run_hash(run_hash, **tags)` | `job_configs.run_hash`, `config_parameters.run_hash`, `job_runs.run_hash`, `cell_data.run_hash` (same value, denormalized on purpose) |
-| `session_id` | `tag_by_session_id(session_id, **tags)` | `sweep_sessions.session_id`, `job_runs.session_id`, `session_configs.session_id` |
-| `run_id` | `tag_by_run_id(run_id, **tags)` | `job_runs.run_id`, `cell_data.run_id`, `run_outputs.run_id` (via `job_runs`) |
+Run-level factors -- what a run is *about* (site, treatment, scenario) and the
+join keys linking runs to Josh's CSV output -- are **attributes**, the
+sanctioned home that replaces encoding factors into the label string:
 
 ```python
-registry.tag_by_run_hash(run_hash, site="JOTR001", biome="desert")
-registry.get_tags_by_run_hash(run_hash)
+registry.set_attributes(run_hash, site="JOTR001", biome="desert")
+registry.get_attributes(run_hash)
 # {'site': 'JOTR001', 'biome': 'desert'}
 ```
 
 `DiagnosticQueries.get_parameter_comparison(variable, param_name)` falls back
-to `run_hash`-scoped tags for any `param_name` that isn't a declared sweep
-parameter, so `group_by="site"` works with no extra query code once tagged.
-Reaching for the join directly:
+to attributes for any `param_name` that isn't a declared sweep parameter, so
+`group_by="site"` works with no extra query code once set.
 
-```sql
-SELECT
-    json_extract_string(rt.tags, '$.site') AS site,
-    cd.step,
-    AVG(cd.averageHeight) AS mean_height
-FROM cell_data cd
-JOIN run_tags rt ON rt.key = cd.run_hash AND rt.scope = 'run_hash'
-GROUP BY site, cd.step
+`find_by_attribute()` is the reverse lookup (attribute value → run_hashes) and
+is **currency-aware**: it returns active runs only by default, so superseded or
+`bad` runs never leak into an analysis pool (pass `current_only=False` to
+include them). `find_current_by_attribute()` returns the same, resolved with
+label and attributes.
+
+```python
+registry.find_by_attribute("site", "JOTR001")
+# ['hash_jotr001', 'hash_jotr002']  # active only
 ```
 
-A tag value like `"JOTR001"` above is shared by many run_hashes -- it isn't a
-column anywhere in the schema by itself. For metadata about the site *itself*
-(not a specific run), use a custom scope, and `find_tagged()` for the reverse
-lookup (tag value → every key that carries it):
+Attributes are the `run_hash` slice of a broader `run_tags` sidecar. Two more
+validated scopes carry general metadata (not run factors), each checking its
+target exists and documented against exactly what it joins:
+
+| Scope | Set with | Joins against |
+|-------|----------|----------------|
+| `run_hash` | `set_attributes(run_hash, **attributes)` | `job_configs.run_hash`, `config_parameters.run_hash`, `job_runs.run_hash`, `cell_data.run_hash` (same value, denormalized on purpose) |
+| `session_id` | `tag_by_session_id(session_id, **tags)` | `sweep_sessions.session_id`, `job_runs.session_id`, `session_configs.session_id` |
+| `run_id` | `tag_by_run_id(run_id, **tags)` | `job_runs.run_id`, `cell_data.run_id`, `run_outputs.run_id` (via `job_runs`) |
+
+For metadata about a grouping that's no column in the schema -- the *site*
+itself (plot count, elevation), not any one run -- use a custom scope, with
+`find_tagged()` for its reverse lookup:
 
 ```python
 registry.tag_custom("JOTR001", scope="site", n_plots=12, elevation_m=850)
-registry.find_tagged("site", "JOTR001")
-# ['hash_jotr001', 'hash_jotr002', ...]
+registry.find_tagged("biome", "desert", scope="site")
+# ['JOTR001', 'JOTR002', ...]
 ```
 
-`tag_custom()` refuses the three validated scope names -- use the matching
-`tag_by_*` method for those. See
+`tag_custom()` refuses the three validated scope names -- use `set_attributes`
+(run_hash) or the matching `tag_by_*` method for those. See
 [Tagging Runs for Custom Grouping](tutorials/project-organization.qmd#tagging-runs-for-custom-grouping)
 for a full runnable walkthrough.
 

@@ -1905,22 +1905,22 @@ def _register_job_outputs(
         "run_hash": job.run_hash,
     }
 
-    output_specs: list[tuple[str, str]] = []
+    output_specs: list[tuple[str, Any]] = []
     for export_type, info in paths.export_files.items():
         if info is not None:
-            output_specs.append((f"export.{export_type}", info.path))
+            output_specs.append((f"export.{export_type}", info))
     for debug_type, info in paths.debug_files.items():
         if info is not None:
-            output_specs.append((f"debug.{debug_type}", info.path))
+            output_specs.append((f"debug.{debug_type}", info))
 
     seen: set[tuple[str, str]] = set()
     replicates = max(job.replicates, 1)
 
-    for output_type, template in output_specs:
+    for output_type, info in output_specs:
         for replicate in range(replicates):
             kwargs = {**resolve_kwargs, "replicate": replicate}
             try:
-                resolved = paths.resolve_path(template, **kwargs)
+                resolved = paths.resolve_path(info.path, **kwargs)
             except KeyError as e:
                 if not quiet:
                     print(
@@ -1933,7 +1933,15 @@ def _register_job_outputs(
                     print(f"  [WARN] Could not resolve {output_type} path: {e}")
                 continue
 
-            key = (output_type, str(resolved))
+            # Store a full URI, not just the path component. For remote exports
+            # (minio/s3) ExportFileInfo.path drops the bucket (host), so the bare
+            # resolved path is not addressable; reattach protocol+host. Local
+            # paths are stored as-is. This makes run_outputs.file_path the
+            # authoritative, jar-free source of export URIs for remote
+            # aggregation (REGISTRY_PROVENANCE.md §8).
+            file_path = _resolved_output_uri(info, resolved)
+
+            key = (output_type, file_path)
             if key in seen:
                 continue
             seen.add(key)
@@ -1948,11 +1956,27 @@ def _register_job_outputs(
             registry.register_output(
                 run_id=run_id,
                 output_type=output_type,
-                file_path=str(resolved),
+                file_path=file_path,
                 file_size=file_size,
             )
 
     return paths
+
+
+def _resolved_output_uri(info: Any, resolved: Path) -> str:
+    """Build the stored ``run_outputs.file_path`` for one resolved output.
+
+    Remote exports (``minio://`` / ``s3://``) parse to an ``ExportFileInfo``
+    whose ``.path`` is only the object key — the bucket lives in ``.host`` and
+    the scheme in ``.protocol``. Storing the bare path would lose the bucket, so
+    reattach both into a full URI. Local (``file`` / no protocol) exports are
+    stored verbatim, preserving prior behavior. See REGISTRY_PROVENANCE.md §8.
+    """
+    protocol = (getattr(info, "protocol", "") or "").lower()
+    host = getattr(info, "host", "") or ""
+    if protocol in ("minio", "s3") and host:
+        return f"{protocol}://{host}/{str(resolved).lstrip('/')}"
+    return str(resolved)
 
 
 def run_sweep(
@@ -2152,7 +2176,11 @@ def run_sweep(
             job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
 
             from joshpy.cli import CLIResult
-            from joshpy.sweep import SweepCollisionError, resolve_collision_action
+            from joshpy.sweep import (
+                SweepCollisionError,
+                _run_hash_is_bad,
+                resolve_collision_action,
+            )
 
             mode = "batch-remote" if batch_remote else ("remote" if remote else "local")
 
@@ -2161,9 +2189,29 @@ def run_sweep(
             # 'skip'/'pool' apply to local and Josh Cloud too. Evaluate only when
             # it can change behavior, to avoid an extra inspect_exports on the
             # default local path.
+            resolves_collision = batch_remote or collision_policy in ("skip", "pool")
+
+            # A run explicitly marked bad is redone regardless of policy
+            # (REGISTRY_PROVENANCE.md §11.1). When resolve_collision_action runs
+            # it performs the reset+full-dispatch itself (before listing outputs,
+            # so stale files can't trigger a skip). The default local 'fail' path
+            # dedups nothing and never calls resolve, so handle the reset here for
+            # it — a cheap status probe, no inspect_exports.
+            if (
+                not resolves_collision
+                and registry is not None
+                and _run_hash_is_bad(registry, job.run_hash)
+            ):
+                registry.reset_run(job.run_hash)
+                if not quiet:
+                    print(
+                        f"  [POLICY] {job.run_hash} was marked bad; reset and "
+                        f"re-dispatching in full."
+                    )
+
             action = None
             patch_info = None
-            if batch_remote or collision_policy in ("skip", "pool"):
+            if resolves_collision:
                 action, patch_info = resolve_collision_action(
                     cli, job, registry, collision_policy, quiet=quiet,
                 )

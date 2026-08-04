@@ -2429,39 +2429,39 @@ class TestRunTags(unittest.TestCase):
     def tearDown(self):
         self.registry.close()
 
-    # -- tag_by_run_hash --------------------------------------------------
+    # -- set_attributes (run-level slice) ---------------------------------
 
-    def test_tag_by_run_hash_set_and_get(self):
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001", biome="desert")
+    def test_set_attributes_set_and_get(self):
+        self.registry.set_attributes("hash_aaa111", site="JOTR001", biome="desert")
         self.assertEqual(
-            self.registry.get_tags_by_run_hash("hash_aaa111"),
+            self.registry.get_attributes("hash_aaa111"),
             {"site": "JOTR001", "biome": "desert"},
         )
 
-    def test_get_tags_by_run_hash_missing_returns_empty(self):
-        self.assertEqual(self.registry.get_tags_by_run_hash("hash_aaa111"), {})
+    def test_get_attributes_missing_returns_empty(self):
+        self.assertEqual(self.registry.get_attributes("hash_aaa111"), {})
 
-    def test_tag_by_run_hash_merges_into_existing(self):
-        """Calling tag_by_run_hash again adds/overwrites keys, doesn't replace the dict."""
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
-        self.registry.tag_by_run_hash("hash_aaa111", biome="desert")
+    def test_set_attributes_merges_into_existing(self):
+        """Calling set_attributes again adds/overwrites keys, doesn't replace the dict."""
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_aaa111", biome="desert")
         self.assertEqual(
-            self.registry.get_tags_by_run_hash("hash_aaa111"),
+            self.registry.get_attributes("hash_aaa111"),
             {"site": "JOTR001", "biome": "desert"},
         )
 
-    def test_tag_by_run_hash_overwrites_same_key(self):
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR002")
-        self.assertEqual(self.registry.get_tags_by_run_hash("hash_aaa111"), {"site": "JOTR002"})
+    def test_set_attributes_overwrites_same_key(self):
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_aaa111", site="JOTR002")
+        self.assertEqual(self.registry.get_attributes("hash_aaa111"), {"site": "JOTR002"})
 
-    def test_tag_by_run_hash_requires_at_least_one_tag(self):
+    def test_set_attributes_requires_at_least_one(self):
         with self.assertRaises(ValueError):
-            self.registry.tag_by_run_hash("hash_aaa111")
+            self.registry.set_attributes("hash_aaa111")
 
-    def test_tag_by_run_hash_unknown_hash_raises(self):
+    def test_set_attributes_unknown_hash_raises(self):
         with self.assertRaises(KeyError):
-            self.registry.tag_by_run_hash("nonexistent", site="JOTR001")
+            self.registry.set_attributes("nonexistent", site="JOTR001")
 
     # -- tag_by_session_id --------------------------------------------------
 
@@ -2491,7 +2491,7 @@ class TestRunTags(unittest.TestCase):
     def test_tag_custom_scope_not_run_hash(self):
         """tag_custom keys on something other than run_hash (e.g. a site spanning many runs)."""
         self.registry.tag_custom("JOTR001", scope="site", n_plots=12)
-        self.assertEqual(self.registry.get_tags_by_run_hash("JOTR001"), {})
+        self.assertEqual(self.registry.get_attributes("JOTR001"), {})
         self.assertEqual(
             self.registry.get_custom_tags("JOTR001", scope="site"), {"n_plots": 12}
         )
@@ -2500,7 +2500,8 @@ class TestRunTags(unittest.TestCase):
         """tag_custom refuses run_hash/session_id/run_id -- use the dedicated method."""
         with self.assertRaises(ValueError) as ctx:
             self.registry.tag_custom("hash_aaa111", scope="run_hash", site="JOTR001")
-        self.assertIn("tag_by_run_hash", str(ctx.exception))
+        # run_hash's dedicated setter is the run-level attributes API.
+        self.assertIn("set_attributes", str(ctx.exception))
 
     def test_tag_custom_requires_at_least_one_tag(self):
         with self.assertRaises(ValueError):
@@ -2509,14 +2510,17 @@ class TestRunTags(unittest.TestCase):
     # -- list_tag_keys --------------------------------------------------
 
     def test_list_tag_keys(self):
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001", biome="desert")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001", biome="desert")
         self.assertEqual(self.registry.list_tag_keys(scope="run_hash"), ["biome", "site"])
+        # list_attribute_keys is the run-level convenience for scope="run_hash".
+        self.assertEqual(self.registry.list_attribute_keys(), ["biome", "site"])
 
     def test_list_tag_keys_empty(self):
         self.assertEqual(self.registry.list_tag_keys(scope="run_hash"), [])
+        self.assertEqual(self.registry.list_attribute_keys(), [])
 
     def test_list_tag_keys_scoped(self):
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
         self.registry.tag_custom("JOTR001", scope="site", n_plots=12)
         self.assertEqual(self.registry.list_tag_keys(scope="run_hash"), ["site"])
         self.assertEqual(self.registry.list_tag_keys(scope="site"), ["n_plots"])
@@ -2529,15 +2533,15 @@ class TestRunTags(unittest.TestCase):
             self.session_id, "hash_bbb222", "/sim.josh",
             "param = 20 count", None, {"param": 20},
         )
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
-        self.registry.tag_by_run_hash("hash_bbb222", site="JOTR001")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_bbb222", site="JOTR001")
         self.assertEqual(
             set(self.registry.find_tagged("site", "JOTR001")),
             {"hash_aaa111", "hash_bbb222"},
         )
 
     def test_find_tagged_no_match_returns_empty(self):
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
         self.assertEqual(self.registry.find_tagged("site", "JOTR002"), [])
 
     def test_find_tagged_custom_scope(self):
@@ -2547,6 +2551,60 @@ class TestRunTags(unittest.TestCase):
             set(self.registry.find_tagged("biome", "desert", scope="site")),
             {"JOTR001", "JOTR002"},
         )
+
+    # -- find_by_attribute (currency-aware) -------------------------------
+
+    def _register(self, run_hash):
+        self.registry.register_run(
+            self.session_id, run_hash, "/sim.josh",
+            "param = 10 count", None, {"param": 10},
+        )
+
+    def test_find_by_attribute_current_only_default(self):
+        """Superseded/bad runs drop out of find_by_attribute by default."""
+        self._register("hash_bbb222")
+        self._register("hash_ccc333")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_bbb222", site="JOTR001")
+        self.registry.set_attributes("hash_ccc333", site="JOTR001")
+        # Retire two of the three by different statuses.
+        self.registry.mark_run("hash_bbb222", status="bad")
+        self.registry.mark_run(
+            "hash_ccc333", status="superseded", superseded_by="hash_aaa111"
+        )
+        self.assertEqual(self.registry.find_by_attribute("site", "JOTR001"), ["hash_aaa111"])
+
+    def test_find_by_attribute_include_superseded(self):
+        self._register("hash_bbb222")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_bbb222", site="JOTR001")
+        self.registry.mark_run("hash_bbb222", status="bad")
+        self.assertEqual(
+            set(self.registry.find_by_attribute("site", "JOTR001", current_only=False)),
+            {"hash_aaa111", "hash_bbb222"},
+        )
+
+    def test_find_current_by_attribute_resolves_label_and_attributes(self):
+        from joshpy.registry import AttributeMatch
+
+        self.registry.label_run("hash_aaa111", "spinup")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001", biome="desert")
+        matches = self.registry.find_current_by_attribute("site", "JOTR001")
+        self.assertEqual(
+            matches,
+            [
+                AttributeMatch(
+                    run_hash="hash_aaa111",
+                    label="spinup",
+                    attributes={"site": "JOTR001", "biome": "desert"},
+                )
+            ],
+        )
+
+    def test_find_current_by_attribute_excludes_non_active(self):
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
+        self.registry.mark_run("hash_aaa111", status="bad")
+        self.assertEqual(self.registry.find_current_by_attribute("site", "JOTR001"), [])
 
     # -- group_by wiring --------------------------------------------------
 
@@ -2558,12 +2616,15 @@ class TestRunTags(unittest.TestCase):
         run_id = self.registry.start_run("hash_aaa111", session_id=self.session_id)
         self.registry.complete_run(run_id, exit_code=0)
         self.registry.conn.execute("ALTER TABLE cell_data ADD COLUMN averageHeight DOUBLE")
+        # Bypassing the loader means the SELECT c.* current view was bound before
+        # this column existed; refresh it as the loader would.
+        self.registry._refresh_current_view()
         self.registry.conn.execute(
             "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
             "VALUES (?, 'hash_aaa111', 0, 0, 5.0)",
             [run_id],
         )
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
 
         diag = DiagnosticQueries(self.registry)
         df = diag.get_parameter_comparison("averageHeight", "site")
@@ -2578,17 +2639,360 @@ class TestRunTags(unittest.TestCase):
         run_id = self.registry.start_run("hash_aaa111", session_id=self.session_id)
         self.registry.complete_run(run_id, exit_code=0)
         self.registry.conn.execute("ALTER TABLE cell_data ADD COLUMN averageHeight DOUBLE")
+        self.registry._refresh_current_view()
         self.registry.conn.execute(
             "INSERT INTO cell_data (run_id, run_hash, step, replicate, averageHeight) "
             "VALUES (?, 'hash_aaa111', 3, 0, 5.0)",
             [run_id],
         )
-        self.registry.tag_by_run_hash("hash_aaa111", site="JOTR001")
+        self.registry.set_attributes("hash_aaa111", site="JOTR001")
 
         diag = DiagnosticQueries(self.registry)
         df = diag.get_parameter_comparison("averageHeight", "site", step=3)
         self.assertEqual(list(df["param_value"]), ["JOTR001"])
         self.assertEqual(list(df["step"]), [3])
+
+
+class TestTargetDesigns(unittest.TestCase):
+    """Tests for the attribute-based coverage layer (REGISTRY_PROVENANCE.md §12)."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        config = _make_config()
+        self.session_id = self.registry.create_session(config=config)
+
+    def tearDown(self):
+        self.registry.close()
+
+    def _run(self, run_hash, **attributes):
+        self.registry.register_run(
+            self.session_id, run_hash, "/sim.josh",
+            "param = 10 count", None, {"param": 10},
+        )
+        if attributes:
+            self.registry.set_attributes(run_hash, **attributes)
+
+    def _design(self):
+        from joshpy.registry import Requirement, TargetDesign
+
+        return TargetDesign(
+            "jotr_fire_2026",
+            requirements=[
+                Requirement({"scenario": "historical", "treatment": "spinup"}),
+                Requirement({"scenario": "historical", "treatment": "no_spinup"}),
+            ],
+        )
+
+    def test_register_and_get_roundtrip(self):
+        from joshpy.registry import Requirement
+
+        self.registry.register_design(self._design())
+        loaded = self.registry.get_design("jotr_fire_2026")
+        self.assertEqual(loaded.name, "jotr_fire_2026")
+        self.assertEqual(
+            loaded.requirements,
+            [
+                Requirement({"scenario": "historical", "treatment": "spinup"}, 1),
+                Requirement({"scenario": "historical", "treatment": "no_spinup"}, 1),
+            ],
+        )
+
+    def test_register_replaces_requirements(self):
+        from joshpy.registry import Requirement, TargetDesign
+
+        self.registry.register_design(self._design())
+        self.registry.register_design(
+            TargetDesign("jotr_fire_2026", [Requirement({"scenario": "ssp245"})])
+        )
+        loaded = self.registry.get_design("jotr_fire_2026")
+        self.assertEqual(loaded.requirements, [Requirement({"scenario": "ssp245"}, 1)])
+
+    def test_get_missing_design_returns_none(self):
+        self.assertIsNone(self.registry.get_design("nope"))
+
+    def test_list_and_delete_designs(self):
+        self.registry.register_design(self._design())
+        self.assertEqual(self.registry.list_designs(), ["jotr_fire_2026"])
+        self.assertTrue(self.registry.delete_design("jotr_fire_2026"))
+        self.assertFalse(self.registry.delete_design("jotr_fire_2026"))
+        self.assertEqual(self.registry.list_designs(), [])
+
+    def test_register_dedups_duplicate_requirement_cells(self):
+        """Two requirements with the same attribute conjunction collapse to one."""
+        from joshpy.registry import Requirement, TargetDesign
+
+        self.registry.register_design(
+            TargetDesign("d", [
+                Requirement({"scenario": "historical"}),
+                Requirement({"scenario": "historical"}, min_active=5),
+            ])
+        )
+        loaded = self.registry.get_design("d")
+        self.assertEqual(len(loaded.requirements), 1)
+        rows = self.registry.conn.execute(
+            "SELECT COUNT(*) FROM target_requirements WHERE design_name = 'd'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 1)
+
+    def test_attributes_stored_canonically(self):
+        """Attributes serialize with sorted keys for cross-registry dedup."""
+        from joshpy.registry import Requirement, TargetDesign
+
+        self.registry.register_design(
+            TargetDesign("d", [Requirement({"treatment": "spinup", "scenario": "hist"})])
+        )
+        stored = self.registry.conn.execute(
+            "SELECT attributes FROM target_requirements WHERE design_name = 'd'"
+        ).fetchone()[0]
+        self.assertEqual(stored, '{"scenario": "hist", "treatment": "spinup"}')
+        # And it round-trips back to the dict regardless of key order.
+        self.assertEqual(
+            self.registry.get_design("d").requirements[0].attributes,
+            {"scenario": "hist", "treatment": "spinup"},
+        )
+
+    def test_design_tables_in_sync_list_parent_first(self):
+        from joshpy.registry import REGISTRY_SYNC_TABLES
+
+        self.assertIn("target_designs", REGISTRY_SYNC_TABLES)
+        self.assertIn("target_requirements", REGISTRY_SYNC_TABLES)
+        # Parent before child so restore's reversed-delete/forward-insert hold.
+        self.assertLess(
+            REGISTRY_SYNC_TABLES.index("target_designs"),
+            REGISTRY_SYNC_TABLES.index("target_requirements"),
+        )
+
+    def test_register_rejects_empty_requirements(self):
+        from joshpy.registry import TargetDesign
+
+        with self.assertRaises(ValueError):
+            self.registry.register_design(TargetDesign("d", []))
+
+    def test_register_rejects_empty_attributes(self):
+        from joshpy.registry import Requirement, TargetDesign
+
+        with self.assertRaises(ValueError):
+            self.registry.register_design(TargetDesign("d", [Requirement({})]))
+
+    def test_register_rejects_bad_min_active(self):
+        from joshpy.registry import Requirement, TargetDesign
+
+        with self.assertRaises(ValueError):
+            self.registry.register_design(
+                TargetDesign("d", [Requirement({"scenario": "x"}, min_active=0)])
+            )
+
+    def test_check_complete_when_all_cells_covered(self):
+        self._run("hash_spin", scenario="historical", treatment="spinup", site="A")
+        self._run("hash_nospin", scenario="historical", treatment="no_spinup")
+        report = self.registry.check_design(self._design())
+        self.assertTrue(report.complete)
+        self.assertEqual(report.unmet, [])
+        # Superset match: extra attributes (site=A) don't prevent a match.
+        self.assertEqual(report.requirements[0].active_run_hashes, ["hash_spin"])
+
+    def test_check_incomplete_when_cell_missing(self):
+        self._run("hash_spin", scenario="historical", treatment="spinup")
+        report = self.registry.check_design(self._design())
+        self.assertFalse(report.complete)
+        self.assertEqual(len(report.unmet), 1)
+        self.assertEqual(report.unmet[0].attributes["treatment"], "no_spinup")
+        self.assertEqual(report.unmet[0].found, 0)
+
+    def test_bad_run_leaves_cell_unmet_but_surfaced(self):
+        """A cell whose only occupant is bad reads as unmet-but-present."""
+        self._run("hash_spin", scenario="historical", treatment="spinup")
+        self._run("hash_nospin", scenario="historical", treatment="no_spinup")
+        self.registry.mark_run("hash_nospin", status="bad")
+        report = self.registry.check_design(self._design())
+        self.assertFalse(report.complete)
+        nospin = report.requirements[1]
+        self.assertFalse(nospin.satisfied)
+        self.assertEqual(nospin.active_run_hashes, [])
+        self.assertEqual(nospin.non_active_matches, [("hash_nospin", "bad")])
+
+    def test_min_active_requires_multiple(self):
+        from joshpy.registry import Requirement, TargetDesign
+
+        self._run("h1", scenario="historical")
+        self._run("h2", scenario="historical")
+        design = TargetDesign("d", [Requirement({"scenario": "historical"}, min_active=3)])
+        report = self.registry.check_design(design)
+        self.assertFalse(report.complete)
+        self.assertEqual(report.requirements[0].found, 2)
+        self._run("h3", scenario="historical")
+        self.assertTrue(self.registry.check_design(design).complete)
+
+    def test_check_by_registered_name(self):
+        self._run("hash_spin", scenario="historical", treatment="spinup")
+        self._run("hash_nospin", scenario="historical", treatment="no_spinup")
+        self.registry.register_design(self._design())
+        report = self.registry.check_design("jotr_fire_2026")
+        self.assertTrue(report.complete)
+
+    def test_check_unknown_name_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.check_design("nope")
+
+
+class TestResetRun(unittest.TestCase):
+    """reset_run clears results + reactivates while keeping the config (§11.1)."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        config = _make_config()
+        self.session_id = self.registry.create_session(config=config)
+        self.registry.register_run(
+            self.session_id, "hash_aaa111", "/sim.josh",
+            "param = 10 count", None, {"param": 10},
+        )
+        self.run_id = self.registry.start_run(
+            "hash_aaa111", session_id=self.session_id
+        )
+        self.registry.complete_run(self.run_id, exit_code=0)
+        self.registry.conn.execute(
+            "INSERT INTO cell_data (run_id, run_hash, step, replicate) "
+            "VALUES (?, 'hash_aaa111', 0, 0)",
+            [self.run_id],
+        )
+
+    def tearDown(self):
+        self.registry.close()
+
+    def test_reset_clears_results_and_reactivates_keeping_config(self):
+        self.registry.mark_run("hash_aaa111", "bad", reason="transient")
+        self.registry.reset_run("hash_aaa111")
+
+        # Config row survives; status is active again with marks cleared.
+        self.assertIsNotNone(self.registry.get_config_by_hash("hash_aaa111"))
+        status = self.registry.get_run_status("hash_aaa111")
+        self.assertEqual(status.effective_status, "active")
+        self.assertIsNone(status.superseded_by)
+        self.assertIsNone(status.reason)
+
+        # Executions and cell_data are gone (a re-dispatch replaces, not appends).
+        self.assertEqual(self.registry.get_runs_for_hash("hash_aaa111"), [])
+        rows = self.registry.conn.execute(
+            "SELECT COUNT(*) FROM cell_data WHERE run_hash = 'hash_aaa111'"
+        ).fetchone()[0]
+        self.assertEqual(rows, 0)
+
+    def test_reset_unknown_raises(self):
+        with self.assertRaises(KeyError):
+            self.registry.reset_run("nonexistent")
+
+
+class TestRemoteHelpers(unittest.TestCase):
+    """Pure helpers behind remote aggregation (REGISTRY_PROVENANCE.md §8)."""
+
+    def test_minio_to_s3_uri(self):
+        from joshpy.registry import _minio_to_s3_uri
+
+        self.assertEqual(_minio_to_s3_uri("minio://b/k/o_0.csv"), "s3://b/k/o_0.csv")
+        # pathlib-mangled single-slash form (older data).
+        self.assertEqual(_minio_to_s3_uri("minio:/b/k/o_0.csv"), "s3://b/k/o_0.csv")
+        self.assertEqual(_minio_to_s3_uri("s3://b/k.csv"), "s3://b/k.csv")
+        self.assertEqual(_minio_to_s3_uri("/tmp/x_2.csv"), "/tmp/x_2.csv")
+
+    def test_replicate_from_uri(self):
+        from joshpy.registry import _replicate_from_uri
+
+        self.assertEqual(_replicate_from_uri("/tmp/tutorial_sweep_50_2.csv"), 2)
+        self.assertEqual(_replicate_from_uri("minio://b/k/output_10.csv"), 10)
+        self.assertIsNone(_replicate_from_uri("consolidated.csv"))
+
+
+class TestRemoteAggregation(unittest.TestCase):
+    """get_output_uris / query_remote / check_remote_consistency over local files."""
+
+    def setUp(self):
+        from joshpy.registry import RunRegistry
+
+        self.registry = RunRegistry(":memory:")
+        config = _make_config()
+        self.session_id = self.registry.create_session(config=config)
+
+    def tearDown(self):
+        self.registry.close()
+
+    def _run_with_outputs(self, run_hash, uris, *, label=None):
+        self.registry.register_run(
+            self.session_id, run_hash, "/sim.josh",
+            "param = 10 count", None, {"param": 10},
+        )
+        if label:
+            self.registry.label_run(run_hash, label)
+        run_id = self.registry.start_run(run_hash, session_id=self.session_id)
+        self.registry.complete_run(run_id, exit_code=0)
+        for uri in uris:
+            self.registry.register_output(
+                run_id=run_id, output_type="export.patch", file_path=uri
+            )
+        return run_id
+
+    def test_get_output_uris_maps_and_filters_currency(self):
+        self._run_with_outputs(
+            "hash_a",
+            ["minio://bkt/exp/hash_a/output_0.csv", "minio://bkt/exp/hash_a/output_1.csv"],
+            label="a",
+        )
+        self._run_with_outputs("hash_b", ["minio://bkt/exp/hash_b/output_0.csv"], label="b")
+
+        uris = self.registry.get_output_uris()
+        by_hash = {(u.run_hash, u.replicate): u for u in uris}
+        self.assertEqual(len(uris), 3)
+        self.assertEqual(by_hash[("hash_a", 0)].label, "a")
+        self.assertEqual(by_hash[("hash_a", 1)].replicate, 1)
+
+        # Currency: superseding hash_b drops its outputs from the default view.
+        self.registry.mark_run("hash_b", "superseded", superseded_by="hash_a")
+        current = self.registry.get_output_uris()
+        self.assertEqual({u.run_hash for u in current}, {"hash_a"})
+        # ...but include-all still sees it.
+        allu = self.registry.get_output_uris(current_only=False)
+        self.assertEqual({u.run_hash for u in allu}, {"hash_a", "hash_b"})
+
+    def test_get_output_uris_by_label(self):
+        self._run_with_outputs("hash_a", ["minio://bkt/a_0.csv"], label="a")
+        self._run_with_outputs("hash_b", ["minio://bkt/b_0.csv"], label="b")
+        uris = self.registry.get_output_uris("a")
+        self.assertEqual([u.run_hash for u in uris], ["hash_a"])
+
+    def test_query_remote_over_local_csvs(self):
+        import tempfile
+
+        tmp = Path(tempfile.mkdtemp())
+        uris = []
+        for rep in range(2):
+            p = tmp / f"out_{rep}.csv"
+            # value = 10 at step 0, 20 at step 1 (same for both reps)
+            p.write_text("step,replicate,val\n0,%d,10\n1,%d,20\n" % (rep, rep))
+            uris.append(str(p))
+        self._run_with_outputs("hash_a", uris, label="a")
+
+        df = self.registry.query_remote("val", agg="mean", group_by=["label", "step"])
+        self.assertEqual(list(df["label"]), ["a", "a"])
+        self.assertEqual(list(df["step"]), [0, 1])
+        self.assertEqual(list(df["value"]), [10.0, 20.0])
+        self.assertEqual(list(df["n_rows"]), [2, 2])  # 2 replicates per step
+
+    def test_query_remote_raises_when_no_uris(self):
+        with self.assertRaises(ValueError):
+            self.registry.query_remote("val")
+
+    def test_query_remote_unknown_agg(self):
+        self._run_with_outputs("hash_a", ["/tmp/x_0.csv"])
+        with self.assertRaises(ValueError):
+            self.registry.query_remote("val", agg="bogus")
+
+    def test_check_remote_consistency_ignores_local(self):
+        # Local (non-s3) outputs are out of scope -> no issues, no S3 config.
+        self._run_with_outputs("hash_a", ["/tmp/out_0.csv"])
+        self.assertEqual(self.registry.check_remote_consistency(), [])
 
 
 if __name__ == "__main__":

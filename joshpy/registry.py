@@ -38,9 +38,10 @@ Example usage:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -149,6 +150,34 @@ def configure_s3(
     )
 
 
+def _minio_to_s3_uri(uri: str) -> str:
+    """Normalize a stored export URI to the ``s3://`` form DuckDB httpfs reads.
+
+    Josh writes exports under its own ``minio://bucket/key`` convention (and
+    older registries may hold a ``minio:/bucket/key`` form mangled by
+    ``pathlib``). DuckDB addresses the same object as ``s3://bucket/key``. Local
+    paths and already-``s3://`` URIs pass through unchanged. See
+    REGISTRY_PROVENANCE.md §8.
+    """
+    for prefix in ("minio://", "minio:/"):
+        if uri.startswith(prefix):
+            return "s3://" + uri[len(prefix):]
+    return uri
+
+
+def _replicate_from_uri(uri: str) -> int | None:
+    """Best-effort replicate index parsed from an output URI's filename.
+
+    Josh writes one file per replicate with the index as the last integer before
+    the extension (e.g. ``output_50_0.csv`` -> 0). Returns ``None`` when no such
+    integer is present (e.g. a consolidated single-file export). Provenance
+    (run_hash/label) always comes from the registry join, never the path — this
+    index is a convenience only.
+    """
+    match = re.search(r"(\d+)(?=\.[^./]+$)", uri)
+    return int(match.group(1)) if match else None
+
+
 def _resolve_s3_credentials(
     endpoint: str | None,
     access_key: str | None,
@@ -207,6 +236,11 @@ REGISTRY_SYNC_TABLES: tuple[str, ...] = (
     "run_outputs",
     "cell_data",
     "run_tags",
+    # Target designs travel with the registry too. Parent-first: target_designs
+    # before target_requirements (FK), so restore's reversed-delete and
+    # forward-insert both respect the constraint.
+    "target_designs",
+    "target_requirements",
 )
 
 
@@ -514,6 +548,131 @@ class RunStatus:
     def is_current(self) -> bool:
         """Whether the run is current (i.e. :attr:`effective_status` is active)."""
         return self.effective_status == "active"
+
+
+@dataclass
+class AttributeMatch:
+    """A current run matched by an analysis attribute.
+
+    Returned by :meth:`RunRegistry.find_current_by_attribute` -- the resolved
+    counterpart of a bare run_hash, so callers don't re-join label/attributes.
+
+    Attributes:
+        run_hash: The matching run.
+        label: Its label, or ``None`` if unlabeled.
+        attributes: All run-level attributes attached to it.
+    """
+
+    run_hash: str
+    label: str | None
+    attributes: dict[str, Any]
+
+
+@dataclass
+class Requirement:
+    """One cell of a :class:`TargetDesign`: a required attribute conjunction.
+
+    Attributes:
+        attributes: The run-level attributes a run must carry (as a superset)
+            to satisfy this requirement, e.g.
+            ``{"scenario": "historical", "treatment": "spinup"}``.
+        min_active: How many distinct *active* runs must match. Default 1.
+    """
+
+    attributes: dict[str, Any]
+    min_active: int = 1
+
+
+@dataclass
+class TargetDesign:
+    """A named, standing completeness expectation over run attributes.
+
+    Makes no claim on how runs were produced -- it asserts only that enough
+    *active* runs carry the required attributes. See REGISTRY_PROVENANCE.md §12.
+
+    Attributes:
+        name: Unique identifier for the design (e.g. ``"jotr_fire_2026"``).
+        requirements: The cells that must all be satisfied for the design to be
+            complete.
+    """
+
+    name: str
+    requirements: list[Requirement]
+
+
+@dataclass
+class RequirementCoverage:
+    """Coverage of a single :class:`Requirement`, as computed by check_design.
+
+    Attributes:
+        attributes: The requirement's required attribute conjunction.
+        min_active: The requirement's required active-run count.
+        active_run_hashes: Distinct active runs that satisfy the requirement.
+        non_active_matches: Matching runs that are *not* active, as
+            ``(run_hash, status)`` pairs -- so an unmet cell that nonetheless has
+            runs reads as "present but bad/superseded", not "nothing ran".
+    """
+
+    attributes: dict[str, Any]
+    min_active: int
+    active_run_hashes: list[str]
+    non_active_matches: list[tuple[str, str]]
+
+    @property
+    def found(self) -> int:
+        """Number of active runs matching the requirement."""
+        return len(self.active_run_hashes)
+
+    @property
+    def satisfied(self) -> bool:
+        """Whether at least ``min_active`` active runs match."""
+        return self.found >= self.min_active
+
+
+@dataclass
+class TargetCoverageReport:
+    """Result of checking a :class:`TargetDesign` against the registry.
+
+    Attributes:
+        design_name: The design that was checked.
+        requirements: Per-requirement coverage, in the design's order.
+    """
+
+    design_name: str
+    requirements: list[RequirementCoverage]
+
+    @property
+    def complete(self) -> bool:
+        """Whether every requirement is satisfied."""
+        return all(r.satisfied for r in self.requirements)
+
+    @property
+    def unmet(self) -> list[RequirementCoverage]:
+        """The requirements that are not yet satisfied."""
+        return [r for r in self.requirements if not r.satisfied]
+
+
+@dataclass
+class OutputURI:
+    """A registered export output location for a run.
+
+    Returned by :meth:`RunRegistry.get_output_uris`. The URI is taken verbatim
+    from ``run_outputs`` (the full export URI as written); provenance
+    (``run_hash`` / ``label``) comes from the registry, never from parsing the
+    path. See REGISTRY_PROVENANCE.md §8.
+
+    Attributes:
+        run_hash: The run that produced this output.
+        label: The run's label, or ``None``.
+        replicate: Best-effort replicate index parsed from the filename, or
+            ``None`` for consolidated single-file exports.
+        uri: The stored export URI (e.g. ``minio://bucket/key`` or a local path).
+    """
+
+    run_hash: str
+    label: str | None
+    replicate: int | None
+    uri: str
 
 
 @dataclass
@@ -882,7 +1041,18 @@ class RunRegistry:
             # Create the current view last: it does SELECT c.* over cell_data, so
             # it must be defined after _init_spatial() has (optionally) added the
             # geom column, or its captured column set would drift from the table.
-            self._conn.execute(CELL_DATA_CURRENT_VIEW_SQL)
+            self._refresh_current_view()
+
+    def _refresh_current_view(self) -> None:
+        """(Re)create the ``cell_data_current`` view over the live schema.
+
+        The view is ``SELECT c.*``, whose column set DuckDB binds at creation
+        time. Variable columns are added to ``cell_data`` dynamically as CSVs
+        are ingested (see :meth:`_ensure_variable_columns`), so the view must be
+        recreated after any such change or diagnostics reading through it would
+        not see the new columns. ``CREATE OR REPLACE`` re-binds ``c.*`` cheaply.
+        """
+        self._conn.execute(CELL_DATA_CURRENT_VIEW_SQL)
 
     @property
     def conn(self) -> Any:
@@ -1054,10 +1224,16 @@ class RunRegistry:
                 [table],
             ).fetchall()
         }
+        added = False
         for col_name, col_type in remote_cols.items():
             if col_name not in local_cols:
                 quoted = _quote_identifier(col_name)
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {quoted} {col_type}")
+                added = True
+
+        # Keep the SELECT c.* current view in sync when cell_data gains columns.
+        if added and table == "cell_data":
+            self._refresh_current_view()
 
     def push_to_s3(
         self,
@@ -1290,8 +1466,11 @@ class RunRegistry:
     #
     #   scope="run_hash"    -- joins job_configs.run_hash, config_parameters.run_hash,
     #                          job_runs.run_hash, cell_data.run_hash (all the same
-    #                          value, denormalized on purpose). Set via
-    #                          tag_by_run_hash(); DiagnosticQueries.get_parameter_comparison
+    #                          value, denormalized on purpose). This is the
+    #                          run-level "attributes" slice: set via
+    #                          set_attributes()/get_attributes(), searched via
+    #                          find_by_attribute()/find_current_by_attribute();
+    #                          DiagnosticQueries.get_parameter_comparison
     #                          auto-joins this scope when param_name isn't a
     #                          declared sweep parameter.
     #   scope="session_id"  -- joins sweep_sessions.session_id, job_runs.session_id,
@@ -1337,8 +1516,16 @@ class RunRegistry:
         ).fetchone()
         return json.loads(result[0]) if result else {}
 
-    def tag_by_run_hash(self, run_hash: str, **tags: Any) -> None:
-        """Attach free-form JSON metadata to a run_hash.
+    def set_attributes(self, run_hash: str, **attributes: Any) -> None:
+        """Attach analysis *attributes* (factors, join keys) to a run_hash.
+
+        Attributes are the sanctioned home for what a run is *about* -- the
+        factors carried into analysis (``site``, ``treatment``, ``scenario``)
+        and the join keys linking registry runs to Josh's CSV output. They are
+        the run-level slice of the registry's tag store, keyed on the validated
+        ``run_hash`` scope; the general :meth:`tag_by_session_id` /
+        :meth:`tag_by_run_id` / :meth:`tag_custom` facility remains for
+        non-run metadata. See REGISTRY_PROVENANCE.md.
 
         Joins ``job_configs.run_hash`` / ``config_parameters.run_hash`` /
         ``job_runs.run_hash`` / ``cell_data.run_hash`` -- all the same value.
@@ -1347,25 +1534,25 @@ class RunRegistry:
         declared sweep parameter.
 
         Calling this again for the same run_hash merges into the existing
-        tags (like ``dict.update``) rather than replacing them.
+        attributes (like ``dict.update``) rather than replacing them.
 
         Args:
-            run_hash: The run to tag.
-            **tags: Tag values to set, in whatever shape you like.
+            run_hash: The run to attribute.
+            **attributes: Attribute values to set, in whatever shape you like.
 
         Raises:
             KeyError: If run_hash isn't a registered run.
-            ValueError: If no tags are given.
+            ValueError: If no attributes are given.
 
         Examples:
-            >>> registry.tag_by_run_hash(run_hash, site="JOTR001", biome="desert")
+            >>> registry.set_attributes(run_hash, site="JOTR001", biome="desert")
         """
         if self.get_config_by_hash(run_hash) is None:
             raise KeyError(f"No run found with hash '{run_hash}'")
-        self._upsert_tags("run_hash", run_hash, tags)
+        self._upsert_tags("run_hash", run_hash, attributes)
 
-    def get_tags_by_run_hash(self, run_hash: str) -> dict[str, Any]:
-        """Get the tags attached to a run_hash, or ``{}`` if none."""
+    def get_attributes(self, run_hash: str) -> dict[str, Any]:
+        """Get the analysis attributes attached to a run_hash, or ``{}`` if none."""
         return self._read_tags("run_hash", run_hash)
 
     def tag_by_session_id(self, session_id: str, **tags: Any) -> None:
@@ -1393,9 +1580,9 @@ class RunRegistry:
     def tag_by_run_id(self, run_id: str, **tags: Any) -> None:
         """Attach free-form JSON metadata to a specific run execution.
 
-        Distinct from ``tag_by_run_hash``: a run_hash is *what* was run and
-        can have several run_ids (e.g. under the ``pool`` collision policy);
-        a run_id is *which execution* produced a given replicate. Joins
+        Distinct from ``set_attributes`` (run-level): a run_hash is *what* was
+        run and can have several run_ids (e.g. under the ``pool`` collision
+        policy); a run_id is *which execution* produced a given replicate. Joins
         ``job_runs.run_id`` / ``cell_data.run_id`` / ``run_outputs.run_id``
         (the latter via ``job_runs``).
 
@@ -1419,7 +1606,7 @@ class RunRegistry:
         """Attach free-form JSON metadata under a synthetic scope.
 
         For groupings that don't correspond to any column in the schema --
-        e.g. a site code shared by many run_hashes. Unlike ``tag_by_run_hash``
+        e.g. a site code shared by many run_hashes. Unlike ``set_attributes``
         etc., there's no existence check (nothing to check against) and no
         automatic join anywhere: recover matching keys with ``find_tagged()``,
         then use them as a plain filter (e.g. ``run_hash IN (...)``) against
@@ -1440,9 +1627,10 @@ class RunRegistry:
             >>> registry.tag_custom("JOTR001", scope="site", n_plots=12)
         """
         if scope in self._VALIDATED_TAG_SCOPES:
+            method = "set_attributes" if scope == "run_hash" else f"tag_by_{scope}"
             raise ValueError(
                 f"scope={scope!r} is one of joshpy's own validated scopes -- "
-                f"use tag_by_{scope}() instead, which checks the target exists."
+                f"use {method}() instead, which checks the target exists."
             )
         self._upsert_tags(scope, key, tags)
 
@@ -1485,11 +1673,17 @@ class RunRegistry:
         Returns:
             List of matching keys (e.g. run_hashes), in no particular order.
 
+        Note:
+            This is the general, scope-parameterized primitive and does **not**
+            filter by run status. For the run-level *attributes* slice, prefer
+            :meth:`find_by_attribute`, which defaults to current (active) runs
+            only.
+
         Examples:
-            >>> registry.tag_by_run_hash("hash1", site="JOTR001")
-            >>> registry.tag_by_run_hash("hash2", site="JOTR001")
-            >>> registry.find_tagged("site", "JOTR001")
-            ['hash1', 'hash2']
+            >>> registry.tag_custom("JOTR001", scope="site", biome="desert")
+            >>> registry.tag_custom("JOTR002", scope="site", biome="desert")
+            >>> registry.find_tagged("biome", "desert", scope="site")
+            ['JOTR001', 'JOTR002']
         """
         json_path = f"$.{tag_key}"
         rows = self.conn.execute(
@@ -1497,6 +1691,248 @@ class RunRegistry:
             [scope, json_path, str(value)],
         ).fetchall()
         return [row[0] for row in rows]
+
+    def list_attribute_keys(self) -> list[str]:
+        """List all distinct run-level attribute keys in use.
+
+        The run-level (``run_hash`` scope) counterpart of
+        :meth:`list_tag_keys`.
+
+        Returns:
+            Sorted list of attribute keys (e.g. ``["biome", "site"]``).
+        """
+        return self.list_tag_keys(scope="run_hash")
+
+    def find_by_attribute(
+        self, key: str, value: Any, *, current_only: bool = True
+    ) -> list[str]:
+        """Find run_hashes carrying attribute ``key == value``.
+
+        The run-level, currency-aware counterpart of :meth:`find_tagged`.
+        "Current" is exactly ``status = 'active'`` (``NULL`` read as active);
+        superseded and bad runs are excluded by default. See
+        REGISTRY_PROVENANCE.md.
+
+        Args:
+            key: The attribute key to match on (e.g. ``"site"``).
+            value: The value to match (compared as text).
+            current_only: When ``True`` (default), only active runs are
+                returned. Pass ``False`` to include superseded/bad runs.
+
+        Returns:
+            List of matching run_hashes, in no particular order.
+
+        Examples:
+            >>> registry.set_attributes("hash1", site="JOTR001")
+            >>> registry.set_attributes("hash2", site="JOTR001")
+            >>> registry.find_by_attribute("site", "JOTR001")
+            ['hash1', 'hash2']
+        """
+        json_path = f"$.{key}"
+        if current_only:
+            rows = self.conn.execute(
+                """
+                SELECT rt.key
+                FROM run_tags rt
+                JOIN job_configs jc ON jc.run_hash = rt.key
+                WHERE rt.scope = 'run_hash'
+                  AND json_extract_string(rt.tags, ?) = ?
+                  AND coalesce(jc.status, 'active') = 'active'
+                """,
+                [json_path, str(value)],
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT key FROM run_tags WHERE scope = 'run_hash' "
+                "AND json_extract_string(tags, ?) = ?",
+                [json_path, str(value)],
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def find_current_by_attribute(self, key: str, value: Any) -> list[AttributeMatch]:
+        """Find current runs by attribute, resolved with label and attributes.
+
+        Like :meth:`find_by_attribute` (active only), but returns fully
+        resolved :class:`AttributeMatch` rows -- ``(run_hash, label,
+        attributes)`` -- so callers never re-implement the label/attribute
+        cross-reference. See REGISTRY_PROVENANCE.md §7.
+
+        Args:
+            key: The attribute key to match on (e.g. ``"site"``).
+            value: The value to match (compared as text).
+
+        Returns:
+            List of :class:`AttributeMatch`, in no particular order.
+        """
+        json_path = f"$.{key}"
+        rows = self.conn.execute(
+            """
+            SELECT rt.key, jc.label, rt.tags
+            FROM run_tags rt
+            JOIN job_configs jc ON jc.run_hash = rt.key
+            WHERE rt.scope = 'run_hash'
+              AND json_extract_string(rt.tags, ?) = ?
+              AND coalesce(jc.status, 'active') = 'active'
+            """,
+            [json_path, str(value)],
+        ).fetchall()
+        return [
+            AttributeMatch(
+                run_hash=row[0],
+                label=row[1],
+                attributes=json.loads(row[2]) if row[2] else {},
+            )
+            for row in rows
+        ]
+
+    # ========== Target Designs (attribute coverage) ==========
+
+    @staticmethod
+    def _attribute_match_clause(attributes: dict[str, Any]) -> tuple[str, list[Any]]:
+        """SQL predicate + params for a run_tags superset match on *attributes*.
+
+        Matches a ``run_tags`` row (aliased ``rt``, scope ``run_hash``) whose
+        JSON contains every ``key == value`` pair. Empty *attributes* would match
+        everything, which :meth:`register_design` forbids, but guard anyway.
+        """
+        if not attributes:
+            return "1=1", []
+        clauses = []
+        params: list[Any] = []
+        for key, value in attributes.items():
+            clauses.append("json_extract_string(rt.tags, ?) = ?")
+            params.extend([f"$.{key}", str(value)])
+        return " AND ".join(clauses), params
+
+    def register_design(self, design: TargetDesign) -> None:
+        """Persist (or replace) a :class:`TargetDesign` by name.
+
+        Idempotent on ``design.name``: re-registering replaces the stored
+        requirements wholesale. See REGISTRY_PROVENANCE.md §12.
+
+        Args:
+            design: The design to store.
+
+        Raises:
+            ValueError: If the design has no name, no requirements, a
+                requirement with no attributes, or a ``min_active < 1``.
+        """
+        if not design.name:
+            raise ValueError("design name must be non-empty")
+        if not design.requirements:
+            raise ValueError("a design needs at least one requirement")
+        for req in design.requirements:
+            if not req.attributes:
+                raise ValueError("each requirement needs at least one attribute")
+            if req.min_active < 1:
+                raise ValueError("min_active must be >= 1")
+
+        self.conn.execute(
+            "INSERT INTO target_designs (name) VALUES (?) ON CONFLICT (name) DO NOTHING",
+            [design.name],
+        )
+        self.conn.execute(
+            "DELETE FROM target_requirements WHERE design_name = ?", [design.name]
+        )
+        for req in design.requirements:
+            # Canonical (sorted-key) JSON so the same attribute conjunction
+            # serializes identically everywhere -- the primary key dedups it on
+            # re-register and on merge-mode S3 sync (REGISTRY_SYNC_TABLES).
+            self.conn.execute(
+                "INSERT OR IGNORE INTO target_requirements "
+                "(design_name, attributes, min_active) VALUES (?, ?, ?)",
+                [design.name, json.dumps(req.attributes, sort_keys=True), req.min_active],
+            )
+
+    def list_designs(self) -> list[str]:
+        """List the names of all registered target designs, sorted."""
+        rows = self.conn.execute(
+            "SELECT name FROM target_designs ORDER BY name"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_design(self, name: str) -> TargetDesign | None:
+        """Load a registered :class:`TargetDesign`, or ``None`` if absent."""
+        exists = self.conn.execute(
+            "SELECT 1 FROM target_designs WHERE name = ?", [name]
+        ).fetchone()
+        if exists is None:
+            return None
+        rows = self.conn.execute(
+            "SELECT attributes, min_active FROM target_requirements "
+            "WHERE design_name = ?",
+            [name],
+        ).fetchall()
+        requirements = [
+            Requirement(attributes=json.loads(row[0]), min_active=row[1])
+            for row in rows
+        ]
+        return TargetDesign(name=name, requirements=requirements)
+
+    def delete_design(self, name: str) -> bool:
+        """Delete a registered design and its requirements.
+
+        Returns:
+            ``True`` if a design was deleted, ``False`` if none existed.
+        """
+        existed = self.conn.execute(
+            "SELECT 1 FROM target_designs WHERE name = ?", [name]
+        ).fetchone()
+        self.conn.execute(
+            "DELETE FROM target_requirements WHERE design_name = ?", [name]
+        )
+        self.conn.execute("DELETE FROM target_designs WHERE name = ?", [name])
+        return existed is not None
+
+    def check_design(self, design: str | TargetDesign) -> TargetCoverageReport:
+        """Check a target design's coverage against current runs.
+
+        Completeness is asserted over **attributes**, not run_hashes: a
+        requirement is satisfied when at least ``min_active`` distinct *active*
+        runs carry its attributes (as a superset). Superseded/bad runs never
+        count toward satisfaction but are surfaced per requirement so an unmet
+        cell that has runs reads as "present but retired", not "nothing ran".
+        See REGISTRY_PROVENANCE.md §12.
+
+        Args:
+            design: A registered design name, or a :class:`TargetDesign` to
+                check ad hoc without persisting it.
+
+        Returns:
+            A :class:`TargetCoverageReport`.
+
+        Raises:
+            KeyError: If a name is given that isn't registered.
+        """
+        if isinstance(design, str):
+            loaded = self.get_design(design)
+            if loaded is None:
+                raise KeyError(f"No registered design named '{design}'")
+            design = loaded
+
+        coverages: list[RequirementCoverage] = []
+        for req in design.requirements:
+            match_clause, match_params = self._attribute_match_clause(req.attributes)
+            rows = self.conn.execute(
+                f"""
+                SELECT rt.key, coalesce(jc.status, 'active') AS status
+                FROM run_tags rt
+                JOIN job_configs jc ON jc.run_hash = rt.key
+                WHERE rt.scope = 'run_hash' AND {match_clause}
+                """,
+                match_params,
+            ).fetchall()
+            active = [row[0] for row in rows if row[1] == "active"]
+            non_active = [(row[0], row[1]) for row in rows if row[1] != "active"]
+            coverages.append(
+                RequirementCoverage(
+                    attributes=req.attributes,
+                    min_active=req.min_active,
+                    active_run_hashes=active,
+                    non_active_matches=non_active,
+                )
+            )
+        return TargetCoverageReport(design_name=design.name, requirements=coverages)
 
     # ========== Filter Context Managers ==========
 
@@ -2959,6 +3395,339 @@ class RunRegistry:
 
         return DropSummary(run_hash=run_hash, label=label, rows=rows)
 
+    def reset_run(self, label_or_hash: str) -> None:
+        """Clear a run's executions/results and reactivate it, keeping its config.
+
+        The in-place redo primitive behind the ``bad`` -> re-dispatch rule
+        (REGISTRY_PROVENANCE.md §11.1). Deletes the run's ``cell_data``,
+        ``run_outputs`` and ``job_runs`` — so a re-dispatch *replaces* rather than
+        appends — and resets ``status`` to active (clearing any ``bad`` /
+        ``superseded`` marks).
+
+        Unlike :meth:`drop_run`, the ``job_configs`` row (and
+        ``config_parameters`` / ``session_configs``) is kept. A re-dispatch of the
+        identical config produces the same run_hash and reuses it; keeping the row
+        also preserves referential integrity when a sweep has already registered
+        the config up front, so the fresh executions can attach to it.
+
+        Args:
+            label_or_hash: Label or run_hash of the run to reset.
+
+        Raises:
+            KeyError: If the label or hash is not found.
+        """
+        run_hash = self._resolve_label_or_hash(label_or_hash)
+
+        # Child-first deletes (DuckDB FKs are check-only and auto-commit per
+        # statement — see drop_run). Keep job_configs / config_parameters /
+        # session_configs so the config row survives for the re-dispatch.
+        self._conn.execute("DELETE FROM cell_data WHERE run_hash = ?", [run_hash])
+        self._conn.execute(
+            "DELETE FROM run_outputs WHERE run_id IN "
+            "(SELECT run_id FROM job_runs WHERE run_hash = ?)",
+            [run_hash],
+        )
+        self._conn.execute("DELETE FROM job_runs WHERE run_hash = ?", [run_hash])
+        # Reactivate: NULL status reads as active, matching a pristine fresh run.
+        self._conn.execute(
+            """
+            UPDATE job_configs
+            SET status = NULL, superseded_by = NULL, status_reason = NULL,
+                status_updated_at = CURRENT_TIMESTAMP
+            WHERE run_hash = ?
+            """,
+            [run_hash],
+        )
+
+    # ========== Remote (bucket-resident) aggregation ==========
+
+    def get_output_uris(
+        self,
+        label_or_hash: str | None = None,
+        *,
+        output_type: str = "patch",
+        current_only: bool = True,
+    ) -> list[OutputURI]:
+        """Resolve registered export URIs for runs, jar-free from ``run_outputs``.
+
+        The registry records the resolved export URI of every registry-attached
+        run (on any ``load_results`` setting), so it *is* the current-URI index —
+        no filename regex, no hand-maintained label→hash dict. See
+        REGISTRY_PROVENANCE.md §8a.
+
+        Args:
+            label_or_hash: Restrict to one run (by label or hash). ``None`` (the
+                default) returns outputs across all matching runs.
+            output_type: Export type. A bare name (``"patch"``) maps to the
+                stored ``export.<name>``; pass a dotted name (``"debug.organism"``)
+                to target that namespace directly.
+            current_only: When ``True`` (default), only active runs are included.
+
+        Returns:
+            A list of :class:`OutputURI`, ordered by run_hash then URI.
+        """
+        stored_type = output_type if "." in output_type else f"export.{output_type}"
+        clauses = ["ro.output_type = ?"]
+        params: list[Any] = [stored_type]
+        if label_or_hash is not None:
+            clauses.append("jr.run_hash = ?")
+            params.append(self._resolve_label_or_hash(label_or_hash))
+        if current_only:
+            clauses.append("coalesce(jc.status, 'active') = 'active'")
+        where = " AND ".join(clauses)
+        rows = self.conn.execute(
+            f"""
+            SELECT DISTINCT jr.run_hash, jc.label, ro.file_path
+            FROM run_outputs ro
+            JOIN job_runs jr ON jr.run_id = ro.run_id
+            JOIN job_configs jc ON jc.run_hash = jr.run_hash
+            WHERE {where}
+            ORDER BY jr.run_hash, ro.file_path
+            """,
+            params,
+        ).fetchall()
+        return [
+            OutputURI(
+                run_hash=r[0],
+                label=r[1],
+                replicate=_replicate_from_uri(r[2]),
+                uri=r[2],
+            )
+            for r in rows
+        ]
+
+    _REMOTE_AGGS = {
+        "mean": "AVG", "avg": "AVG", "sum": "SUM", "min": "MIN", "max": "MAX",
+        "count": "COUNT", "median": "MEDIAN", "stddev": "STDDEV",
+    }
+
+    def query_remote(
+        self,
+        variable: str,
+        *,
+        agg: str = "mean",
+        group_by: Sequence[str] = ("label", "step", "replicate"),
+        output_type: str = "patch",
+        current_only: bool = True,
+        label_or_hash: str | None = None,
+        where: str | None = None,
+        cache: str | Path | None = None,
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        use_ssl: bool | None = None,
+    ) -> Any:
+        """Aggregate a variable directly against bucket-resident CSVs, no ingest.
+
+        Builds a URI manifest of the current runs (:meth:`get_output_uris`),
+        scans exactly those CSVs once with DuckDB, and attaches provenance by
+        joining on the (registry-supplied) filename — never by parsing the path.
+        Nothing touches ``cell_data``; this is the read path for the
+        ``load_results=False`` batch (REGISTRY_PROVENANCE.md §8b).
+
+        Args:
+            variable: CSV column to aggregate (e.g. ``"treeCount"``).
+            agg: One of mean/avg/sum/min/max/count/median/stddev.
+            group_by: Columns to group by. ``label``/``run_hash`` come from the
+                registry; any other name is a CSV column (``step``, ``replicate``,
+                position, ...).
+            output_type: Export type (see :meth:`get_output_uris`).
+            current_only: Aggregate active runs only (default). Archived URIs are
+                simply absent from the manifest, so stale files in the same folder
+                are excluded for free.
+            label_or_hash: Restrict to one run.
+            where: Optional raw SQL predicate on the CSV columns (a passthrough,
+                like :meth:`query`).
+            cache: Optional path to also write the result to (``.parquet`` or
+                ``.csv`` by extension).
+            endpoint: S3 endpoint; falls back to ``MINIO_ENDPOINT``.
+            access_key: S3 access key; falls back to ``MINIO_ACCESS_KEY``.
+            secret_key: S3 secret key; falls back to ``MINIO_SECRET_KEY``.
+            use_ssl: Use HTTPS (see :func:`configure_s3`).
+
+        Returns:
+            A pandas DataFrame: the ``group_by`` columns, ``value`` (the
+            aggregate), and ``n_rows``.
+
+        Raises:
+            ValueError: If ``agg`` is unknown or no output URIs are found.
+        """
+        try:
+            import pandas  # noqa: F401
+        except ImportError as e:
+            raise ImportError(
+                "query_remote requires pandas — install joshpy[full]."
+            ) from e
+        fn = self._REMOTE_AGGS.get(agg.lower())
+        if fn is None:
+            raise ValueError(
+                f"Unknown agg {agg!r}; must be one of {sorted(self._REMOTE_AGGS)}."
+            )
+
+        manifest = self.get_output_uris(
+            label_or_hash, output_type=output_type, current_only=current_only
+        )
+        if not manifest:
+            raise ValueError(
+                "No output URIs found for the requested runs — nothing to query. "
+                "(Are the runs registered, active, and of this output_type?)"
+            )
+        entries = [(_minio_to_s3_uri(o.uri), o.run_hash, o.label) for o in manifest]
+        uris = [e[0] for e in entries]
+        if any(u.startswith("s3://") for u in uris):
+            ep, ak, sk = _resolve_s3_credentials(endpoint, access_key, secret_key)
+            configure_s3(self.conn, ep, ak, sk, use_ssl=use_ssl)
+
+        self.conn.execute(
+            "CREATE OR REPLACE TEMP TABLE _remote_manifest "
+            "(uri VARCHAR, run_hash VARCHAR, label VARCHAR)"
+        )
+        self.conn.executemany(
+            "INSERT INTO _remote_manifest VALUES (?, ?, ?)", entries
+        )
+
+        manifest_cols = {"run_hash", "label", "uri"}
+
+        def _q(col: str) -> str:
+            return '"' + col.replace('"', '""') + '"'
+
+        def _qual(col: str) -> str:
+            return f"m.{_q(col)}" if col in manifest_cols else f"csv.{_q(col)}"
+
+        gb = list(group_by)
+        select_gb = ", ".join(f"{_qual(c)} AS {_q(c)}" for c in gb)
+        group_gb = ", ".join(_qual(c) for c in gb)
+        array_lit = "[" + ", ".join("'" + u.replace("'", "''") + "'" for u in uris) + "]"
+        where_sql = f"WHERE {where}" if where else ""
+
+        sql = f"""
+            SELECT {select_gb},
+                   {fn}(csv.{_q(variable)}) AS value,
+                   COUNT(*) AS n_rows
+            FROM read_csv_auto({array_lit}, filename=true, union_by_name=true) csv
+            JOIN _remote_manifest m ON csv.filename = m.uri
+            {where_sql}
+            GROUP BY {group_gb}
+            ORDER BY {group_gb}
+        """
+        df = self.conn.execute(sql).df()
+
+        if cache is not None:
+            cache_str = str(cache)
+            if cache_str.endswith(".parquet"):
+                df.to_parquet(cache_str, index=False)
+            else:
+                df.to_csv(cache_str, index=False)
+        return df
+
+    def check_remote_consistency(
+        self,
+        *,
+        output_type: str = "patch",
+        current_only: bool = True,
+        endpoint: str | None = None,
+        access_key: str | None = None,
+        secret_key: str | None = None,
+        use_ssl: bool | None = None,
+    ) -> list[ConsistencyIssue]:
+        """Check that current runs' expected outputs actually landed in the bucket.
+
+        The bucket-aware sibling of :meth:`check_consistency`: for every active
+        run, the registered export URIs (the expected set) are checked against
+        what is actually present in the bucket. See REGISTRY_PROVENANCE.md §8c.
+
+        Issue kinds:
+
+        - ``missing_remote_output`` (**error**) — a registered active URI absent
+          from the bucket (a replicate that never landed).
+        - ``remote_count_mismatch`` (**error**) — fewer present files than the
+          run's registered output count.
+        - ``orphan_remote_output`` (**warning**) — a bucket file in a tracked
+          folder that belongs to a non-active run (or no registered run): the
+          stale/superseded files the manual workaround filters by hand.
+
+        Args:
+            output_type: Export type (see :meth:`get_output_uris`).
+            current_only: Reserved for symmetry; the expected set is always the
+                active runs. Non-active runs are used only to explain orphans.
+            endpoint: S3 endpoint; falls back to ``MINIO_ENDPOINT``.
+            access_key: S3 access key; falls back to ``MINIO_ACCESS_KEY``.
+            secret_key: S3 secret key; falls back to ``MINIO_SECRET_KEY``.
+            use_ssl: Use HTTPS (see :func:`configure_s3`).
+
+        Returns:
+            A list of :class:`ConsistencyIssue`, most-actionable first (errors
+            before warnings).
+        """
+        active = self.get_output_uris(None, output_type=output_type, current_only=True)
+        every = self.get_output_uris(None, output_type=output_type, current_only=False)
+        active_by_uri = {_minio_to_s3_uri(o.uri): o for o in active}
+        all_by_uri = {_minio_to_s3_uri(o.uri): o for o in every}
+
+        remote_uris = [u for u in all_by_uri if u.startswith("s3://")]
+        issues: list[ConsistencyIssue] = []
+        if not remote_uris:
+            return issues  # nothing remote to verify
+
+        ep, ak, sk = _resolve_s3_credentials(endpoint, access_key, secret_key)
+        configure_s3(self.conn, ep, ak, sk, use_ssl=use_ssl)
+
+        actual: set[str] = set()
+        for folder in sorted({u.rsplit("/", 1)[0] for u in remote_uris}):
+            try:
+                rows = self.conn.execute(
+                    "SELECT file FROM glob(?)", [folder + "/*"]
+                ).fetchall()
+            except Exception:
+                continue
+            actual.update(r[0] for r in rows)
+
+        active_remote = {u: o for u, o in active_by_uri.items() if u.startswith("s3://")}
+
+        # missing_remote_output + per-run counts
+        expected_by_run: dict[str, set[str]] = {}
+        present_by_run: dict[str, set[str]] = {}
+        for uri, o in sorted(active_remote.items()):
+            expected_by_run.setdefault(o.run_hash, set()).add(uri)
+            if uri in actual:
+                present_by_run.setdefault(o.run_hash, set()).add(uri)
+            else:
+                issues.append(
+                    ConsistencyIssue(
+                        "missing_remote_output", o.run_hash,
+                        f"expected output missing from bucket: {uri}", "error",
+                    )
+                )
+        for run_hash, expected in expected_by_run.items():
+            present = present_by_run.get(run_hash, set())
+            if len(present) != len(expected):
+                issues.append(
+                    ConsistencyIssue(
+                        "remote_count_mismatch", run_hash,
+                        f"{len(present)}/{len(expected)} expected outputs present "
+                        f"in bucket", "error",
+                    )
+                )
+
+        # orphan_remote_output: present files not attributable to an active run
+        for file in sorted(actual - set(active_remote)):
+            owner = all_by_uri.get(file)
+            if owner is not None:
+                detail = (
+                    f"bucket file belongs to non-active run {owner.run_hash} "
+                    f"(status {self.get_run_status(owner.run_hash).effective_status}): {file}"
+                )
+                run_hash = owner.run_hash
+            else:
+                detail = f"bucket file not tracked by any registered run: {file}"
+                run_hash = None
+            issues.append(
+                ConsistencyIssue("orphan_remote_output", run_hash, detail, "warning")
+            )
+
+        issues.sort(key=lambda i: (i.severity != "error", i.kind))
+        return issues
+
     def check_consistency(
         self,
         run_hash: str | None = None,
@@ -3467,6 +4236,7 @@ class RunRegistry:
             ValueError: If trying to add a column that exists with a different type.
         """
         existing = self.list_variable_columns()
+        added = False
 
         for col_name, col_type in columns.items():
             if col_name in existing:
@@ -3499,6 +4269,11 @@ class RunRegistry:
                 # Add new column with quoted identifier
                 quoted = _quote_identifier(col_name)
                 self.conn.execute(f"ALTER TABLE cell_data ADD COLUMN {quoted} {col_type}")
+                added = True
+
+        if added:
+            # New cell_data columns must be reflected in the SELECT c.* view.
+            self._refresh_current_view()
 
     def check_sparsity(self) -> SparsityReport:
         """Check for sparse columns in cell_data.

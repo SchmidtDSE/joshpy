@@ -1,0 +1,169 @@
+---
+title: "Target Designs & Coverage"
+description: "Declare the experiment matrix you intend to run and check whether current runs actually cover it"
+execute:
+  warning: false
+---
+
+## Introduction
+
+[Project Organization](project-organization.qmd) showed how to tag runs with
+**attributes** — the factors a run is *about* (`scenario`, `treatment`, `site`).
+Attributes answer "what is this run?". This guide answers a different question:
+
+> **Is my experiment matrix complete?** For every factor combination I *intended*
+> to run, is there a current (active) run that covers it?
+
+That is what a **`TargetDesign`** declares. It is a standing, persisted
+expectation — a set of `Requirement`s, each an attribute conjunction plus a
+`min_active` count — and `check_design()` reports coverage against the runs that
+actually exist. Crucially, completeness is asserted over **attributes, not
+run hashes**: it makes no claim on *how* a run was produced (a `SweepManager`
+sweep, a one-off dispatch, a colleague's job), only that enough *active* runs
+carry the required attributes. Superseded and `bad` runs never count.
+
+## Setup: a couple of tagged runs
+
+We stand in two field scenarios with the tutorial model, tagging each run with
+the factors we care about. (`baseline.jshc` and `high_growth.jshc` play the role
+of two treatments here — real runs, not fabricated rows.)
+
+```{python}
+#| label: setup
+from pathlib import Path
+from joshpy.jobs import JobConfig
+from joshpy.sweep import SweepManager
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.registry import RunRegistry, TargetDesign, Requirement
+
+SOURCE = Path("../../examples/tutorial_sweep.josh")
+CONFIGS = {
+    "spinup": Path("../../examples/configs/baseline.jshc"),
+    "no_spinup": Path("../../examples/configs/high_growth.jshc"),
+}
+REGISTRY = "target_designs_demo.duckdb"
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+run_hashes = {}
+for treatment, config_path in CONFIGS.items():
+    config = JobConfig(
+        source_path=SOURCE, config_path=config_path,
+        simulation="Main", replicates=1,
+    )
+    manager = (
+        SweepManager.builder(config)
+        .with_registry(REGISTRY, experiment_name="coverage_demo")
+        .with_cli(cli)
+        .build()
+    )
+    manager.run(quiet=True)
+    run_hash = manager.job_set.jobs[0].run_hash
+    # Tag the run with its factors — this is what coverage matches on.
+    manager.registry.set_attributes(
+        run_hash, scenario="historical", treatment=treatment
+    )
+    run_hashes[treatment] = run_hash
+    manager.cleanup()
+    manager.close()
+
+print(run_hashes)
+```
+
+## Declare the design and check coverage
+
+A `TargetDesign` names the cells you intend to fill. Here the matrix is
+`scenario=historical` crossed with the two treatments:
+
+```{python}
+#| label: register
+registry = RunRegistry(REGISTRY)
+
+design = TargetDesign("jotr_historical", requirements=[
+    Requirement({"scenario": "historical", "treatment": "spinup"}),
+    Requirement({"scenario": "historical", "treatment": "no_spinup"}),
+])
+registry.register_design(design)   # persisted; re-registering replaces it
+
+report = registry.check_design("jotr_historical")
+print("complete:", report.complete)
+```
+
+Both cells are covered by an active run, so the design is complete. The report
+is per-requirement — `satisfied`, how many active runs were `found` vs the
+`min_active` target, and the matching hashes:
+
+```{python}
+#| label: report
+def show(report):
+    for rc in report.requirements:
+        mark = "OK " if rc.satisfied else "GAP"
+        print(f"  [{mark}] {rc.attributes}  found={rc.found}/{rc.min_active}"
+              f"  active={rc.active_run_hashes}")
+
+show(report)
+```
+
+A `Requirement` matches by **superset**: a run tagged with *extra* attributes
+(say `site=JOTR001`) still satisfies a requirement that only names
+`scenario`/`treatment`. Requirements are as specific as you write them.
+
+## Currency: a `bad` run leaves a gap — but a visible one
+
+Mark the `no_spinup` run `bad` (say its external data was wrong). It immediately
+stops counting toward coverage, so the design is no longer complete. But the
+report doesn't just say "empty" — it surfaces the retired run, so you can tell
+"nothing ran" from "ran, but unusable":
+
+```{python}
+#| label: mark-bad
+registry.mark_run(run_hashes["no_spinup"], "bad", reason="wrong forcing data")
+
+report = registry.check_design("jotr_historical")
+print("complete:", report.complete)
+for rc in report.unmet:
+    print("  unmet:", rc.attributes,
+          "| non-active present:", rc.non_active_matches)
+```
+
+Re-running that treatment with corrected inputs produces a fresh, active run for
+the cell (a corrected input changes the content hash, so it dispatches as a new
+run) — and the design goes green again. `min_active` lets a cell demand more
+than one active run when you need replication across independent runs; replicate
+*counts within* a run stay the job of
+[`check_consistency`](../../reference/registry.RunRegistry.qmd).
+
+```{python}
+#| label: cleanup
+#| echo: false
+registry.close()
+```
+
+## Designs travel with the registry
+
+A `TargetDesign` is stored in the registry (in `target_designs` /
+`target_requirements`), so it is part of what
+[`push_to_s3` / `pull_from_s3`](project-organization.qmd#publishing-registries-to-s3)
+publish and restore. Rehydrate a registry on another machine and its designs —
+and therefore `check_design` — come back with it:
+
+```python
+registry.push_to_s3(bucket="my-bucket")             # design included
+
+fresh = RunRegistry("rehydrated.duckdb")
+fresh.pull_from_s3(bucket="my-bucket", mode="restore")
+fresh.check_design("jotr_historical").complete       # recomputed locally
+```
+
+Manage them with `list_designs()`, `get_design(name)`, and
+`delete_design(name)`.
+
+## Where this fits
+
+- **Attributes** ([Project Organization](project-organization.qmd)) are the
+  factors a run is about.
+- **Status** (`active` / `superseded` / `bad`) is whether a run should be used;
+  coverage counts only the current ones.
+- **Target designs** assert that your intended matrix is covered by current
+  runs — a read-only check that never dispatches. Feeding its `unmet` list into
+  the next sweep is up to you.

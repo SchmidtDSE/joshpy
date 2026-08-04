@@ -449,7 +449,7 @@ class DiagnosticQueries:
                 replicate,
                 {quoted} as value,
                 run_hash
-            FROM cell_data
+            FROM cell_data_current
             WHERE longitude BETWEEN ? AND ?
               AND latitude BETWEEN ? AND ?
         """
@@ -501,7 +501,7 @@ class DiagnosticQueries:
                 longitude,
                 latitude,
                 {quoted} as value
-            FROM cell_data
+            FROM cell_data_current
             WHERE step = ?
               AND run_hash = ?
               AND replicate = ?
@@ -525,8 +525,8 @@ class DiagnosticQueries:
             param_name: Parameter name to group by. Use ``"label"`` to group
                 by run labels assigned via ``registry.label_run()``. If
                 *param_name* isn't a declared sweep parameter (i.e. not in
-                ``registry.list_config_columns()``), falls back to free-form
-                tags set via ``registry.tag_by_run_hash(run_hash, <param_name>=...)``.
+                ``registry.list_config_columns()``), falls back to run-level
+                attributes set via ``registry.set_attributes(run_hash, <param_name>=...)``.
             step: Optional timestep filter (if None, groups by step).
             aggregation: Aggregation function (AVG, MIN, MAX, SUM).
             show_sql: If True, print the SQL query for copy/paste modification.
@@ -556,7 +556,7 @@ class DiagnosticQueries:
                     {aggregation}({quoted_var}) as mean_value,
                     STDDEV({quoted_var}) as std_value,
                     COUNT(*) as n_cells
-                FROM cell_data cd
+                FROM cell_data_current cd
                 JOIN job_configs jc ON cd.run_hash = jc.run_hash
                 WHERE jc.label IS NOT NULL {step_filter}
                 GROUP BY jc.label{step_group}
@@ -571,16 +571,17 @@ class DiagnosticQueries:
                     {aggregation}({quoted_var}) as mean_value,
                     STDDEV({quoted_var}) as std_value,
                     COUNT(*) as n_cells
-                FROM cell_data cd
+                FROM cell_data_current cd
                 JOIN config_parameters cp ON cd.run_hash = cp.run_hash
                 WHERE 1=1 {step_filter}
                 GROUP BY cp.{quoted_param}{step_group}
                 ORDER BY param_value, step
             """
         else:
-            # Not a declared sweep parameter -- fall back to free-form tags
-            # (registry.tag_by_run_hash), joined on the validated "run_hash"
-            # scope rather than assuming a config_parameters column exists.
+            # Not a declared sweep parameter -- fall back to run-level
+            # attributes (registry.set_attributes), joined on the validated
+            # "run_hash" scope rather than assuming a config_parameters column
+            # exists.
             json_path = f"$.{param_name}"
             params = [json_path, json_path] + params
             query = f"""
@@ -590,7 +591,7 @@ class DiagnosticQueries:
                     {aggregation}({quoted_var}) as mean_value,
                     STDDEV({quoted_var}) as std_value,
                     COUNT(*) as n_cells
-                FROM cell_data cd
+                FROM cell_data_current cd
                 JOIN run_tags rt ON rt.key = cd.run_hash AND rt.scope = 'run_hash'
                 WHERE json_extract_string(rt.tags, ?) IS NOT NULL {step_filter}
                 GROUP BY param_value{step_group}
@@ -634,7 +635,7 @@ class DiagnosticQueries:
                     step,
                     replicate,
                     AVG({quoted}) as rep_mean
-                FROM cell_data
+                FROM cell_data_current
                 WHERE run_hash = ? {step_filter}
                 GROUP BY step, replicate
             )
@@ -692,7 +693,7 @@ class DiagnosticQueries:
 
         # First check if we have any data for this run_hash
         count_result = self.registry.conn.execute(
-            "SELECT COUNT(*) FROM cell_data WHERE run_hash = ?", [run_hash]
+            "SELECT COUNT(*) FROM cell_data_current WHERE run_hash = ?", [run_hash]
         ).fetchone()
         if count_result is None or count_result[0] == 0:
             return {
@@ -711,7 +712,7 @@ class DiagnosticQueries:
                     replicate,
                     step,
                     AVG({quoted}) as value
-                FROM cell_data
+                FROM cell_data_current
                 WHERE run_hash = ? AND step >= ?
                 GROUP BY replicate, step
             ),
@@ -823,7 +824,7 @@ class DiagnosticQueries:
                 run_hash,
                 {aggregation}({quoted}) as value,
                 COUNT(*) as n_cells
-            FROM cell_data
+            FROM cell_data_current
             WHERE longitude BETWEEN ? AND ?
               AND latitude BETWEEN ? AND ?
         """
@@ -871,7 +872,7 @@ class DiagnosticQueries:
                 latitude,
                 position_x,
                 position_y{var_col_sql}
-            FROM cell_data
+            FROM cell_data_current
             WHERE step = ?
               AND run_hash = ?
               AND replicate = ?
