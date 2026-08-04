@@ -78,6 +78,7 @@ temp/
 docs/demo_registry.duckdb
 docs/*.csv
 docs/tutorials/demo_registry.duckdb
+docs/tutorials/target_designs_demo.duckdb
 
 # Quarto build output
 docs/_site/

@@ -57,13 +57,15 @@ for treatment, config_path in CONFIGS.items():
         .with_cli(cli)
         .build()
     )
-    manager.run(quiet=True)
-    run_hash = manager.job_set.jobs[0].run_hash
-    # Tag the run with its factors — this is what coverage matches on.
-    manager.registry.set_attributes(
-        run_hash, scenario="historical", treatment=treatment
-    )
-    run_hashes[treatment] = run_hash
+    result = manager.run(quiet=True)
+    # run() returns a SweepResult; iterate its (job, cli_result) pairs to get
+    # each run's hash. One config → one job here.
+    for job, _ in result:
+        # Tag the run with its factors — this is what coverage matches on.
+        manager.registry.set_attributes(
+            job.run_hash, scenario="historical", treatment=treatment
+        )
+        run_hashes[treatment] = job.run_hash
     manager.cleanup()
     manager.close()
 
