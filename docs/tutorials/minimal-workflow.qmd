@@ -1,0 +1,313 @@
+---
+title: "Minimal Workflow"
+description: "The floor for a one-off run: a script, a CSV, and your own analysis tools -- no registry, no linking between runs"
+execute:
+  warning: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+## Overview
+
+This workflow uses as little of joshpy as possible -- just enough to safely
+and cleanly pass your variables and configuration to Josh, run it, and get
+a CSV back. joshpy has more to offer -- registries, labels, sweeps,
+diagnostics -- covered in the tutorials linked throughout this one, but
+this is a good place to start if that's more than you need right now.
+
+Concretely, that means no `RunRegistry`, no sessions, no
+`SimulationDiagnostics` -- just the primitives below.
+[What's Next](#whats-next) at the end covers what starts to matter once a
+project grows past a single run.
+
+::: {.callout-note}
+## This is not the only "low-level" tutorial
+
+[Low-Level Components](low-level-components.qmd) is also about using
+joshpy's pieces directly rather than a builder -- but it still wires up
+`RunRegistry`, sessions, and `recover_sweep_results()` by hand. This
+tutorial goes a step further and skips the registry entirely. Use this one
+for no tracking at all; use Low-Level Components when tracking is wanted
+but with visibility into (or control over) every step that produces it.
+:::
+
+For comparing two runs, see [Single Run & Iteration](manual-workflow.qmd) --
+the same "run, look, tweak" spirit, but with a registry so the two runs stay
+linked. For a known parameter space to sweep, see
+[SweepManager Workflow](sweep-manager.qmd).
+
+## Prerequisites
+
+This workflow doesn't need the `[registry]` extra (no DuckDB required):
+
+```bash
+pip install -e '.[jobs]'
+```
+
+## The Minimal Primitives
+
+In increasing order of what gets opted into -- each one is optional, and
+each adds exactly one thing:
+
+| Primitive | Adds | Cost |
+|---|---|---|
+| `JoshCLI` + `RunConfig` | Runs the JAR. The floor -- nothing below this. | Output paths and run identity are tracked by hand. |
+| `JobConfig` + `JobExpander` | A deterministic `run_hash` (content hash of the `.josh` source, rendered config, and any data files) | Nothing -- this is collision safety, not tracking |
+| `run_single()` | Runs one job, writes a provenance receipt (rendered config, resolved inputs, exact JAR command, exit code), and resolves the CSV path -- one call | One archive on disk per run |
+
+`RunRegistry` never appears in this list. Nothing here remembers a run once
+the process exits, beyond what's sitting in the receipt archive and the CSV
+itself. That's the trade this workflow makes for zero setup: fast to start,
+with no record of what ran last week beyond what's still on disk.
+
+`run_hash` is an important abstraction in joshpy: it provides a
+deterministic 12-character "fingerprint" of exactly what was run, computed
+from the `.josh` source, the rendered config, and any input data file
+hashes. Same inputs always produce the same hash; any change to the source,
+config values, or data files produces a different one. Because it is a
+fingerprint rather than an arbitrary ID, it is safe to build filenames and
+receipt names from. See
+[Best Practices: The run_hash Connection](../best-practices.qmd#the-run_hash-connection)
+for the full mechanics, including how it is used as the primary key when a
+registry is in play.
+
+### The floor, for reference
+
+Without even a `run_hash` or a receipt -- say, a hand-written `.jshc` and a
+naming convention already in place -- `JoshCLI` and `RunConfig` alone are
+enough:
+
+```python
+from pathlib import Path
+from joshpy.cli import JoshCLI, RunConfig
+
+cli = JoshCLI()
+result = cli.run(RunConfig(
+    script=Path("model.josh"),
+    simulation="Main",
+    data={"sweep_config": Path("config.jshc")},
+))
+```
+
+Where the CSV lands is controlled by `exportFiles.patch` inside
+`model.josh` itself, not by anything passed to `RunConfig` -- that's the
+JAR's own export mechanism, and it's what the rest of this tutorial relies
+on. (`RunConfig` also has an `output`/`output_format` pair, but that's a
+separate, optional flag for writing one consolidated output file; most
+models, including the one below, don't need it.)
+
+One subprocess call, one CSV. Nothing computes a hash, nothing checks
+whether the output path already exists from a previous run. The rest of
+this tutorial adds exactly enough to close that second gap, without adding
+tracking.
+
+## The Example Model
+
+Same tree-growth model used in [Single Run & Iteration](manual-workflow.qmd),
+with one change: `exportFiles.patch` is keyed by `{run_hash}` instead of a
+parameter value, so two runs -- even with identical parameters -- never
+collide on the same output file:
+
+```{python}
+from pathlib import Path
+
+SOURCE_PATH = Path("../../examples/minimal_run.josh")
+print(SOURCE_PATH.read_text())
+```
+
+```{python}
+BASELINE_CONFIG = Path("../../examples/configs/baseline.jshc")
+print(BASELINE_CONFIG.read_text())
+```
+
+## Naming Outputs by Parameter
+
+It's common to template `exportFiles.patch` with a config variable so
+filenames are self-describing at a glance -- `tutorial_sweep.josh`, used in
+the other tutorials, does exactly this:
+
+```
+exportFiles.patch = "file:///tmp/tutorial_sweep_{maxGrowth}_{replicate}.csv"
+```
+
+Readable, but on its own it has the same collision risk this tutorial
+opened with: two runs sharing a `maxGrowth` value overwrite each other.
+Pairing the parameter with `{run_hash}` keeps both the readability and the
+safety:
+
+```
+exportFiles.patch = "file:///tmp/output_maxGrowth{maxGrowth}_{run_hash}_{replicate}.csv"
+```
+
+`minimal_run.josh`, used throughout this tutorial, skips the parameter and
+keys on `{run_hash}` alone -- safe, but the filename doesn't say what
+`maxGrowth` was at a glance. That's fine: the receipt already knows, as
+Step 3 below shows.
+
+## Step 1: Run It
+
+`run_single()` wraps the sequence above -- `JobConfig` for a `run_hash`,
+`JobExpander`, a receipted `run_sweep()` call, and resolving the export
+path -- into one call, with no `registry` or `session_id` involved:
+
+```{python}
+from joshpy.jobs import JobConfig, run_single
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+
+config = JobConfig(
+    source_path=SOURCE_PATH,
+    config_path=BASELINE_CONFIG,
+    simulation="Main",
+    replicates=1,
+)
+
+cli = JoshCLI(josh_jar=JarMode.DEV)
+receipts_dir = Path("minimal_receipts")
+
+run = run_single(cli, config, bottle_dir=receipts_dir)
+
+print(f"run_hash: {run.run_hash}")
+print(f"csv: {run.csv_paths[0]}")
+```
+
+`run_single()` raises if the run fails, so a successful return means a CSV
+is waiting. It requires `config` to expand to exactly one job -- a `sweep=`
+with more than one combination raises instead, pointing toward
+`run_sweep()` or `SweepManager`.
+
+## Step 2: Hand It Off
+
+This is where joshpy's job ends. Read the CSV with whatever's already in
+use -- here's pandas, purely to confirm it's a real file, not because
+pandas is required:
+
+```{python}
+import pandas as pd
+
+df = pd.read_csv(run.csv_paths[0])
+df.head()
+```
+
+The same file opens in Excel or Stata just as well.
+
+## Step 3: The Receipt
+
+`run_single()` also writes a receipt -- a self-contained archive holding the
+exact command joshpy ran, alongside the rendered config and resolved
+inputs:
+
+```{python}
+import tarfile
+import json
+
+with tarfile.open(run.bottle_path, "r:gz") as tar:
+    for member in tar.getmembers():
+        if member.name.endswith("manifest.json"):
+            manifest = json.loads(tar.extractfile(member).read())
+            break
+
+print(f"command: {' '.join(manifest['command'])}")
+print(f"exit_code: {manifest['exit_code']}")
+```
+
+That `command` field isn't a reconstruction after the fact -- `JoshCLI`
+builds one argument list and hands the same list to both `subprocess` and
+the `CLIResult` that becomes this manifest, so it can't drift from what
+actually ran. If a result looks wrong later, this is the first thing to
+check: whether joshpy handed the JAR what was expected (parameters, data
+files, flags) -- a question that's independent of whether the
+simulation's *output* looks right. See
+[Bottling Runs for Reproducibility](bottling-runs.qmd) for what else a
+receipt/bottle can do, including re-running it with `run.sh` on a machine
+with no Python at all.
+
+The manifest also records `job.parameters` -- which is what makes the
+"Naming Outputs by Parameter" tradeoff above a non-issue in practice.
+`run.csv_paths[0]`'s filename carries only `run_hash`, but the receipt
+still knows what `maxGrowth` was:
+
+```{python}
+print(f"parameters: {manifest['parameters']}")
+```
+
+Keep the receipts, and every `run_hash`-only CSV can be traced back to the
+config that produced it, whether or not the filename says so.
+
+## Step 4: A Second, Independent Run
+
+Run it again with a different config -- same call, same contract:
+
+```{python}
+HIGH_GROWTH_CONFIG = Path("../../examples/configs/high_growth.jshc")
+
+config2 = JobConfig(
+    source_path=SOURCE_PATH,
+    config_path=HIGH_GROWTH_CONFIG,
+    simulation="Main",
+    replicates=1,
+)
+
+run2 = run_single(cli, config2, bottle_dir=receipts_dir)
+
+print(f"run_hash: {run2.run_hash} (different from {run.run_hash})")
+print(f"csv: {run2.csv_paths[0]}")
+print(run2.csv_paths[0] != run.csv_paths[0])
+```
+
+Because the export path is keyed by `{run_hash}`, the second CSV landed
+next to the first without overwriting it -- a structural guarantee, not
+something either run had to know about the other.
+
+::: {.callout-tip}
+## The Minimal Contract
+
+Every `run_single()` call gives you the same three things, independent of
+any other run: a `run_hash`, a CSV, and a receipt. That's the whole
+contract, and it holds no matter how many times it's called.
+
+What it doesn't do is keep track *for* you. If enough permutations pile up
+that matching a `run_hash` back to what it was for starts to feel tedious,
+that's the signal to move on -- see [What's Next](#whats-next) below.
+:::
+
+## What's Next?
+
+This workflow scales down to zero setup and stays that way -- there's
+nothing to migrate away from if a project never needs more than this. But a
+few things it deliberately doesn't do tend to become friction once a
+project grows past "run it once and look":
+
+- **Rerunning with a tweaked parameter and losing track of which CSV came
+  from which config.** `run_hash`-keyed filenames prevent overwrites, but
+  they don't say *what changed* between two runs at a glance.
+  [Single Run & Iteration](manual-workflow.qmd) adds labels and
+  supersession, so a rerun can explicitly replace the one before it while
+  the history stays queryable.
+- **Asking a question across several runs** -- how a parameter affects an
+  output across everything run this week -- **without reconstructing it
+  from a pile of CSVs by hand.** [Low-Level Components](low-level-components.qmd)
+  or [SweepManager Workflow](sweep-manager.qmd) put runs in a queryable
+  registry instead.
+- **Bottling specifically to file a bug report or archive a run for the
+  long term**, rather than as a byproduct of every run.
+  [Bottling Runs for Reproducibility](bottling-runs.qmd) covers the rest of
+  what bottles can do -- `bottle="receipt"` used here is one mode of that
+  same feature.
+
+## Cleanup
+
+```{python}
+#| label: cleanup
+#| echo: false
+import shutil
+
+shutil.rmtree(receipts_dir, ignore_errors=True)
+for p in [run.csv_paths[0], run2.csv_paths[0]]:
+    if p.exists():
+        p.unlink()
+```

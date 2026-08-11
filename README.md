@@ -229,6 +229,12 @@ registry.bottle("baseline", cli=cli)
 
 # Lightweight bottle (skip large .jshd files)
 registry.bottle("baseline", cli=cli, omit_jshd=True)
+
+# No RunRegistry at all: bottle every job (pass or fail) as it runs.
+# Each archive is a self-contained receipt of what joshpy did — rendered
+# config, resolved inputs, the exact JAR command, exit code — for callers
+# who'd rather handle the resulting CSVs themselves than adopt DuckDB.
+results = run_sweep(cli, job_set, bottle="receipt", bottle_dir=Path("./runs"))
 ```
 
 Sweep bottles share data files across jobs — no redundant copies:
