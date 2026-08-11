@@ -64,7 +64,7 @@ joshpy/
 - `debug/`: `DebugMessage`, `DebugMessageStore`, `DebugSummary`, `parse_debug_line`, `load_debug_file`, `load_debug_from_script`, `format_message`
 
 **Requires joshpy[jobs]:**
-- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `discover_jshd_files`, `discover_import_files`
+- `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `SingleRunResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `run_single`, `discover_jshd_files`, `discover_import_files`
 - `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `SweepExecutionError`, `cv_objective`
 - `grid.py`: `GridSpec`
 
@@ -1086,6 +1086,40 @@ print(f"Total jobs: {job_set.total_jobs}")           # Number of job configurati
 print(f"Total replicates: {job_set.total_replicates}")  # Sum of replicates across all jobs
 ```
 
+### Single Run Convenience (run_single)
+
+For a single, registry-free run -- see the Minimal Workflow tutorial --
+`run_single()` collapses `JobExpander` + `run_sweep(..., bottle="receipt")`
++ export-path resolution into one call. `config` must expand to exactly one
+job (no multi-combination `sweep=`); it raises `ValueError` otherwise.
+
+```python
+from joshpy.jobs import JobConfig, run_single
+from joshpy.cli import JoshCLI
+
+config = JobConfig(
+    source_path=Path("model.josh"),
+    config_path=Path("baseline.jshc"),  # raw .jshc, no templating needed
+    simulation="Main",
+)
+
+cli = JoshCLI()
+run = run_single(cli, config, bottle_dir=Path("receipts"))
+
+run.run_hash      # ExpandedJob.run_hash
+run.csv_paths     # list[Path], one per replicate (resolved via inspect_exports())
+run.bottle_path   # Path to the bottle="receipt" archive
+run.job           # the ExpandedJob
+run.result        # the CLIResult
+```
+
+Raises (propagated from `run_sweep`'s default `stop_on_failure=True`) if
+the run fails -- there is no partial/failed return value to check.
+`csv_paths` resolves only `file://` export targets; for `minio://` exports,
+use `ingest_results()` or `registry.get_output_uris()` instead, and
+`csv_paths` comes back empty. Not for sweeps or batch/remote execution --
+use `run_sweep()`/`SweepManager` for those.
+
 ---
 
 ## Adaptive Sweeps (Optuna Integration)
@@ -1792,8 +1826,22 @@ Bottles are self-contained `.tar.gz` archives that capture everything needed to 
 | `"first_success"` | bottle the first succeeding job, continue sweep |
 | `"all"` | bottle every job into one sweep bottle at end |
 | `"all_failures"` | bottle every failing job into one sweep bottle at end |
+| `"receipt"` | bottle every job, pass or fail, one archive each — no `RunRegistry` required |
 
 Bottled failures go to `./bottles/` by default; override via `bottle_dir`.
+
+`"receipt"` is the sanctioned no-registry workflow: for callers who skip
+`RunRegistry` entirely (e.g. dispatching ad hoc to k8s and handling the
+resulting CSVs themselves), it gives each run a self-contained, inspectable
+archive of exactly what joshpy did — rendered config, resolved inputs, the
+literal JAR command, exit code — without requiring DuckDB or any tracking
+setup. Unlike `"all"`, it isn't a single end-of-sweep archive: each job is
+bottled immediately as it completes, same as `"first_failure"`.
+
+```python
+# Registry-free: package + fire off each job, no tracking required
+results = run_sweep(cli, job_set, bottle="receipt", bottle_dir=Path("./runs"))
+```
 
 ```python
 results = manager.run(
@@ -1833,6 +1881,7 @@ bottle_<run_hash>_<timestamp>.tar.gz
   "bottled_at": "2026-04-24T01:49:32Z",
   "exit_code": 1,
   "stderr": "java.lang.RuntimeException: ...",
+  "command": ["java", "-jar", "joshsim-fat.jar", "run", "simulation.josh", "Main", "--data", "..."],
   "batch": {
     "target": "gke-test",
     "minio_prefix": "sweeps/s1/jobs/abc123/",
@@ -1841,7 +1890,12 @@ bottle_<run_hash>_<timestamp>.tar.gz
 }
 ```
 
-The `batch` key is present only for jobs dispatched via batch-remote. Use it to re-stage inputs for a local repro or to inspect the failing K8s job directly on the cluster.
+`command` is the literal argv joshpy passed to the JAR (flags, `--data`
+mappings, seed, replicates, everything) — the ground truth for auditing
+joshpy's own wrap-up (templating, file-matching, flag construction)
+independent of whether the run's *results* look right. The `batch` key is
+present only for jobs dispatched via batch-remote. Use it to re-stage inputs
+for a local repro or to inspect the failing K8s job directly on the cluster.
 
 ### Unbottle for local reproduction
 

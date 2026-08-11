@@ -19,7 +19,9 @@ library(dplyr)
 Most users should start with [Single Run & Iteration](manual-workflow.qmd)
 or [SweepManager Workflow](sweep-manager.qmd). This tutorial covers the
 lower-level components for users who need direct control over job expansion,
-registry registration, and execution loops.
+registry registration, and execution loops. If you don't want a registry at
+all, see [Minimal Workflow](minimal-workflow.qmd) instead -- it's lower-level
+still, minus the tracking.
 :::
 
 ## Introduction
@@ -290,6 +292,7 @@ This demo illustrated the manual joshpy workflow using each component directly:
 
 **Related Tutorials:**
 
+- [Minimal Workflow](minimal-workflow.qmd) - Lower-level still: no registry at all, for one-off runs
 - [Single Run & Iteration](manual-workflow.qmd) - The recommended starting workflow
 - [SweepManager Workflow](sweep-manager.qmd) - Simplified orchestration with `SweepManager`
 - [Analysis & Visualization](analysis.qmd) - Analysis and visualization (decoupled from orchestration)

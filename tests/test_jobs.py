@@ -3110,5 +3110,125 @@ class TestAutoDiscoverImports(unittest.TestCase):
         self.assertEqual(h_nocli, h_cli)
 
 
+class TestRunSingle(unittest.TestCase):
+    """Tests for run_single()."""
+
+    def _mock_cli(self, csv_template: str):
+        from joshpy.cli import ExportFileInfo, ExportPaths
+
+        cli = MagicMock()
+        cli._resolved_jar = Path("/fake/joshsim-fat.jar")
+        cli.java_path = "java"
+        cli.run.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+            command=["java", "-jar", "joshsim-fat.jar", "run"],
+        )
+        cli.inspect_exports.return_value = ExportPaths(
+            simulation="Main",
+            export_files={
+                "patch": ExportFileInfo(
+                    raw=f"file://{csv_template}",
+                    protocol="file", host="", path=csv_template,
+                    file_type="csv",
+                ),
+                "meta": None,
+                "entity": None,
+            },
+            debug_files={},
+        )
+        return cli
+
+    def test_run_single_returns_hash_and_csv_path(self):
+        from unittest.mock import patch as _patch
+
+        from joshpy.jobs import run_single
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            src = tmp / "model.josh"
+            src.write_text("start simulation Main\nend simulation\n")
+            cfg_path = tmp / "config.jshc"
+            cfg_path.write_text("maxGrowth = 50 meters\n")
+
+            config = JobConfig(
+                source_path=src, config_path=cfg_path, simulation="Main", replicates=1,
+            )
+            cli = self._mock_cli("/tmp/out_{run_hash}_{replicate}.csv")
+            bottle_dir = tmp / "bottles"
+
+            with _patch("joshpy.jar.get_jar_version", return_value=None), \
+                    _patch("joshpy.jar.get_jar_hash", return_value=None):
+                run = run_single(cli, config, bottle_dir=bottle_dir)
+
+            self.assertEqual(run.run_hash, run.job.run_hash)
+            self.assertEqual(len(run.csv_paths), 1)
+            self.assertEqual(
+                run.csv_paths[0], Path(f"/tmp/out_{run.run_hash}_0.csv"),
+            )
+            self.assertIsNotNone(run.bottle_path)
+            self.assertTrue(run.bottle_path.exists())
+            self.assertTrue(run.result.success)
+
+    def test_run_single_rejects_a_sweep(self):
+        from joshpy.jobs import ConfigSweepParameter, run_single
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            src = tmp / "model.josh"
+            src.write_text("start simulation Main\nend simulation\n")
+
+            config = JobConfig(
+                template_string="maxGrowth = {{ maxGrowth }} meters",
+                source_path=src,
+                simulation="Main",
+                sweep=SweepConfig(
+                    config_parameters=[
+                        ConfigSweepParameter(name="maxGrowth", values=[10, 20]),
+                    ],
+                ),
+            )
+            with self.assertRaises(ValueError) as ctx:
+                run_single(MagicMock(), config)
+            self.assertIn("exactly one job", str(ctx.exception))
+
+    def test_run_single_skips_non_file_export(self):
+        """Bucket-resident exports resolve to no csv_paths (use ingest_results instead)."""
+        from unittest.mock import patch as _patch
+
+        from joshpy.cli import ExportFileInfo, ExportPaths
+        from joshpy.jobs import run_single
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            src = tmp / "model.josh"
+            src.write_text("start simulation Main\nend simulation\n")
+            cfg_path = tmp / "config.jshc"
+            cfg_path.write_text("maxGrowth = 50 meters\n")
+
+            config = JobConfig(
+                source_path=src, config_path=cfg_path, simulation="Main", replicates=1,
+            )
+            cli = self._mock_cli("minio://bucket/{run_hash}_{replicate}.csv")
+            cli.inspect_exports.return_value = ExportPaths(
+                simulation="Main",
+                export_files={
+                    "patch": ExportFileInfo(
+                        raw="minio://bucket/{run_hash}_{replicate}.csv",
+                        protocol="minio", host="bucket",
+                        path="{run_hash}_{replicate}.csv", file_type="csv",
+                    ),
+                    "meta": None,
+                    "entity": None,
+                },
+                debug_files={},
+            )
+
+            with _patch("joshpy.jar.get_jar_version", return_value=None), \
+                    _patch("joshpy.jar.get_jar_hash", return_value=None):
+                run = run_single(cli, config, bottle_dir=tmp / "bottles")
+
+            self.assertEqual(run.csv_paths, [])
+
+
 if __name__ == '__main__':
     unittest.main()

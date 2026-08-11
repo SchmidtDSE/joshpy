@@ -1,0 +1,50 @@
+# Minimal one-off run simulation - optimized for fast documentation builds
+# Identical to tutorial_sweep.josh, except the export path is keyed by
+# {run_hash} instead of {maxGrowth}: independent one-off runs (including two
+# with the same parameter values) each get their own output file, with no
+# registry required to keep them apart.
+
+start simulation Main
+
+  grid.size = 5000 m
+  grid.low = 33.7 degrees latitude, -115.4 degrees longitude
+  grid.high = 34.0 degrees latitude, -116.4 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 count
+  steps.high = 10 count
+
+  exportFiles.patch = "file:///tmp/minimal_run_{run_hash}_{replicate}.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create 10 count of ForeverTree
+
+  export.averageAge.step = mean(ForeverTree.age)
+  export.averageHeight.step = mean(ForeverTree.height)
+
+end patch
+
+start organism ForeverTree
+
+  initialTreeCount.init = config sweep_config.initialTreeCount
+
+  maxGrowth.init = config sweep_config.maxGrowth
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 meters
+  height.step = prior.height + sample uniform from 0 meters to maxGrowth
+
+end organism
+
+start unit year
+
+  alias years
+  alias yr
+  alias yrs
+
+end unit

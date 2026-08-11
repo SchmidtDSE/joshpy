@@ -2067,6 +2067,15 @@ def run_sweep(
         enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
         stream_output: If True, stream JAR stdout/stderr to the terminal
             in real time while still capturing them in CLIResult.
+        bottle: Optional bottling mode — see ``joshpy.bottle.BOTTLE_MODES``.
+            ``"receipt"`` bottles every job (pass or fail) with no registry
+            required: a self-contained archive per run holding the rendered
+            config, resolved inputs, the exact JAR command, and exit code —
+            for callers who want a portable, inspectable record of what
+            joshpy did without adopting ``RunRegistry``.
+        bottle_dir: Directory for bottle archives (default: ``./bottles/``).
+        bottle_omit_jshd: If True, skip copying ``.jshd`` data files into
+            bottle archives (default: False).
 
     Returns:
         SweepResult with all job outcomes.
@@ -2573,3 +2582,141 @@ def run_sweep(
             import shutil
 
             shutil.rmtree(sweep_workdir, ignore_errors=True)
+
+
+@dataclass
+class SingleRunResult:
+    """Result of :func:`run_single` -- one receipted, registry-free run.
+
+    Attributes:
+        job: The expanded job that ran.
+        result: The ``CLIResult`` from execution (exit code, stderr, the
+            exact JAR command).
+        run_hash: Shortcut for ``job.run_hash``.
+        csv_paths: Resolved local output path per replicate, in replicate
+            order. Empty if the export target isn't a local ``file://`` path
+            (e.g. ``minio://``) or the requested export type isn't declared
+            in the ``.josh`` source -- use ``ingest_results()`` or
+            ``registry.get_output_uris()`` for bucket-resident exports.
+        bottle_path: Path to the receipt archive written by
+            ``bottle="receipt"``, or ``None`` if bottling failed (bottling
+            failures are non-fatal -- see :mod:`joshpy.bottle`).
+    """
+
+    job: ExpandedJob
+    result: Any
+    csv_paths: list[Path] = field(default_factory=list)
+    bottle_path: Path | None = None
+
+    @property
+    def run_hash(self) -> str:
+        """Shortcut for ``job.run_hash``."""
+        return self.job.run_hash
+
+
+def run_single(
+    cli: JoshCLI,
+    config: JobConfig,
+    *,
+    bottle_dir: Path | None = None,
+    bottle_omit_jshd: bool = False,
+    export_type: str = "patch",
+    quiet: bool = True,
+    stream_output: bool = False,
+) -> SingleRunResult:
+    """Run one registry-free job and receipt it.
+
+    Convenience wrapper for the "one-off run, no ``RunRegistry``" workflow
+    (see the Minimal Workflow tutorial): expands ``config`` -- which must
+    produce exactly one job, not a sweep -- executes it, writes a
+    ``bottle="receipt"`` archive, and resolves the local CSV path(s) for
+    ``export_type`` via ``inspect_exports()``. This is ``run_sweep(cli,
+    job_set, bottle="receipt")`` plus that path resolution, collapsed into
+    one call for the single-job case; reach for ``run_sweep()`` or
+    ``SweepManager`` directly for sweeps or batch/remote execution.
+
+    Args:
+        cli: JoshCLI instance to use for execution.
+        config: JobConfig that expands to exactly one job (no ``sweep=``
+            producing more than one combination).
+        bottle_dir: Directory for the receipt archive (default: ``./bottles/``).
+        bottle_omit_jshd: If True, skip copying ``.jshd`` data files into
+            the receipt archive.
+        export_type: Which declared export to resolve paths for (``"patch"``,
+            ``"meta"``, or ``"entity"``).
+        quiet: Suppress progress output (default: True, unlike ``run_sweep``
+            -- a single run has no sweep progress worth printing).
+        stream_output: Stream JAR stdout/stderr to the terminal in real time.
+
+    Returns:
+        SingleRunResult with the job, CLIResult, resolved CSV path(s), and
+        the receipt archive path.
+
+    Raises:
+        ValueError: If ``config`` expands to more than one job.
+        SweepExecutionError: If the run fails (raised by the underlying
+            ``run_sweep()`` call; carries the job and CLIResult with the
+            error).
+
+    Examples:
+        >>> config = JobConfig(source_path=Path("model.josh"),
+        ...                    config_path=Path("baseline.jshc"))
+        >>> run = run_single(cli, config)
+        >>> run.run_hash, run.csv_paths, run.bottle_path
+    """
+    from joshpy.cli import InspectExportsConfig
+
+    job_set = JobExpander().expand(config, cli=cli)
+    try:
+        if job_set.total_jobs != 1:
+            raise ValueError(
+                f"run_single() requires a JobConfig that expands to exactly "
+                f"one job; got {job_set.total_jobs}. Use run_sweep() or "
+                f"SweepManager for sweeps."
+            )
+        job = job_set.jobs[0]
+
+        results = run_sweep(
+            cli, job_set,
+            bottle="receipt",
+            bottle_dir=bottle_dir or Path("bottles"),
+            bottle_omit_jshd=bottle_omit_jshd,
+            quiet=quiet,
+            stream_output=stream_output,
+        )
+        _, result = results.job_results[0]
+
+        csv_paths: list[Path] = []
+        export_info = None
+        if job.source_path is not None:
+            export_paths = cli.inspect_exports(
+                InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+            )
+            export_info = export_paths.export_files.get(export_type)
+        if export_info is not None and export_info.protocol == "file":
+            for rep in range(job.replicates):
+                template_vars = {
+                    "simulation": job.simulation,
+                    "replicate": rep,
+                    **job.parameters,
+                    **job.custom_tags,
+                }
+                try:
+                    csv_paths.append(
+                        export_paths.resolve_path(export_info.path, **template_vars)
+                    )
+                except KeyError:
+                    continue
+
+        resolved_bottle_dir = bottle_dir or Path("bottles")
+        bottle_matches = sorted(
+            resolved_bottle_dir.glob(f"*{job.run_hash}*.tar.gz"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        bottle_path = bottle_matches[-1] if bottle_matches else None
+
+        return SingleRunResult(
+            job=job, result=result, csv_paths=csv_paths, bottle_path=bottle_path,
+        )
+    finally:
+        job_set.cleanup()
