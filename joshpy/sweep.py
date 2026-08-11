@@ -1550,6 +1550,12 @@ class SweepManager:
             enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
             stream_output: If True, stream JAR stdout/stderr to the terminal
                 in real time while still capturing them in CLIResult.
+            bottle: Optional bottling mode — see ``run_sweep()`` and
+                ``joshpy.bottle.BOTTLE_MODES``. ``"receipt"`` bottles every
+                job regardless of a registry being configured.
+            bottle_dir: Directory for bottle archives (default: ``./bottles/``).
+            bottle_omit_jshd: If True, skip copying ``.jshd`` files into
+                bottle archives (default: False).
             force: Removed. Passing ``force=True`` now raises ``ValueError``.
                 The old behavior aliased ``collision_policy="overwrite"``, which
                 couldn't keep the registry in sync with re-run outputs. To add

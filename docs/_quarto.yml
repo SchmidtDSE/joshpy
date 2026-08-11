@@ -8,6 +8,7 @@ project:
     - getting-started/installation.qmd
     - getting-started/quickstart.qmd
     - tutorials/index.qmd
+    - tutorials/minimal-workflow.qmd     # No registry; standalone
     - tutorials/manual-workflow.qmd      # Creates demo_registry.duckdb
     - tutorials/sweep-manager.qmd        # Also creates demo_registry.duckdb
     - tutorials/project-organization.qmd # Non-executable guide
@@ -45,6 +46,8 @@ website:
         menu:
           - text: "---"
           - text: "Getting Started"
+          - text: "Minimal Workflow"
+            href: tutorials/minimal-workflow.qmd
           - text: "Single Run & Iteration"
             href: tutorials/manual-workflow.qmd
           - text: "SweepManager"
@@ -118,6 +121,7 @@ website:
         - tutorials/index.qmd
         - section: "Getting Started"
           contents:
+            - tutorials/minimal-workflow.qmd
             - tutorials/manual-workflow.qmd
             - tutorials/sweep-manager.qmd
             - tutorials/analysis.qmd

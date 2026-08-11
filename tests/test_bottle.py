@@ -211,6 +211,9 @@ class TestCreateBottle(unittest.TestCase):
             self.assertEqual(manifest["parameters"], {"maxGrowth": 50})
             self.assertEqual(manifest["exit_code"], 1)
             self.assertIn("NullPointerException", manifest["stderr"])
+            self.assertEqual(
+                manifest["command"], ["java", "-jar", "test.jar", "run"]
+            )
             self.assertEqual(manifest["jar_version"], "0.5.0-dev")
             self.assertEqual(manifest["jar_sha256"], "sha256abc123")
             self.assertIn("bottled_at", manifest)
@@ -337,6 +340,14 @@ class TestShouldBottle(unittest.TestCase):
         self.assertTrue(_should_bottle("all", True, True, True))
         self.assertTrue(_should_bottle("all", False, True, True))
 
+    def test_receipt_bottles_every_job_regardless_of_state(self):
+        from joshpy.bottle import _should_bottle
+
+        self.assertTrue(_should_bottle("receipt", True, False, False))
+        self.assertTrue(_should_bottle("receipt", False, False, False))
+        self.assertTrue(_should_bottle("receipt", True, True, True))
+        self.assertTrue(_should_bottle("receipt", False, True, True))
+
 
 class TestBottleInRunSweep(unittest.TestCase):
     """Tests for bottle integration in run_sweep()."""
@@ -381,6 +392,43 @@ class TestBottleInRunSweep(unittest.TestCase):
             archives = list(bottle_dir.glob("*.tar.gz"))
             self.assertEqual(len(archives), 1)
             self.assertIn("abc123def456", archives[0].name)
+
+    @patch("joshpy.jar.get_jar_version", return_value=None)
+    @patch("joshpy.jar.get_jar_hash", return_value=None)
+    def test_bottle_receipt_bottles_every_job_no_registry(self, mock_hash, mock_ver):
+        """bottle='receipt' archives every job, pass or fail, with no registry."""
+        from joshpy.jobs import JobSet, run_sweep
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ok_job = _make_job(tmpdir, run_hash="ok111111111", with_data=False)
+            fail_job = _make_job(tmpdir, run_hash="bad222222222", with_data=False)
+            job_set = JobSet(jobs=[ok_job, fail_job])
+
+            cli = MagicMock()
+            cli._resolved_jar = Path("/fake/jar.jar")
+            cli.java_path = "java"
+            cli.run.side_effect = [
+                _make_cli_result(success=True),
+                _make_cli_result(success=False),
+            ]
+
+            bottle_dir = Path(tmpdir) / "receipts"
+            result = run_sweep(
+                cli,
+                job_set,
+                registry=None,
+                stop_on_failure=False,
+                quiet=True,
+                bottle="receipt",
+                bottle_dir=bottle_dir,
+            )
+
+            self.assertEqual(result.succeeded, 1)
+            self.assertEqual(result.failed, 1)
+            archives = list(bottle_dir.glob("*.tar.gz"))
+            self.assertEqual(len(archives), 2)
+            self.assertTrue(any("ok111111111" in a.name for a in archives))
+            self.assertTrue(any("bad222222222" in a.name for a in archives))
 
     @patch("joshpy.bottle.create_bottle", side_effect=RuntimeError("disk full"))
     def test_bottle_failure_does_not_abort_sweep(self, mock_bottle):
@@ -528,6 +576,9 @@ class TestCreateSweepBottle(unittest.TestCase):
             self.assertEqual(manifest["jobs"][0]["run_hash"], "hash_aaa")
             self.assertTrue(manifest["jobs"][0]["success"])
             self.assertFalse(manifest["jobs"][1]["success"])
+            self.assertEqual(
+                manifest["jobs"][0]["command"], ["java", "-jar", "test.jar", "run"]
+            )
 
     @patch("joshpy.jar.get_jar_version", return_value=None)
     @patch("joshpy.jar.get_jar_hash", return_value=None)

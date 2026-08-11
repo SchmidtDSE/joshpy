@@ -6,6 +6,16 @@ Step-by-step guides for learning joshpy.
 
 ## Getting Started
 
+### [Minimal Workflow](minimal-workflow.qmd)
+
+The floor: run once, get a CSV, analyze it however you want.
+
+- `JoshCLI` + `RunConfig`, or `JobConfig` + `JobExpander` for a `run_hash`
+- `bottle="receipt"` for a per-run provenance archive -- no registry
+- Each run is independent; nothing links or compares them for you
+
+Best for: One-off runs you'll analyze outside joshpy (Excel, R, Stata, pandas).
+
 ### [Single Run & Iteration](manual-workflow.qmd)
 
 The essential workflow: run a simulation, tweak parameters, compare results.
@@ -211,6 +221,8 @@ All tutorials assume:
 
 ## Recommended Order
 
+0. [Minimal Workflow](minimal-workflow.qmd) -- if you don't want a registry
+   at all, start and stay here instead
 1. [Single Run & Iteration](manual-workflow.qmd) -- the tinkering workflow
 2. [SweepManager](sweep-manager.qmd) -- systematic parameter sweeps
 3. [Analysis](analysis.qmd) -- visualization and queries

@@ -3,7 +3,7 @@
 A bottle is a ``.tar.gz`` archive containing everything needed to reproduce
 Josh runs without Python or joshpy — just Java and the JAR.
 
-Single-job bottle (``first_failure`` / ``first_success``)::
+Single-job bottle (``first_failure`` / ``first_success`` / ``receipt``)::
 
     bottle_{run_hash}/
         simulation.josh
@@ -11,6 +11,12 @@ Single-job bottle (``first_failure`` / ``first_success``)::
         data/
         run.sh
         manifest.json
+
+``receipt`` mode bottles *every* job, pass or fail, one archive apiece — for
+callers who skip ``RunRegistry`` entirely and just want a self-contained,
+inspectable record (rendered config, resolved inputs, the exact JAR command
+that ran, exit code) of what joshpy actually did, per run. It makes no
+assumption about how the resulting CSVs get handled afterward.
 
 Sweep bottle (``all`` / ``all_failures``)::
 
@@ -30,6 +36,7 @@ Usage::
     # During execution
     results = manager.run(bottle="first_failure")  # single-job bottle
     results = manager.run(bottle="all")            # sweep bottle
+    results = manager.run(bottle="receipt")         # every job, no registry needed
 
     # After the fact (single run)
     registry.bottle("baseline", cli=cli)
@@ -56,8 +63,10 @@ if TYPE_CHECKING:
     from joshpy.jobs import ExpandedJob
     from joshpy.registry import RunRegistry
 
-BottleMode = Literal["first_failure", "all_failures", "first_success", "all"]
-BOTTLE_MODES: set[str] = {"first_failure", "all_failures", "first_success", "all"}
+BottleMode = Literal["first_failure", "all_failures", "first_success", "all", "receipt"]
+BOTTLE_MODES: set[str] = {
+    "first_failure", "all_failures", "first_success", "all", "receipt",
+}
 
 
 def _get_joshpy_version() -> str:
@@ -212,6 +221,7 @@ def _build_manifest(
         manifest["exit_code"] = cli_result.exit_code
         manifest["stderr"] = cli_result.stderr
         manifest["stdout"] = cli_result.stdout
+        manifest["command"] = cli_result.command
 
     if batch_metadata:
         manifest["batch"] = batch_metadata
@@ -690,6 +700,7 @@ def create_sweep_bottle(
                 "parameters": job.parameters,
                 "exit_code": cli_result.exit_code,
                 "success": cli_result.success,
+                "command": cli_result.command,
                 "import_files": sorted(job.import_files.keys()),
             }
             if not cli_result.success:
@@ -751,6 +762,8 @@ def _should_bottle(
     elif mode == "first_success":
         return success and not already_bottled_success
     elif mode == "all":
+        return True
+    elif mode == "receipt":
         return True
     return False
 
