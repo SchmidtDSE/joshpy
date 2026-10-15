@@ -1,0 +1,88 @@
+start simulation Main
+
+  grid.size = 16000 m
+  grid.top_left =
+    36.73 degrees latitude,
+    -119.52 degrees longitude
+  grid.bottom_right =
+    35.80 degrees latitude,
+    -117.98 degrees longitude
+  grid.patch = "Default"
+
+  steps.low = 0 count
+  steps.high = 10 count
+
+  minPrecipImpactPct.init =
+    config forevertree.minPrecipImpactPct
+  maxNewGrowth.init =
+    config forevertree.maxNewGrowth
+
+  exportFiles.patch = "file:///tmp/forevertree_results_{replicate}.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init =
+    create 10 count of ForeverTree
+
+  export.year.step = 2024 count + meta.stepCount
+  export.nTrees.step = count(ForeverTree)
+  export.meanHeight.step = mean(ForeverTree.height)
+
+end patch
+
+start organism ForeverTree
+
+  age.init = 0 year
+  age.step = prior.age + 1 year
+  height.init = 0 m
+
+  clampedTemp.step =
+    limit (external temperature)
+    to [270 K, 330 K]
+
+  temperatureImpact.step =
+    map clampedTemp
+    from [270 K, 330 K]
+    to [0%, 100%] quadratic(true)
+
+  precipImpact.step =
+    map (external precipitation as mm)
+    from [300 mm, 500 mm]
+    to [meta.minPrecipImpactPct, 100%] sigmoid
+
+  stochastic.step =
+    sample normal
+    with mean of 100% std of 5%
+
+  newGrowth.step =
+    meta.maxNewGrowth
+    * temperatureImpact
+    * precipImpact
+    * stochastic
+
+  height.step = prior.height + newGrowth
+
+end organism
+
+start unit kgm2s
+
+  mm = current * 31536000
+
+end unit
+
+start unit mm
+
+  alias millimeter
+  alias millimeters
+  m = current / 1000
+
+end unit
+
+start unit K
+
+  alias Kelvin
+  alias Kelvins
+
+end unit
