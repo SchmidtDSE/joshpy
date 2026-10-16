@@ -4,6 +4,23 @@ Oct 16, 2026 · @nick · checked against joshpy v0.0.9.29 and sbi 0.27.0
 
 This is the engineering plan for running the filter-and-refine search in [SBI.md](SBI.md) through joshpy. It is first proved on the published ForeverTree demo (`examples/demo/`), then scaled to the grass–shrub and Joshua tree experiments. Line references are to v0.0.9.29 and will drift; the function names are the stable pointers.
 
+## Implementation status (Oct 16)
+
+Phases 0–2 are implemented in a three-PR stack: #86 (`AdaptiveContext.evaluate`, generic dispatch), #87 (`batch_no_wait` status fix, registry reuse and reattach), and the `SbiStrategy` PR. Where the build differs from the plan below:
+
+- **Batch expansion** uses a new `JobExpander.expand(..., combinations=rows)` instead of a zipped `CompoundSweepParameter`. Same rendering and hashing, without adding a compound label key to every job's parameters and to the registry's `config_parameters` table.
+- **Config namespace defaults stay per path** (batch: `sweep_config`; adaptive: template stem), because existing models rely on both. An explicit `config_name` now wins on both paths.
+- **Generation checkpoints are written once, at the end of a run.** `SMCABC`'s loop gives the simulator no generation boundaries, so recording each generation as it completes would need private sbi internals. Replay-based resume is implemented and tested (an interrupted run, rerun, ends with identical particles). The warm-start fallback is not built.
+- **The version guard warns** instead of refusing, when an earlier session with the same settings ran under other sbi or torch versions.
+- **`stop_on_failure`** raises after the failing run's batch has finished and its successful runs are loaded.
+- **Additions not in the plan:**
+  - `OptunaStrategy(seed=...)`, so Optuna replays too.
+  - A guard that refuses a multi-job batch whose export path lacks `{run_hash}`/`{label}`.
+  - A fix for `SweepConfig` truthiness checks: parameter-less adaptive sweeps were being run as batch sweeps.
+- **Not done yet:**
+  - Phase 3 (Quarto tutorial). `examples/sbi_forevertree/run_abc.py` is the runnable known-truth demo for now.
+  - Phase 4 (Kubernetes run).
+
 ## Decision
 
 **We use [sbi](https://github.com/sbi-dev/sbi) (Mackelab) as the inference engine. joshpy implements no statistics.** joshpy's job is to turn a batch of parameter sets into Josh runs, record every run in the registry, and return summary statistics. The algorithm (proposals, weights, tolerance schedule) comes from sbi.

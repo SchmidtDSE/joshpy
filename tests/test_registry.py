@@ -143,6 +143,24 @@ class TestSessionManagement(unittest.TestCase):
         session = self.registry.get_session(session_id)
         self.assertEqual(session.status, "completed")
 
+    def test_update_session_metadata_merges(self):
+        """update_session_metadata keeps existing keys and replaces named ones."""
+        config = _make_config()
+        session_id = self.registry.create_session(config=config, experiment_name="test")
+
+        self.registry.update_session_metadata(session_id, sbi={"generation": 0}, note="a")
+        merged = self.registry.update_session_metadata(session_id, sbi={"generation": 1})
+
+        metadata = self.registry.get_session(session_id).metadata
+        self.assertEqual(metadata, merged)
+        self.assertEqual(metadata["sbi"], {"generation": 1})
+        self.assertEqual(metadata["note"], "a")
+        self.assertIn("job_config", metadata)
+
+    def test_update_session_metadata_unknown_session(self):
+        with self.assertRaises(KeyError):
+            self.registry.update_session_metadata("nope", x=1)
+
     def test_list_sessions_empty(self):
         """list_sessions should return empty list when no sessions."""
         sessions = self.registry.list_sessions()

@@ -51,6 +51,9 @@ install = "pip install -e '.[full]' --quiet"
 install-dev = "pip install -e '.[dev]' --quiet"
 test = { cmd = "pytest tests/ -v -m 'not integration'", depends-on = ["install-dev"] }
 test-integration = { cmd = "pytest tests/ -v -m integration", depends-on = ["install-dev"] }
+# SbiStrategy tests need sbi + torch (opt-in). CPU-only torch first, so pip never pulls CUDA wheels.
+install-sbi = "pip install torch --index-url https://download.pytorch.org/whl/cpu --quiet && pip install -e '.[dev,sbi]' --quiet"
+test-sbi = { cmd = "pytest tests/test_sbi.py -v", depends-on = ["install-sbi"] }
 lint = "ruff check joshpy/"
 typecheck = "mypy joshpy/"
 format = "ruff format joshpy/"

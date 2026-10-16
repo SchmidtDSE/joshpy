@@ -41,7 +41,7 @@ joshpy/
 ├── grid.py          # Grid specification (GridSpec: geometry + data manifest + preprocessing)
 ├── jshd.py          # JSHD file loading (load_jshd, plot_jshd)
 ├── jobs.py          # Parameter sweep orchestration (JobConfig, JobExpander, etc.)
-├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy, cv_objective)
+├── strategies.py    # Sweep strategies (CartesianStrategy, OptunaStrategy, SbiStrategy, cv_objective)
 ├── sweep.py         # SweepManager for high-level orchestration
 ├── registry.py      # DuckDB experiment tracking (RunRegistry)
 ├── cell_data.py     # Spatiotemporal data loading (CellDataLoader, DiagnosticQueries)
@@ -65,7 +65,7 @@ joshpy/
 
 **Requires joshpy[jobs]:**
 - `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `SingleRunResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `run_single`, `discover_jshd_files`, `discover_import_files`
-- `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `AdaptiveContext`, `BatchResult`, `SweepExecutionError`, `cv_objective`
+- `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `AdaptiveContext`, `BatchResult`, `SbiStrategy`, `SbiResult`, `SweepExecutionError`, `cv_objective`
 - `grid.py`: `GridSpec`
 
 **Requires joshpy[registry]:**
@@ -1325,6 +1325,99 @@ Config namespace: adaptive sweeps default the rendered config's name to the
 template file's stem (`adaptive_config.jshc.j2` -> `config adaptive_config.*`);
 batch sweeps default to `sweep_config`. Set `JobConfig.config_name` to choose
 explicitly on either path.
+
+---
+
+## Simulation-Based Inference (SbiStrategy)
+
+`SbiStrategy` runs approximate Bayesian computation from the
+[sbi](https://github.com/sbi-dev/sbi) package with joshpy as the simulator:
+rejection ABC (`method="mcabc"`) or sequential Monte Carlo ABC
+(`method="smcabc"`, the default). sbi owns the algorithm (proposals, weights,
+tolerance schedule); each batch it proposes is one `ctx.evaluate(...)`, so every
+simulation is rendered, registered, run in the chosen mode, loaded and
+summarized. joshpy implements no statistics.
+
+### Installation
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu  # CPU-only torch
+pip install "joshpy[sbi]"
+# in this repo: pixi run -e dev test-sbi  (installs both, runs tests/test_sbi.py)
+```
+
+### Example
+
+```python
+from joshpy.jobs import JobConfig, SweepConfig
+from joshpy.strategies import SbiStrategy
+from joshpy.sweep import SweepManager
+
+def summaries(registry, run_hash, job):
+    """One run's summary statistics; keys must cover `observed`."""
+    mean, sd = registry.conn.execute("""
+        SELECT avg(meanHeight), stddev_samp(meanHeight) FROM cell_data_current
+        WHERE run_hash = ? AND step = (SELECT max(step) FROM cell_data_current WHERE run_hash = ?)
+    """, [run_hash, run_hash]).fetchone()
+    return {"mean_height": mean / 10, "height_cv": sd / mean}
+
+strategy = SbiStrategy(
+    prior={                                   # order = parameter vector order
+        "maxNewGrowth": {"uniform": [0.2, 2.0]},
+        "minPrecipImpactPct": {"uniform": [0.0, 100.0]},
+    },                                        # also {"normal": [mean, std]}
+    summaries=summaries,                      # or "module:function"
+    observed={"mean_height": 0.68, "height_cv": 0.37},  # or JSON path / "module:function"
+    method_kwargs={"num_particles": 30, "num_initial_pop": 60,
+                   "num_simulations": 300, "epsilon_decay": 0.5},
+    seed=0,
+)
+config = JobConfig(
+    template_path=Path("forevertree.jshc.j2"),      # uses {{ maxNewGrowth }} etc.
+    source_path=Path("forevertree.josh"),            # exportFiles.patch must contain {run_hash}
+    file_mappings={...},
+    sweep=SweepConfig(strategy=strategy),            # no config_parameters needed
+)
+manager = SweepManager.builder(config).with_registry("abc.duckdb").build()
+result = manager.run(stop_on_failure=False)   # failed runs become NaN, never accepted
+
+df = result.to_dataframe()        # final population: params, weight, run_hash
+result.populations                # per generation: epsilon, run_hashes, weights, distances,
+                                  # simulations, carried_over
+```
+
+A complete known-truth example is `examples/sbi_forevertree/run_abc.py`.
+
+### What gets recorded
+
+- Every simulation is a registered run with an `sbi_call` attribute (which
+  simulator call proposed it).
+- Population members get `sbi_accepted`, `sbi_generation`, `sbi_weight` and
+  `sbi_distance` attributes (run-level, so the latest sbi run touching a
+  run_hash wins).
+- Session metadata `sbi` holds the settings, a replay fingerprint, sbi/torch
+  versions, every population, the tolerances and the final run_hashes.
+
+### Notes
+
+- **Export path:** a batch runs before it is loaded, so `exportFiles.patch` must
+  contain `{run_hash}` (or `{label}`); otherwise `evaluate` raises rather than
+  load the wrong file.
+- **Summaries:** standardize them; `l2` lets the largest statistic dominate.
+- **Seeds:** `SbiStrategy.seed` fixes sbi's proposals, not Josh's random draws.
+  Leave `JobConfig.seed` unset so each simulation draws its own noise (a
+  warning is emitted if it is set); seed only the run that makes the observed
+  data.
+- **Budget:** when `num_simulations` runs out mid-generation, sbi fills the last
+  population with particles from the previous one (`use_last_pop_samples=True`,
+  sbi's default). `populations[-1]["carried_over"]` counts them; their
+  distances may exceed that generation's `epsilon`. Each population's
+  `simulations` gives its acceptance rate.
+- **Resume:** rerun with the same seed against the same registry. Completed runs
+  are reused and sbi replays the same proposals (a warning is emitted if an
+  earlier session with the same settings ran other sbi/torch versions).
+- **Not supported:** `kde`, `lra` and `sass` options (they return parameters that
+  were never simulated); fit those on `result.samples` instead.
 
 ---
 

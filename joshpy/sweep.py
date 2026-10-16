@@ -1722,7 +1722,10 @@ class SweepManager:
             )
 
         # Check if strategy is adaptive
-        strategy = self.config.sweep.strategy if self.config.sweep else None
+        # `is not None`, not truthiness: SweepConfig is falsy when it lists no
+        # parameters, which is normal for an adaptive strategy that brings its own
+        # (e.g. SbiStrategy's prior).
+        strategy = self.config.sweep.strategy if self.config.sweep is not None else None
 
         if strategy is not None and strategy.is_adaptive:
             # Use adaptive runner
@@ -2352,7 +2355,9 @@ class SweepManagerBuilder:
             self._owns_cli = True
 
         # Check if strategy is adaptive
-        strategy = self._config.sweep.strategy if self._config.sweep else None
+        strategy = (
+            self._config.sweep.strategy if self._config.sweep is not None else None
+        )
         is_adaptive = strategy is not None and strategy.is_adaptive
 
         if is_adaptive:
