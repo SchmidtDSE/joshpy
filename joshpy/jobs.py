@@ -1246,12 +1246,19 @@ class JobExpander:
         output_dir: Path | None = None,
         *,
         cli: JoshCLI | None = None,
+        combinations: list[dict[str, Any]] | None = None,
     ) -> JobSet:
         """Expand a JobConfig into a JobSet with one ExpandedJob per parameter combo.
 
         Args:
             config: The job configuration to expand.
             output_dir: Directory to write configs to (uses temp dir if None).
+            combinations: Explicit parameter rows to expand instead of
+                ``config.sweep``. Each row has the same shape ``SweepConfig.expand()``
+                yields (config params as values, file params as
+                ``{"path", "label"}`` dicts). Adaptive strategies use this to
+                expand the parameter sets they propose through the same
+                rendering and hashing as every other sweep.
             cli: Optional JoshCLI used to auto-discover the model's ``import``
                 closure via ``inspect-imports``. When provided *and*
                 ``config.import_files`` is empty, the closure is discovered
@@ -1387,7 +1394,9 @@ class JobExpander:
             raw_config_content = ""
 
         # Get parameter combinations
-        if config.sweep:
+        if combinations is not None:
+            combinations = list(combinations)
+        elif config.sweep:
             combinations = config.sweep.expand()
         else:
             combinations = [{}]
@@ -1738,6 +1747,10 @@ class AdaptiveSweepResult:
         job_results: List of (ExpandedJob, CLIResult) tuples.
         succeeded: Number of successful trials.
         failed: Number of failed trials.
+        run_ids: Mapping of run_hash to the run_id of its latest execution,
+            so ``SweepManager.load_results()`` works after an adaptive run.
+        job_set: The jobs the strategy evaluated (one per distinct run_hash),
+            owning the work directory their configs were written to.
         study: The Optuna study object (for advanced analysis).
         best_params: Parameters that achieved the best objective value.
         best_value: Best objective value found.
@@ -1759,6 +1772,8 @@ class AdaptiveSweepResult:
     job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
     succeeded: int = 0
     failed: int = 0
+    run_ids: dict[str, str] = field(default_factory=dict)
+    job_set: JobSet = field(default_factory=JobSet)
 
     # Optuna-specific fields
     study: Any = None  # optuna.Study

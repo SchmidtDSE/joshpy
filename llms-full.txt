@@ -65,7 +65,7 @@ joshpy/
 
 **Requires joshpy[jobs]:**
 - `jobs.py`: `ConfigSweepParameter`, `FileSweepParameter`, `CompoundSweepParameter`, `SweepConfig`, `JobConfig`, `ExpandedJob`, `JobSet`, `JobExpander`, `SweepResult`, `AdaptiveSweepResult`, `SingleRunResult`, `to_run_config`, `to_run_remote_config`, `run_sweep`, `run_single`, `discover_jshd_files`, `discover_import_files`
-- `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `SweepExecutionError`, `cv_objective`
+- `strategies.py`: `SweepStrategy`, `CartesianStrategy`, `OptunaStrategy`, `ObjectiveFn`, `strategy_from_dict`, `sample_params_from_trial`, `run_adaptive_sweep`, `AdaptiveContext`, `BatchResult`, `SweepExecutionError`, `cv_objective`
 - `grid.py`: `GridSpec`
 
 **Requires joshpy[registry]:**
@@ -1257,6 +1257,63 @@ optuna.visualization.plot_optimization_history(study)
 | No learning between runs | Each trial informs the next |
 | Good for small spaces, sensitivity analysis | Good for large spaces, optimization |
 | Use with `JobExpander.expand()` | Use with `SweepManager.run(objective=...)` |
+
+After an adaptive `manager.run()`, `manager.job_set` holds the evaluated jobs
+(one per run_hash), so `manager.load_results()`, `manager.ingest()` and
+`manager.cleanup()` work as for a batch sweep.
+
+### Writing an Adaptive Strategy
+
+An adaptive strategy owns its search loop; joshpy owns running the
+simulations. `run_adaptive_sweep()` (called by `SweepManager.run()`) builds an
+`AdaptiveContext` and calls `strategy.run_adaptive(ctx)`. The strategy proposes
+parameter rows and calls `ctx.evaluate(rows, score=...)` per batch, which
+expands them through `JobExpander` (same rendering and run hashing as a batch
+sweep), registers every job, runs them through `run_sweep()` in the chosen mode
+(local, `remote=True`, or `batch_remote=True`), loads results into the registry
+and scores them. `OptunaStrategy` is a batch of one per trial.
+
+```python
+from joshpy.jobs import AdaptiveSweepResult
+from joshpy.strategies import SweepStrategy
+
+class TwoRoundStrategy(SweepStrategy):
+    @property
+    def is_adaptive(self):
+        return True
+
+    def expand(self, config_params, file_params, compound_params=None):
+        raise RuntimeError("adaptive")
+
+    def run_adaptive(self, ctx):
+        first = ctx.evaluate([{"x": 1.0}, {"x": 2.0}], score=my_objective)
+        best = min(range(len(first)), key=lambda i: first.values[i])
+        ctx.evaluate([{"x": first.params[best]["x"] * 1.1}], score=my_objective)
+        return AdaptiveSweepResult(
+            job_results=ctx.job_results, succeeded=ctx.succeeded, failed=ctx.failed,
+            run_ids=ctx.run_ids, job_set=ctx.job_set(),
+        )
+
+    def to_dict(self):
+        return {"type": "two_round"}
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls()
+```
+
+`BatchResult` fields are aligned with the requested rows: `jobs`, `results`
+(CLIResult), `values` (score, or None on failure), `rows_loaded`, `errors`
+(load/score failures by row) and `failures` (row indices). Rows with identical
+parameters share a run_hash and run once. `ctx.evaluate(..., attributes={...})`
+records extra run attributes on the batch's jobs. With `stop_on_failure=True`
+a failed run raises `SweepExecutionError` after its batch has finished and the
+successful runs have been loaded.
+
+Config namespace: adaptive sweeps default the rendered config's name to the
+template file's stem (`adaptive_config.jshc.j2` -> `config adaptive_config.*`);
+batch sweeps default to `sweep_config`. Set `JobConfig.config_name` to choose
+explicitly on either path.
 
 ---
 

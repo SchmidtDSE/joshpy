@@ -1384,6 +1384,88 @@ def ingest_results(
             Path(temp_josh).unlink(missing_ok=True)
 
 
+def registry_file_mappings(
+    file_mappings: dict[str, Path],
+) -> dict[str, dict[str, str]] | None:
+    """Convert file_mappings from {name: Path} to the registry's {name: {path, hash}}.
+
+    The registry stores file_mappings with both path and hash for each file,
+    which allows verification and audit trailing.
+
+    Args:
+        file_mappings: Dict mapping names to Path objects.
+
+    Returns:
+        Dict in registry format, or None if no mappings.
+    """
+    if not file_mappings:
+        return None
+
+    from joshpy.jobs import _hash_file
+
+    result = {}
+    for name, path in file_mappings.items():
+        path = Path(path)
+        result[name] = {
+            "path": str(path),
+            "hash": _hash_file(path) if path.exists() else "",
+        }
+    return result
+
+
+def register_job(registry: RunRegistry, session_id: str, job: ExpandedJob) -> None:
+    """Register one expanded job's configuration and declared attributes.
+
+    Idempotent: re-registering a known run_hash links it to *session_id* and
+    leaves the stored config untouched. Shared by ``SweepManagerBuilder.build()``
+    (batch sweeps register up front) and adaptive strategies (which register
+    each batch as it is proposed).
+
+    Args:
+        registry: Registry to record the job in.
+        session_id: Session the job belongs to.
+        job: The expanded job.
+    """
+    josh_content = None
+    if job.source_path and job.source_path.exists():
+        josh_content = job.source_path.read_text()
+
+    registry.register_run(
+        session_id=session_id,
+        run_hash=job.run_hash,
+        josh_path=str(job.source_path) if job.source_path else "",
+        config_content=job.config_content,
+        file_mappings=registry_file_mappings(job.file_mappings),
+        parameters=job.parameters,
+        josh_content=josh_content,
+    )
+
+    # Forward JobConfig-declared attributes (what this job is trying to
+    # accomplish) as run-level attributes, so coverage matches without a
+    # post-run tagging step.
+    if job.attributes:
+        registry.set_attributes(job.run_hash, **job.attributes)
+
+
+def apply_sweep_labels(jobs: list[ExpandedJob], base: str | None) -> None:
+    """Give each job of a multi-job sweep a unique ``{label}`` custom tag.
+
+    A multi-job sweep cannot share one registry label across N runs (labels
+    are unique), so each job gets ``"<base>_<run_hash>"`` — *base* is the
+    supplied label, or ``"sweep"`` when none was given. This guarantees an
+    export path containing ``{label}`` resolves and stays collision-free.
+
+    Args:
+        jobs: Jobs to label in place.
+        base: Label prefix, or None for ``"sweep"``.
+    """
+    prefix = base or "sweep"
+    for job in jobs:
+        job_label = f"{prefix}_{job.run_hash}"
+        job.label = job_label
+        job.custom_tags["label"] = job_label
+
+
 @dataclass
 class SweepManager:
     """Convenience orchestrator for parameter sweeps.
@@ -1525,8 +1607,10 @@ class SweepManager:
         Automatically detects adaptive vs batch strategy and dispatches
         to the appropriate runner. Runs are automatically recorded in the registry.
 
-        For adaptive strategies (OptunaStrategy), uses run_adaptive_sweep()
-        which generates jobs on-demand based on Optuna's suggestions.
+        For adaptive strategies (e.g. OptunaStrategy), uses run_adaptive_sweep():
+        the strategy runs its own loop and joshpy creates, runs and loads jobs
+        on demand. Afterwards ``job_set`` holds the evaluated jobs, so
+        load_results(), ingest() and cleanup() work as for a batch sweep.
 
         For non-adaptive strategies (CartesianStrategy), uses run_sweep()
         which executes all pre-expanded jobs.
@@ -1651,7 +1735,7 @@ class SweepManager:
                     print("  Dry run - no jobs will be executed")
                 return SweepResult()
 
-            return run_adaptive_sweep(
+            adaptive_result = run_adaptive_sweep(
                 cli=self.cli,
                 config=self.config,
                 registry=self.registry,
@@ -1666,12 +1750,23 @@ class SweepManager:
                 poll_interval=poll_interval,
                 batch_timeout=batch_timeout,
                 auto_ingest=auto_ingest,
+                collision_policy=collision_policy,
+                on_complete=on_complete,
                 quiet=quiet,
                 stop_on_failure=stop_on_failure,
                 jfr=jfr,
                 enable_profiler=enable_profiler,
                 stream_output=stream_output,
             )
+
+            # Adaptive strategies create their jobs at run time; adopt them so
+            # load_results(), ingest() and cleanup() see what was evaluated.
+            evaluated = getattr(adaptive_result, "job_set", None)
+            if evaluated is not None and evaluated.jobs:
+                self.job_set.cleanup()
+                self.job_set = evaluated
+            self._last_run_ids = dict(getattr(adaptive_result, "run_ids", {}) or {})
+            return adaptive_result
         else:
             # Use batch runner
             result = run_sweep(
@@ -1783,6 +1878,12 @@ class SweepManager:
             >>> manager.ingest(download=True, output_dir=Path("./local"))
         """
         label = self._label if hasattr(self, "_label") and self._label else None
+        if label is None and not self.job_set.jobs:
+            raise RuntimeError(
+                "No jobs to ingest. Adaptive strategies create their jobs at run "
+                "time: call run() first, or use ingest_results() with an explicit "
+                "label or run_hash."
+            )
         identifier = label or self.job_set.jobs[0].run_hash
         return ingest_results(
             cli=self.cli,
@@ -2279,25 +2380,7 @@ class SweepManagerBuilder:
                 )
                 # Register runs
                 for job in job_set:
-                    josh_content = None
-                    if job.source_path and job.source_path.exists():
-                        josh_content = job.source_path.read_text()
-
-                    self._registry.register_run(
-                        session_id=session_id,
-                        run_hash=job.run_hash,
-                        josh_path=str(job.source_path) if job.source_path else "",
-                        config_content=job.config_content,
-                        file_mappings=self._convert_file_mappings(job.file_mappings),
-                        parameters=job.parameters,
-                        josh_content=josh_content,
-                    )
-
-                    # Forward JobConfig-declared attributes (what this job is
-                    # trying to accomplish) as run-level attributes, so coverage
-                    # matches without a post-run tagging step.
-                    if job.attributes:
-                        self._registry.set_attributes(job.run_hash, **job.attributes)
+                    register_job(self._registry, session_id, job)
 
                 # Inject a label as a --custom-tag so export paths containing
                 # {label} always resolve (with_label() takes precedence over
@@ -2329,11 +2412,7 @@ class SweepManagerBuilder:
                         job.label = effective_label
                         job.custom_tags["label"] = effective_label
                 else:
-                    base = effective_label or "sweep"
-                    for job in job_set.jobs:
-                        job_label = f"{base}_{job.run_hash}"
-                        job.label = job_label
-                        job.custom_tags["label"] = job_label
+                    apply_sweep_labels(job_set.jobs, effective_label)
 
         # Register with catalog if configured
         experiment_id = None
@@ -2363,34 +2442,6 @@ class SweepManagerBuilder:
             _batch_auto_ingest=self._batch_auto_ingest,
             _collision_policy=self._collision_policy,
         )
-
-    def _convert_file_mappings(
-        self,
-        file_mappings: dict[str, Path],
-    ) -> dict[str, dict[str, str]] | None:
-        """Convert file_mappings from {name: Path} to {name: {path, hash}} format.
-
-        The registry stores file_mappings with both path and hash for each file.
-        This allows verification and audit trailing.
-
-        Args:
-            file_mappings: Dict mapping names to Path objects.
-
-        Returns:
-            Dict in registry format, or None if no mappings.
-        """
-        if not file_mappings:
-            return None
-
-        from joshpy.jobs import _hash_file
-
-        result = {}
-        for name, path in file_mappings.items():
-            result[name] = {
-                "path": str(path),
-                "hash": _hash_file(path) if path.exists() else "",
-            }
-        return result
 
     def _verify_hashes(self, job_set: JobSet, session_id: str) -> None:
         """Verify expanded job hashes match registered runs.
