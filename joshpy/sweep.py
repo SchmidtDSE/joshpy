@@ -1601,6 +1601,7 @@ class SweepManager:
         bottle_omit_jshd: bool = False,
         force: bool = False,
         collision_policy: str | Any = _UNSET,
+        reuse_runs: bool = True,
     ) -> SweepResult:
         """Execute all jobs in the sweep.
 
@@ -1757,6 +1758,7 @@ class SweepManager:
                 jfr=jfr,
                 enable_profiler=enable_profiler,
                 stream_output=stream_output,
+                reuse_runs=reuse_runs,
             )
 
             # Adaptive strategies create their jobs at run time; adopt them so

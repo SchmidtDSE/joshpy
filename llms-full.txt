@@ -1181,6 +1181,7 @@ OptunaStrategy(
     direction="minimize",  # "minimize" or "maximize"
     sampler="tpe",         # "tpe", "cmaes", or "random"
     objective=None,        # Objective function or "module:function" string
+    seed=None,             # Sampler seed: a rerun proposes the same trials (resumable)
 )
 ```
 
@@ -1309,6 +1310,16 @@ parameters share a run_hash and run once. `ctx.evaluate(..., attributes={...})`
 records extra run attributes on the batch's jobs. With `stop_on_failure=True`
 a failed run raises `SweepExecutionError` after its batch has finished and the
 successful runs have been loaded.
+
+Resuming: the registry is the run store. Before running a batch,
+`ctx.evaluate` reuses any run_hash whose latest run completed and is loaded
+(loading it first if it completed but was never loaded), reattaches to a
+submitted no-wait batch job instead of re-dispatching it, and runs the rest.
+`BatchResult.sources` says which happened per row (`"ran"`, `"reused"`,
+`"reattached"`). Failed, `bad` or superseded runs are run again. So rerunning an
+interrupted adaptive sweep against the same registry resumes it; with a seeded
+strategy (`OptunaStrategy(seed=...)`) the proposals replay exactly. Pass
+`reuse_runs=False` to `SweepManager.run()` to always run.
 
 Config namespace: adaptive sweeps default the rendered config's name to the
 template file's stem (`adaptive_config.jshc.j2` -> `config adaptive_config.*`);
@@ -1867,6 +1878,14 @@ manager.run(batch_no_wait=True)   # dispatches; exits without waiting
 # ... later, possibly a different machine:
 manager.ingest()                  # polls status, loads completed CSVs
 ```
+
+With `batch_no_wait=True`, each job's registry run is recorded as *submitted*
+at dispatch (`job_runs.metadata` carries `batch_job_id` and `target`; `exit_code`
+stays NULL) and completed with the poll outcome, so a job that fails on the
+cluster is recorded as failed, not as a success. Outputs are registered (and,
+with `auto_ingest`, ingested) and `on_complete` is called as each job finishes.
+A job still running when `batch_timeout` passes stays submitted; an adaptive
+sweep rerun against the same registry reattaches to it.
 
 ---
 

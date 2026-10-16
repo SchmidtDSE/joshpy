@@ -828,6 +828,165 @@ class TestAdaptiveContextEvaluate(_AdaptiveContextCase):
         self.cli.run.assert_not_called()
 
 
+class TestAdaptiveContextResume(_AdaptiveContextCase):
+    """The registry is the run store: completed runs are reused, submitted
+    no-wait jobs reattached, everything else run."""
+
+    def loading_writes_cell_data(self, fail_first=0):
+        """Patch loading with an idempotent fake that writes one row per replicate."""
+        calls = {"n": 0}
+
+        def load(cli, job, registry, export_paths, *, run_id, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= fail_first:
+                raise RuntimeError("csv not there yet")
+            loaded = registry.loaded_replicates(job.run_hash)
+            rows = 0
+            for rep in range(job.replicates):
+                if rep not in loaded:
+                    registry.conn.execute(
+                        "INSERT INTO cell_data (run_id, run_hash, step, replicate) "
+                        "VALUES (?, ?, 0, ?)",
+                        [run_id, job.run_hash, rep],
+                    )
+                    rows += 1
+            return rows
+
+        return self.patch_loading(side_effect=load)
+
+    @staticmethod
+    def score(registry, run_hash, job):
+        return job.parameters["x"] * 10
+
+    def test_completed_run_is_reused(self):
+        self.loading_writes_cell_data()
+        ctx = self.make_context()
+        first = ctx.evaluate([{"x": 1}], score=self.score)
+        second = ctx.evaluate([{"x": 1}, {"x": 2}], score=self.score)
+
+        self.assertEqual(first.sources, ["ran"])
+        self.assertEqual(second.sources, ["reused", "ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+        self.assertEqual(second.values, [10, 20])
+        self.assertEqual(second.rows_loaded, [0, 1])
+        self.assertEqual(second.run_ids[first.run_hashes[0]], first.run_ids[first.run_hashes[0]])
+
+    def test_reused_after_restart_in_new_session(self):
+        self.loading_writes_cell_data()
+        self.make_context().evaluate([{"x": 1}])
+        batch = self.make_context().evaluate([{"x": 1}], score=self.score)
+        self.assertEqual(batch.sources, ["reused"])
+        self.assertEqual(self.cli.run.call_count, 1)
+        self.assertEqual(batch.values, [10])
+
+    def test_completed_but_unloaded_run_is_loaded_not_rerun(self):
+        self.loading_writes_cell_data(fail_first=1)
+        ctx = self.make_context()
+        first = ctx.evaluate([{"x": 1}], score=self.score)
+        self.assertIn(0, first.errors)  # loading failed the first time
+
+        second = ctx.evaluate([{"x": 1}], score=self.score)
+        self.assertEqual(second.sources, ["reused"])
+        self.assertEqual(self.cli.run.call_count, 1)
+        self.assertEqual(second.values, [10])
+
+    def test_failed_run_is_rerun(self):
+        self.loading_writes_cell_data()
+        self.cli.run.side_effect = [_cli_result(exit_code=1, stderr="boom"), _cli_result()]
+        ctx = self.make_context()
+        ctx.evaluate([{"x": 1}])
+        batch = ctx.evaluate([{"x": 1}])
+        self.assertEqual(batch.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+
+    def test_bad_run_is_rerun(self):
+        self.loading_writes_cell_data()
+        ctx = self.make_context()
+        first = ctx.evaluate([{"x": 1}])
+        self.registry.mark_run(first.run_hashes[0], "bad", reason="wrong inputs")
+        batch = ctx.evaluate([{"x": 1}])
+        self.assertEqual(batch.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+
+    def test_reuse_can_be_disabled(self):
+        self.loading_writes_cell_data()
+        ctx = self.make_context(reuse_runs=False)
+        ctx.evaluate([{"x": 1}])
+        batch = ctx.evaluate([{"x": 1}])
+        self.assertEqual(batch.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+
+    def test_submitted_job_is_reattached(self):
+        from unittest.mock import MagicMock
+
+        from joshpy.jobs import JobExpander
+        from joshpy.registry import RegistryCallback
+        from joshpy.sweep import register_job
+
+        self.loading_writes_cell_data()
+        self.cli.inspect_exports.return_value = MagicMock(export_files={}, debug_files={})
+        self.cli.poll_batch.return_value = _cli_result()
+        ctx = self.make_context(batch_remote=True, target="gke-test", poll_interval=0)
+
+        # A no-wait dispatch from an earlier (crashed) process.
+        job = JobExpander().expand(
+            ctx._config_for_expansion(), output_dir=ctx.work_dir, combinations=[{"x": 1}]
+        ).jobs[0]
+        register_job(self.registry, ctx.session_id, job)
+        submitted_run = RegistryCallback(self.registry, ctx.session_id).record_dispatch(
+            job, batch_job_id="job-9", target="gke-test"
+        )
+
+        batch = ctx.evaluate([{"x": 1}], score=self.score)
+
+        self.assertEqual(batch.sources, ["reattached"])
+        self.assertEqual(batch.values, [10])
+        self.cli.batch_remote.assert_not_called()
+        self.cli.stage_to_minio.assert_not_called()
+        self.assertEqual(self.cli.poll_batch.call_args.args[0].job_id, "job-9")
+        run = self.registry.get_run(submitted_run)
+        self.assertEqual(run.exit_code, 0)
+        self.assertIsNotNone(run.completed_at)
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_seeded_optuna_rerun_reuses_completed_trials(self):
+        """A seeded study replays its proposals; completed trials are not rerun."""
+        from joshpy.jobs import JobConfig, SweepConfig
+        from joshpy.strategies import run_adaptive_sweep
+
+        self.loading_writes_cell_data()
+
+        def run(n_trials):
+            config = JobConfig(
+                template_string="maxGrowth = {{ x }} meters",
+                source_path=self.josh_path,
+                sweep=SweepConfig(
+                    config_parameters=[
+                        ConfigSweepParameter(name="x", values=list(range(1, 50)))
+                    ],
+                    strategy=OptunaStrategy(n_trials=n_trials, seed=11),
+                ),
+            )
+            session_id = self.registry.create_session(config=config)
+            result = run_adaptive_sweep(
+                self.cli, config, registry=self.registry, session_id=session_id,
+                objective=self.score, quiet=True,
+            )
+            result.job_set.cleanup()
+            return result
+
+        interrupted = run(4)
+        runs_before = self.cli.run.call_count
+        resumed = run(6)
+
+        first_params = [t.params for t in interrupted.study.trials]
+        self.assertEqual([t.params for t in resumed.study.trials[:4]], first_params)
+        new_hashes = {
+            job.run_hash for job, _ in resumed.job_results[4:]
+        } - {job.run_hash for job, _ in interrupted.job_results}
+        self.assertEqual(self.cli.run.call_count - runs_before, len(new_hashes))
+
+
 class _RecordingStrategy(SweepStrategy):
     """Minimal adaptive strategy: evaluates fixed batches, returns the context."""
 

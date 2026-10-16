@@ -4651,12 +4651,58 @@ class RegistryCallback:
             },
         )
 
-        # Complete the run with the result
+        self.record_completion(run_id, result)
+        return run_id
+
+    def record_dispatch(self, job: Any, *, batch_job_id: str, target: str | None) -> str:
+        """Record a no-wait batch dispatch as a submitted, not yet completed, run.
+
+        The run has no exit code until :meth:`record_completion` is called with
+        the poll outcome. Its metadata carries ``batch_job_id`` and ``target``
+        so a later process can reattach to the job (poll it) instead of
+        dispatching it again.
+
+        Args:
+            job: ExpandedJob that was dispatched.
+            batch_job_id: The job id ``batchRemote --no-wait`` returned.
+            target: Target profile the job was dispatched to.
+
+        Returns:
+            The run_id for the submitted run.
+        """
+        from joshpy.jobs import ExpandedJob
+
+        if not isinstance(job, ExpandedJob):
+            raise TypeError(f"Expected ExpandedJob, got {type(job)}")
+
+        return self.registry.start_run(
+            run_hash=job.run_hash,
+            session_id=self.session_id,
+            replicate=0,
+            output_path=str(job.config_path.parent) if job.config_path else None,
+            metadata={
+                "parameters": job.parameters,
+                "replicates": job.replicates,
+                "batch_job_id": batch_job_id,
+                "target": target,
+            },
+        )
+
+    def record_completion(self, run_id: str, result: Any) -> None:
+        """Complete a recorded run with its CLI result.
+
+        Args:
+            run_id: The run to complete (from :meth:`record_dispatch`).
+            result: CLIResult of the run (for no-wait jobs, the poll result).
+        """
+        from joshpy.cli import CLIResult
+
+        if not isinstance(result, CLIResult):
+            raise TypeError(f"Expected CLIResult, got {type(result)}")
+
         error_msg = result.stderr if not result.success else None
         self.registry.complete_run(
             run_id=run_id,
             exit_code=result.exit_code,
             error_message=error_msg,
         )
-
-        return run_id
