@@ -21,6 +21,7 @@ project:
     - tutorials/complete-example.qmd       # Depends on preprocessing output
     - tutorials/timestep-interventions.qmd  # Single-time external data patterns
     - tutorials/adaptive-sweep.qmd
+    - tutorials/sbi-abc.qmd              # SbiStrategy known-truth ABC (needs joshpy[sbi]; frozen)
     - tutorials/spinup-spindown.qmd      # Spin-up / spin-down phases + output_phases
     - tutorials/bottling-runs.qmd        # Reproducibility archives
     - tutorials/debug-inspection.qmd     # Debug output inspection
@@ -80,6 +81,8 @@ website:
           - text: "Advanced"
           - text: "Adaptive Sweeps"
             href: tutorials/adaptive-sweep.qmd
+          - text: "Simulation-Based Inference"
+            href: tutorials/sbi-abc.qmd
           - text: "Spin-up / Spin-down"
             href: tutorials/spinup-spindown.qmd
           - text: "Low-Level Components"
@@ -145,6 +148,7 @@ website:
         - section: "Advanced"
           contents:
             - tutorials/adaptive-sweep.qmd
+            - tutorials/sbi-abc.qmd
             - tutorials/spinup-spindown.qmd
             - tutorials/low-level-components.qmd
             - tutorials/switching-versions.qmd
