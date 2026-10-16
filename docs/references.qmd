@@ -1,0 +1,54 @@
+---
+title: "References"
+description: "Works the joshpy documentation draws on, grouped by tutorial"
+---
+
+joshpy implements no statistics of its own. Optimization and inference come from
+established packages maintained by others, and the tutorials describe them in
+the terms of the papers below. Each tutorial lists the works it cites at the end
+of its page. This page collects them, grouped by tutorial.
+
+::: {.callout-tip collapse="true"}
+## Adding a reference
+
+Add the BibTeX entry to `docs/references.bib`, cite it in a page with `[@key]`,
+and list it below under that page's heading. Quarto formats the citation and
+adds the entry to the page's own reference list.
+:::
+
+## Simulation-Based Inference with ABC
+
+[Tutorial](tutorials/sbi-abc.qmd)
+
+- @hartig2011: the framework the tutorial follows for stochastic ecological
+  simulation models: aggregation into summary statistics, likelihood
+  approximation, and sampling.
+- @cranmer2020: the wider field of simulation-based inference, including
+  amortized neural estimators and calibrating an inference procedure.
+- @toni2009 and @beaumont2009: sequential Monte Carlo ABC and its importance
+  weights, as implemented in sbi.
+- @boelts2025: the sbi package that `SbiStrategy` runs.
+- @beaumont2002: scaling summary statistics, and regression adjustment of
+  accepted parameters.
+- @wood2010: synthetic likelihood, a parametric likelihood approximation.
+- @wilkinson2013: the tolerance read as an explicit model-error term.
+- @grimm2005: pattern-oriented modelling, whose patterns are summary statistics.
+- @beven2006: equifinality.
+- @talts2018: simulation-based calibration.
+- @csillery2012: leave-one-out cross-validation of rejection ABC on a stored set
+  of simulations.
+- @malchow2024: comparing prior and posterior to show what fitting an
+  individual-based model learned from monitoring data.
+
+## Adaptive Parameter Optimization
+
+[Tutorial](tutorials/adaptive-sweep.qmd)
+
+- @akiba2019: Optuna, the framework behind `OptunaStrategy`.
+- @bergstra2011: the tree-structured Parzen estimator (TPE), the sampler the
+  tutorial uses.
+
+## Bibliography
+
+::: {#refs}
+:::

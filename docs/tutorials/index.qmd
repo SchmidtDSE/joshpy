@@ -180,16 +180,18 @@ Best for: Finding optimal parameters without exhaustive grid search.
 
 ### [Simulation-Based Inference with ABC](sbi-abc.qmd)
 
-Find every parameter set consistent with observed data, not just the best one:
+Estimate the distribution of parameter values consistent with observed data,
+not just the best one:
 
 - `SbiStrategy`: sequential Monte Carlo ABC from the sbi package, with joshpy
   running and recording each simulation
-- A known-truth recovery test, and what happens when one summary statistic
-  can't separate the parameters
-- Resuming an interrupted search from the registry
+- A known-truth recovery test: summary statistics, the tolerance, and testing
+  sufficiency when one statistic can't separate the parameters
+- Resuming an interrupted search, and checking interval coverage from stored
+  simulations
 
-Best for: Calibration with uncertainty, and checking which parameters your data
-can actually identify.
+Best for: Parameter estimation with uncertainty, and checking which parameters
+your data can actually identify.
 
 ### [Spin-up / Spin-down](spinup-spindown.qmd)
 
