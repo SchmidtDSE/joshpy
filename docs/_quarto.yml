@@ -203,6 +203,8 @@ website:
             - reference/strategies.OptunaStrategy.qmd
             - reference/strategies.strategy_from_dict.qmd
             - reference/strategies.run_adaptive_sweep.qmd
+            - reference/strategies.AdaptiveContext.qmd
+            - reference/strategies.BatchResult.qmd
             - reference/strategies.sample_params_from_trial.qmd
         - section: "Registry"
           contents:
@@ -310,6 +312,8 @@ quartodoc:
         - strategies.OptunaStrategy
         - strategies.strategy_from_dict
         - strategies.run_adaptive_sweep
+        - strategies.AdaptiveContext
+        - strategies.BatchResult
         - strategies.sample_params_from_trial
     
     - title: Registry Module
