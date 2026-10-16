@@ -641,6 +641,9 @@ class OptunaStrategy(SweepStrategy):
         direction: Optimization direction ("minimize" or "maximize").
         sampler: Sampling algorithm ("tpe", "gp", "cmaes", "random").
         objective: Objective function (callable or "module:function" path).
+        seed: Optional sampler seed. A seeded study proposes the same trials
+            given the same results, so rerunning an interrupted sweep against
+            the same registry reuses its completed runs.
 
     Examples:
         >>> # Define objective function
@@ -666,6 +669,7 @@ class OptunaStrategy(SweepStrategy):
     direction: str = "minimize"  # "minimize" or "maximize"
     sampler: str = "tpe"  # "tpe", "gp", "cmaes", "random"
     objective: ObjectiveFn | str | None = None
+    seed: int | None = None  # sampler seed; with stored results, replays reach the same state
 
     # Resolved objective (populated during validation or get_objective)
     _objective_fn: ObjectiveFn | None = field(default=None, repr=False, compare=False)
@@ -762,28 +766,29 @@ class OptunaStrategy(SweepStrategy):
         _check_optuna()
         import optuna
 
+        seed = self.seed
         if self.sampler == "tpe":
-            return optuna.samplers.TPESampler()
+            return optuna.samplers.TPESampler(seed=seed)
         elif self.sampler == "gp":
             # GP sampler requires optuna-integration or specific setup
             # Fall back to TPE with a warning
             try:
                 from optuna_integration import BoTorchSampler
 
-                return BoTorchSampler()
+                return BoTorchSampler(seed=seed)
             except ImportError:
                 import warnings
 
                 warnings.warn(
                     "GP sampler requires optuna-integration[botorch]. Falling back to TPE."
                 )
-                return optuna.samplers.TPESampler()
+                return optuna.samplers.TPESampler(seed=seed)
         elif self.sampler == "cmaes":
-            return optuna.samplers.CmaEsSampler()
+            return optuna.samplers.CmaEsSampler(seed=seed)
         elif self.sampler == "random":
-            return optuna.samplers.RandomSampler()
+            return optuna.samplers.RandomSampler(seed=seed)
         else:
-            return optuna.samplers.TPESampler()
+            return optuna.samplers.TPESampler(seed=seed)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization.
@@ -796,6 +801,8 @@ class OptunaStrategy(SweepStrategy):
             "direction": self.direction,
             "sampler": self.sampler,
         }
+        if self.seed is not None:
+            result["seed"] = self.seed
 
         # Only serialize objective if it's a string path
         if isinstance(self.objective, str):
@@ -816,6 +823,7 @@ class OptunaStrategy(SweepStrategy):
             direction=data.get("direction", "minimize"),
             sampler=data.get("sampler", "tpe"),
             objective=data.get("objective"),
+            seed=data.get("seed"),
         )
 
     def run_adaptive(self, ctx: AdaptiveContext) -> Any:
@@ -983,7 +991,11 @@ class BatchResult:
         rows_loaded: Rows loaded into ``cell_data`` for each row's job.
         errors: Row index -> message for rows whose run succeeded but whose
             results could not be loaded or scored.
-        run_ids: run_hash -> run_id of this batch's execution of that job.
+        run_ids: run_hash -> run_id of the run each job's results come from.
+        sources: Per row, where its result came from: ``"ran"`` (dispatched
+            in this batch), ``"reused"`` (an earlier completed, loaded run of
+            the same run_hash) or ``"reattached"`` (an earlier no-wait batch
+            job polled to completion).
 
     Examples:
         >>> batch = ctx.evaluate([{"x": 1.0}, {"x": 2.0}], score=my_objective)
@@ -999,6 +1011,7 @@ class BatchResult:
     rows_loaded: list[int] = field(default_factory=list)
     errors: dict[int, str] = field(default_factory=dict)
     run_ids: dict[str, str] = field(default_factory=dict)
+    sources: list[str] = field(default_factory=list)
 
     @property
     def run_hashes(self) -> list[str]:
@@ -1047,7 +1060,11 @@ class AdaptiveContext:
     score them.
 
     Every evaluated job is registered and recorded, whether or not the
-    strategy later uses its result.
+    strategy later uses its result. The registry doubles as the run store:
+    with ``reuse_runs`` (default), a run_hash that already completed and was
+    loaded is reused rather than run again, and a submitted no-wait batch job
+    is polled rather than re-dispatched, so an interrupted sweep resumes
+    from its last finished simulation.
 
     Attributes:
         cli: JoshCLI used for execution.
@@ -1084,6 +1101,7 @@ class AdaptiveContext:
     jfr: Any | None = None  # JfrConfig
     enable_profiler: bool = False
     stream_output: bool = False
+    reuse_runs: bool = True
 
     job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
     run_ids: dict[str, str] = field(default_factory=dict)
@@ -1163,49 +1181,93 @@ class AdaptiveContext:
         for job in batch_jobs:
             register_job(self.registry, self.session_id, job)
 
-        show_progress = not self.quiet and len(batch_jobs) > 1
-        done = 0
-
-        def _progress(job: ExpandedJob, result: Any) -> None:
-            nonlocal done
-            done += 1
-            if show_progress:
-                status = "OK  " if result.success else "FAIL"
-                print(f"  [{done}/{len(batch_jobs)}] {status} {job.run_hash}")
-            if self.on_complete is not None:
-                self.on_complete(job, result)
-
-        if show_progress:
-            print(f"Evaluating {len(batch_jobs)} parameter sets")
-
         evaluated_before = self.succeeded + self.failed
         succeeded_before = self.succeeded
-        sweep_result = run_sweep(
-            self.cli,
-            JobSet(jobs=batch_jobs),
-            registry=self.registry,
-            session_id=self.session_id,
-            manage_status=False,
-            remote=self.remote,
-            api_key=self.api_key,
-            endpoint=self.endpoint,
-            batch_remote=self.batch_remote,
-            target=self.target,
-            batch_no_wait=self.batch_no_wait,
-            poll_interval=self.poll_interval,
-            batch_timeout=self.batch_timeout,
-            # Loaded explicitly below in every mode, not just batch remote.
-            auto_ingest=False,
-            collision_policy=self.collision_policy,
-            on_complete=_progress,
-            stop_on_failure=False,
-            quiet=True,
-            jfr=self.jfr,
-            enable_profiler=self.enable_profiler,
-            stream_output=self.stream_output,
-        )
+        load_config = self.load_config or LoadConfig()
 
-        result_by_hash = {job.run_hash: result for job, result in sweep_result.job_results}
+        # The registry is the run store: reuse runs that already completed and
+        # loaded, reattach to submitted no-wait jobs, and run only the rest.
+        # A crashed or interrupted run therefore resumes from its last
+        # finished simulation.
+        result_by_hash: dict[str, Any] = {}
+        run_id_by_hash: dict[str, str] = {}
+        source_by_hash: dict[str, str] = {}
+        to_attach: list[tuple[ExpandedJob, Any]] = []
+        to_run: list[ExpandedJob] = []
+        for job in batch_jobs:
+            state, prior = (
+                self._prior_run(job, load_config) if self.reuse_runs else ("new", None)
+            )
+            if state == "done":
+                assert prior is not None
+                result_by_hash[job.run_hash] = CLIResult(
+                    exit_code=0, stdout="", stderr="", command=["reuse", prior.run_id]
+                )
+                run_id_by_hash[job.run_hash] = prior.run_id
+                source_by_hash[job.run_hash] = "reused"
+            elif state == "submitted":
+                to_attach.append((job, prior))
+            else:
+                to_run.append(job)
+
+        n_reused = len(batch_jobs) - len(to_attach) - len(to_run)
+        if not self.quiet and (n_reused or to_attach):
+            print(
+                f"  Reusing {n_reused} completed run(s), reattaching to "
+                f"{len(to_attach)}, running {len(to_run)}"
+            )
+
+        if to_attach:
+            for run_hash, (run_id, result) in self._reattach(to_attach).items():
+                result_by_hash[run_hash] = result
+                run_id_by_hash[run_hash] = run_id
+                source_by_hash[run_hash] = "reattached"
+
+        if to_run:
+            show_progress = not self.quiet and len(to_run) > 1
+            done = 0
+
+            def _progress(job: ExpandedJob, result: Any) -> None:
+                nonlocal done
+                done += 1
+                if show_progress:
+                    status = "OK  " if result.success else "FAIL"
+                    print(f"  [{done}/{len(to_run)}] {status} {job.run_hash}")
+                if self.on_complete is not None:
+                    self.on_complete(job, result)
+
+            if show_progress:
+                print(f"Evaluating {len(to_run)} parameter sets")
+
+            sweep_result = run_sweep(
+                self.cli,
+                JobSet(jobs=to_run),
+                registry=self.registry,
+                session_id=self.session_id,
+                manage_status=False,
+                remote=self.remote,
+                api_key=self.api_key,
+                endpoint=self.endpoint,
+                batch_remote=self.batch_remote,
+                target=self.target,
+                batch_no_wait=self.batch_no_wait,
+                poll_interval=self.poll_interval,
+                batch_timeout=self.batch_timeout,
+                # Loaded explicitly below in every mode, not just batch remote.
+                auto_ingest=False,
+                collision_policy=self.collision_policy,
+                on_complete=_progress,
+                stop_on_failure=False,
+                quiet=True,
+                jfr=self.jfr,
+                enable_profiler=self.enable_profiler,
+                stream_output=self.stream_output,
+            )
+            for job, result in sweep_result.job_results:
+                result_by_hash[job.run_hash] = result
+                source_by_hash[job.run_hash] = "ran"
+            run_id_by_hash.update(sweep_result.run_ids)
+
         for job in batch_jobs:
             result = result_by_hash.get(job.run_hash)
             if result is None:
@@ -1216,18 +1278,19 @@ class AdaptiveContext:
                     command=[],
                 )
                 result_by_hash[job.run_hash] = result
+                source_by_hash.setdefault(job.run_hash, "ran")
             self.job_results.append((job, result))
             self._jobs.setdefault(job.run_hash, job)
             if result.success:
                 self.succeeded += 1
             else:
                 self.failed += 1
-        self.run_ids.update(sweep_result.run_ids)
+        self.run_ids.update(run_id_by_hash)
 
-        # Load and score the successful runs.
-        load_config = self.load_config or LoadConfig()
+        # Load and score the successful runs (loading is idempotent, so reused
+        # runs load nothing new).
         succeeded_jobs = [j for j in batch_jobs if result_by_hash[j.run_hash].success]
-        if succeeded_jobs:
+        if any(source_by_hash[j.run_hash] != "reused" for j in succeeded_jobs):
             time.sleep(load_config.settle_delay)
 
         rows_by_hash: dict[str, int] = {}
@@ -1237,7 +1300,7 @@ class AdaptiveContext:
             try:
                 rows_by_hash[job.run_hash] = self._load(
                     job,
-                    sweep_result.run_ids.get(job.run_hash),
+                    run_id_by_hash.get(job.run_hash),
                     load_config,
                     succeeded_before=succeeded_before + k,
                 )
@@ -1280,10 +1343,97 @@ class AdaptiveContext:
                 for i, j in enumerate(row_jobs)
                 if j.run_hash in errors_by_hash
             },
-            run_ids={
-                h: sweep_result.run_ids[h] for h in unique if h in sweep_result.run_ids
-            },
+            run_ids={h: run_id_by_hash[h] for h in unique if h in run_id_by_hash},
+            sources=[source_by_hash[j.run_hash] for j in row_jobs],
         )
+
+    def _prior_run(self, job: ExpandedJob, load_config: Any) -> tuple[str, Any]:
+        """Classify *job* by its latest recorded run.
+
+        Returns ``("done", run)`` for a successful run whose replicates are
+        loaded (loading it now if it completed but was never loaded),
+        ``("submitted", run)`` for a no-wait batch job that was dispatched but
+        never completed, and ``("new", None)`` otherwise: never run, failed,
+        not current (``bad`` / ``superseded``), or an interrupted blocking run.
+        """
+        config = self.registry.get_config_by_hash(job.run_hash)
+        if config is None or config.effective_status != "active":
+            return "new", None
+
+        runs = self.registry.get_runs_for_hash(job.run_hash)
+        if not runs:
+            return "new", None
+        latest = runs[-1]
+        metadata = latest.metadata or {}
+
+        if latest.completed_at is None:
+            if metadata.get("batch_job_id") and (metadata.get("target") or self.target):
+                return "submitted", latest
+            return "new", None
+        if latest.exit_code != 0:
+            return "new", None
+
+        if len(self.registry.loaded_replicates(job.run_hash)) < job.replicates:
+            # Completed but never (fully) loaded, e.g. interrupted before loading.
+            try:
+                self._load(job, latest.run_id, load_config, succeeded_before=0)
+            except Exception:
+                return "new", None
+            if len(self.registry.loaded_replicates(job.run_hash)) < job.replicates:
+                return "new", None
+        return "done", latest
+
+    def _reattach(
+        self, pending: list[tuple[ExpandedJob, Any]]
+    ) -> dict[str, tuple[str, Any]]:
+        """Poll submitted no-wait jobs from an earlier process until they finish.
+
+        Completes each job's run in the registry and registers its outputs.
+        A job that times out is left submitted (it may still be running).
+
+        Returns:
+            run_hash -> (run_id, CLIResult of the poll).
+        """
+        from joshpy.jobs import _register_job_outputs, poll_batch_jobs
+        from joshpy.registry import RegistryCallback
+
+        by_job_id = {run.metadata["batch_job_id"]: (job, run) for job, run in pending}
+        # _prior_run only reports "submitted" when a target is known.
+        targets = {
+            job_id: str(run.metadata.get("target") or self.target)
+            for job_id, (_, run) in by_job_id.items()
+        }
+        recorder = RegistryCallback(self.registry, self.session_id)
+        finished: dict[str, tuple[str, Any]] = {}
+
+        def _on_polled(job_id: str, result: Any) -> None:
+            job, run = by_job_id[job_id]
+            if result.exit_code != -1:
+                recorder.record_completion(run.run_id, result)
+                _register_job_outputs(
+                    self.cli,
+                    self.registry,
+                    job,
+                    run.run_id,
+                    export_paths=self._exports_for(job),
+                    quiet=True,
+                )
+            finished[job.run_hash] = (run.run_id, result)
+            if not self.quiet:
+                print(f"  [REATTACHED] {job_id} exit_code={result.exit_code}")
+            if self.on_complete is not None:
+                self.on_complete(job, result)
+
+        if not self.quiet:
+            print(f"Reattaching to {len(by_job_id)} submitted batch job(s)")
+        poll_batch_jobs(
+            self.cli,
+            targets,
+            poll_interval=self.poll_interval,
+            timeout=self.batch_timeout,
+            on_finished=_on_polled,
+        )
+        return finished
 
     def job_set(self) -> JobSet:
         """The jobs evaluated so far (one per run_hash), owning the work directory."""
@@ -1331,6 +1481,19 @@ class AdaptiveContext:
         self._expansion_config = config
         return config
 
+    def _exports_for(self, job: ExpandedJob) -> Any:
+        """inspect-exports result for *job*'s script, cached per (script, simulation)."""
+        from joshpy.cli import InspectExportsConfig
+
+        if job.source_path is None:
+            raise RuntimeError(f"Job {job.run_hash} has no source_path to inspect exports")
+        key = (str(job.source_path), job.simulation)
+        if key not in self._export_paths:
+            self._export_paths[key] = self.cli.inspect_exports(
+                InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+            )
+        return self._export_paths[key]
+
     def _load(
         self,
         job: ExpandedJob,
@@ -1340,24 +1503,16 @@ class AdaptiveContext:
         succeeded_before: int,
     ) -> int:
         """Load one job's results into ``cell_data``; returns rows loaded."""
-        from joshpy.cli import InspectExportsConfig
         from joshpy.sweep import load_job_results
 
         if run_id is None:
             raise RuntimeError(f"No run was recorded for {job.run_hash}")
-        if job.source_path is None:
-            raise RuntimeError(f"Job {job.run_hash} has no source_path to inspect exports")
 
-        key = (str(job.source_path), job.simulation)
-        if key not in self._export_paths:
-            self._export_paths[key] = self.cli.inspect_exports(
-                InspectExportsConfig(script=job.source_path, simulation=job.simulation)
-            )
         return load_job_results(
             self.cli,
             job,
             self.registry,
-            self._export_paths[key],
+            self._exports_for(job),
             run_id=run_id,
             quiet=True,
             load_config=load_config,
@@ -1389,6 +1544,7 @@ def run_adaptive_sweep(
     jfr: Any | None = None,  # JfrConfig
     enable_profiler: bool = False,
     stream_output: bool = False,
+    reuse_runs: bool = True,
 ) -> Any:
     """Run an adaptive sweep: the strategy runs its own loop against joshpy.
 
@@ -1428,6 +1584,11 @@ def run_adaptive_sweep(
         jfr: Optional JFR profiling configuration (one recording per job).
         enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
         stream_output: Stream JAR stdout/stderr to the terminal.
+        reuse_runs: If True (default), a parameter set whose run_hash already
+            has a completed, loaded run in the registry is not run again, and a
+            submitted no-wait batch job is reattached to instead of
+            re-dispatched. This is what makes an interrupted sweep resumable.
+            Set False to always run.
 
     Returns:
         The strategy's result (AdaptiveSweepResult for OptunaStrategy). It
@@ -1496,6 +1657,7 @@ def run_adaptive_sweep(
         jfr=jfr,
         enable_profiler=enable_profiler,
         stream_output=stream_output,
+        reuse_runs=reuse_runs,
     )
 
     registry.update_session_status(session_id, "running")
