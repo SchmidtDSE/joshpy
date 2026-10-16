@@ -7,6 +7,11 @@ This module defines the strategy pattern for parameter sweep expansion:
 The strategy pattern enables different approaches to parameter space exploration
 without changing the SweepConfig interface.
 
+Non-adaptive strategies yield every combination from `expand()`. Adaptive
+strategies implement `run_adaptive(ctx)`: they own their search loop and call
+`ctx.evaluate(rows)` on an `AdaptiveContext`, which expands, registers, runs,
+loads and scores each batch of proposed parameter sets.
+
 Example usage:
     from joshpy.strategies import CartesianStrategy, OptunaStrategy
     from joshpy.jobs import SweepConfig, ConfigSweepParameter
@@ -37,9 +42,12 @@ from __future__ import annotations
 import importlib
 import itertools
 import re
+import shutil
+import tempfile
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +57,7 @@ if TYPE_CHECKING:
         ConfigSweepParameter,
         ExpandedJob,
         FileSweepParameter,
+        JobSet,
     )
     from joshpy.registry import RunRegistry
 
@@ -334,9 +343,33 @@ class SweepStrategy(ABC):
 
     Subclasses must implement:
     - `is_adaptive` property
-    - `expand()` method (for non-adaptive) or indicate adaptive behavior
+    - `expand()` method (for non-adaptive) or `run_adaptive()` (for adaptive)
     - `to_dict()` and `from_dict()` for serialization
     """
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> Any:
+        """Run this strategy's search loop (adaptive strategies only).
+
+        The strategy owns its loop and its own state. It proposes parameter
+        sets and calls ``ctx.evaluate(params, score=...)`` for each batch;
+        joshpy expands, registers, runs, loads and scores them. Called by
+        :func:`run_adaptive_sweep`, which manages session status.
+
+        Args:
+            ctx: The AdaptiveContext for this run.
+
+        Returns:
+            A result object for the run. It should expose ``job_results``,
+            ``succeeded``, ``failed``, ``run_ids`` and ``job_set`` (see
+            :class:`~joshpy.jobs.AdaptiveSweepResult`) so SweepManager can
+            load results after the run.
+
+        Raises:
+            NotImplementedError: For non-adaptive strategies.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} is not adaptive; expand() it and use run_sweep()."
+        )
 
     @property
     @abstractmethod
@@ -785,6 +818,95 @@ class OptunaStrategy(SweepStrategy):
             objective=data.get("objective"),
         )
 
+    def run_adaptive(self, ctx: AdaptiveContext) -> Any:
+        """Run the Optuna ask/tell loop, one trial per ``ctx.evaluate`` batch.
+
+        Each trial samples parameters, evaluates them as a batch of one, and
+        reports the objective back to the study. Failed runs, and runs whose
+        results could not be loaded or scored, are reported as ``inf``.
+
+        Args:
+            ctx: The AdaptiveContext for this run.
+
+        Returns:
+            AdaptiveSweepResult with trial outcomes and best params.
+        """
+        from joshpy.jobs import AdaptiveSweepResult
+
+        obj_fn = ctx.objective or self.get_objective()
+        study = self.create_study()
+        sweep = ctx.config.sweep
+        n_trials = self.n_trials
+
+        if not ctx.quiet:
+            print(f"Running adaptive sweep with {n_trials} trials")
+            print(f"  Direction: {self.direction}")
+            print(f"  Sampler: {self.sampler}")
+
+        for trial_num in range(n_trials):
+            trial = study.ask()
+            params = sample_params_from_trial(
+                trial,
+                sweep.config_parameters,
+                sweep.file_parameters,
+                sweep.compound_parameters,
+            )
+
+            if not ctx.quiet:
+                display_params = {
+                    k: v["label"] if isinstance(v, dict) and "label" in v else v
+                    for k, v in params.items()
+                }
+                print(f"[{trial_num + 1}/{n_trials}] Params: {display_params}")
+
+            batch = ctx.evaluate([params], score=obj_fn)
+            job, result = batch.jobs[0], batch.results[0]
+
+            # Set user attrs BEFORE tell() since the trial is finished after tell()
+            trial.set_user_attr("run_hash", job.run_hash)
+
+            if not result.success:
+                trial.set_user_attr("error", f"exit_code={result.exit_code}")
+                study.tell(trial, float("inf"))
+                if not ctx.quiet:
+                    print(f"  [FAIL] exit_code={result.exit_code}")
+                    if result.stderr:
+                        print(f"\n  STDERR:\n{result.stderr}")
+                continue
+
+            if 0 in batch.errors:
+                trial.set_user_attr("error", batch.errors[0])
+                study.tell(trial, float("inf"))
+                continue
+
+            metric = batch.values[0]
+            trial.set_user_attr("metric", metric)
+            trial.set_user_attr("rows_loaded", batch.rows_loaded[0])
+            study.tell(trial, metric)
+
+            if not ctx.quiet:
+                print(f"  [OK] metric={metric:.4f} (rows={batch.rows_loaded[0]})")
+
+        _store_study_outcomes(ctx.registry, ctx.session_id, study)
+
+        if not ctx.quiet:
+            print("\nAdaptive sweep complete:")
+            print(f"  Trials: {n_trials} ({ctx.succeeded} succeeded, {ctx.failed} failed)")
+            if study.best_trial is not None:
+                print(f"  Best value: {study.best_value}")
+                print(f"  Best params: {study.best_params}")
+
+        return AdaptiveSweepResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+            study=study,
+            best_params=study.best_params if study.best_trial else None,
+            best_value=study.best_value if study.best_trial else None,
+        )
+
 
 def sample_params_from_trial(
     trial: Any,  # optuna.Trial
@@ -843,6 +965,406 @@ def sample_params_from_trial(
     return params
 
 
+@dataclass
+class BatchResult:
+    """Outcome of evaluating one batch of parameter sets.
+
+    Returned by :meth:`AdaptiveContext.evaluate`. The lists are aligned with
+    the requested rows. Rows with identical parameters resolve to the same job
+    (same ``run_hash``) and are run once.
+
+    Attributes:
+        params: The requested parameter rows.
+        jobs: Expanded job per row.
+        results: CLIResult per row (shared by rows that share a job).
+        values: Score per row (``score(registry, run_hash, job)``), or None
+            when the run failed, its results could not be loaded or scored,
+            or no score function was given.
+        rows_loaded: Rows loaded into ``cell_data`` for each row's job.
+        errors: Row index -> message for rows whose run succeeded but whose
+            results could not be loaded or scored.
+        run_ids: run_hash -> run_id of this batch's execution of that job.
+
+    Examples:
+        >>> batch = ctx.evaluate([{"x": 1.0}, {"x": 2.0}], score=my_objective)
+        >>> for job, value in zip(batch.jobs, batch.values):
+        ...     print(job.run_hash, value)
+        >>> batch.failures  # row indices that failed or could not be scored
+    """
+
+    params: list[dict[str, Any]] = field(default_factory=list)
+    jobs: list[ExpandedJob] = field(default_factory=list)
+    results: list[Any] = field(default_factory=list)
+    values: list[Any] = field(default_factory=list)
+    rows_loaded: list[int] = field(default_factory=list)
+    errors: dict[int, str] = field(default_factory=dict)
+    run_ids: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def run_hashes(self) -> list[str]:
+        """run_hash per row."""
+        return [job.run_hash for job in self.jobs]
+
+    @property
+    def failures(self) -> list[int]:
+        """Row indices whose run failed or whose results could not be loaded or scored."""
+        return [
+            i
+            for i, result in enumerate(self.results)
+            if not result.success or i in self.errors
+        ]
+
+    def __len__(self) -> int:
+        return len(self.jobs)
+
+
+def _adaptive_config_name(config: Any) -> str:
+    """Default config namespace for adaptive sweeps when ``config_name`` is unset.
+
+    Adaptive sweeps have always named the rendered config after the template
+    file (``adaptive_config.jshc.j2`` -> ``config adaptive_config.*``), while
+    batch sweeps default to ``sweep_config``. Both defaults are relied on by
+    existing models, so each path keeps its own; an explicit
+    ``JobConfig.config_name`` wins on both.
+    """
+    if config.template_path is not None:
+        stem = Path(config.template_path).stem
+        return stem[: -len(".jshc")] if stem.endswith(".jshc") else stem
+    return "sweep_config"
+
+
+@dataclass
+class AdaptiveContext:
+    """What an adaptive strategy runs its loop against.
+
+    Built by :func:`run_adaptive_sweep` and passed to
+    :meth:`SweepStrategy.run_adaptive`. The strategy owns its loop and its own
+    in-memory state (an Optuna study, an sbi sampler, ...). The context owns
+    everything joshpy does, through one method, :meth:`evaluate`: expand a
+    batch of parameter sets, register each job, run them with
+    :func:`~joshpy.jobs.run_sweep` in the configured execution mode (local,
+    Josh Cloud, or batch remote), load their results into the registry, and
+    score them.
+
+    Every evaluated job is registered and recorded, whether or not the
+    strategy later uses its result.
+
+    Attributes:
+        cli: JoshCLI used for execution.
+        config: The JobConfig being swept (its ``sweep.strategy`` is the
+            adaptive strategy).
+        registry: Registry every job is recorded in.
+        session_id: Registry session for this run.
+        objective: Optional per-run score function override, passed through
+            from ``SweepManager.run(objective=...)``.
+        job_results: (job, CLIResult) for every evaluation, in order.
+        run_ids: run_hash -> run_id of its latest execution.
+        succeeded: Number of evaluations that ran successfully.
+        failed: Number of evaluations that failed.
+    """
+
+    cli: Any  # JoshCLI
+    config: Any  # JobConfig
+    registry: RunRegistry
+    session_id: str
+    objective: ObjectiveFn | None = None
+    remote: bool = False
+    api_key: str | None = None
+    endpoint: str | None = None
+    batch_remote: bool = False
+    target: str | None = None
+    batch_no_wait: bool = False
+    poll_interval: int = 10
+    batch_timeout: int | None = None
+    collision_policy: str = "fail"
+    on_complete: Callable[[Any, Any], None] | None = None
+    quiet: bool = False
+    load_config: Any | None = None  # LoadConfig
+    stop_on_failure: bool = True
+    jfr: Any | None = None  # JfrConfig
+    enable_profiler: bool = False
+    stream_output: bool = False
+
+    job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
+    run_ids: dict[str, str] = field(default_factory=dict)
+    succeeded: int = 0
+    failed: int = 0
+
+    _jobs: dict[str, ExpandedJob] = field(default_factory=dict, repr=False)
+    _work_dir: Path | None = field(default=None, repr=False)
+    _expansion_config: Any | None = field(default=None, repr=False)
+    _export_paths: dict[tuple[str, str], Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def work_dir(self) -> Path:
+        """Directory every batch is expanded into (created on first use).
+
+        One directory for the whole run keeps a templated or multi-file
+        model's rendered entry at a single path, so all evaluated jobs share
+        one ``source_path`` (``recover_sweep_results`` requires that).
+        """
+        if self._work_dir is None:
+            self._work_dir = Path(tempfile.mkdtemp(prefix="josh_adaptive_"))
+        return self._work_dir
+
+    def evaluate(
+        self,
+        params: list[dict[str, Any]],
+        *,
+        score: Callable[[RunRegistry, str, ExpandedJob], Any] | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> BatchResult:
+        """Run a batch of parameter sets and return their results.
+
+        Each row is expanded through :class:`~joshpy.jobs.JobExpander` (the
+        same rendering and run hashing as a batch sweep), registered, and run
+        as one :func:`~joshpy.jobs.run_sweep` call. Successful runs are loaded
+        into ``cell_data`` and, if *score* is given, scored.
+
+        Args:
+            params: Parameter rows, shaped like ``SweepConfig.expand()`` output.
+            score: Optional ``(registry, run_hash, job) -> Any`` evaluated for
+                each successfully loaded job (an objective, or a dict of
+                summary statistics).
+            attributes: Extra run-level attributes recorded on this batch's
+                jobs at registration (e.g. ``{"generation": 3}``).
+
+        Returns:
+            BatchResult aligned with *params*.
+
+        Raises:
+            SweepExecutionError: If ``stop_on_failure`` is set and a run
+                failed. Raised after the whole batch has run and the
+                successful runs have been loaded.
+        """
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import JobExpander, JobSet, run_sweep
+        from joshpy.sweep import LoadConfig, apply_sweep_labels, register_job
+
+        rows = [dict(p) for p in params]
+        if not rows:
+            return BatchResult()
+
+        config = self._config_for_expansion()
+        row_jobs = JobExpander().expand(
+            config, output_dir=self.work_dir, combinations=rows
+        ).jobs
+        apply_sweep_labels(row_jobs, config.label)
+        if attributes:
+            for job in row_jobs:
+                job.attributes.update(attributes)
+
+        # Rows with identical parameters share a run_hash; run each job once.
+        unique: dict[str, ExpandedJob] = {}
+        for job in row_jobs:
+            unique.setdefault(job.run_hash, job)
+        batch_jobs = list(unique.values())
+
+        for job in batch_jobs:
+            register_job(self.registry, self.session_id, job)
+
+        show_progress = not self.quiet and len(batch_jobs) > 1
+        done = 0
+
+        def _progress(job: ExpandedJob, result: Any) -> None:
+            nonlocal done
+            done += 1
+            if show_progress:
+                status = "OK  " if result.success else "FAIL"
+                print(f"  [{done}/{len(batch_jobs)}] {status} {job.run_hash}")
+            if self.on_complete is not None:
+                self.on_complete(job, result)
+
+        if show_progress:
+            print(f"Evaluating {len(batch_jobs)} parameter sets")
+
+        evaluated_before = self.succeeded + self.failed
+        succeeded_before = self.succeeded
+        sweep_result = run_sweep(
+            self.cli,
+            JobSet(jobs=batch_jobs),
+            registry=self.registry,
+            session_id=self.session_id,
+            manage_status=False,
+            remote=self.remote,
+            api_key=self.api_key,
+            endpoint=self.endpoint,
+            batch_remote=self.batch_remote,
+            target=self.target,
+            batch_no_wait=self.batch_no_wait,
+            poll_interval=self.poll_interval,
+            batch_timeout=self.batch_timeout,
+            # Loaded explicitly below in every mode, not just batch remote.
+            auto_ingest=False,
+            collision_policy=self.collision_policy,
+            on_complete=_progress,
+            stop_on_failure=False,
+            quiet=True,
+            jfr=self.jfr,
+            enable_profiler=self.enable_profiler,
+            stream_output=self.stream_output,
+        )
+
+        result_by_hash = {job.run_hash: result for job, result in sweep_result.job_results}
+        for job in batch_jobs:
+            result = result_by_hash.get(job.run_hash)
+            if result is None:
+                result = CLIResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr="No result was recorded for this job.",
+                    command=[],
+                )
+                result_by_hash[job.run_hash] = result
+            self.job_results.append((job, result))
+            self._jobs.setdefault(job.run_hash, job)
+            if result.success:
+                self.succeeded += 1
+            else:
+                self.failed += 1
+        self.run_ids.update(sweep_result.run_ids)
+
+        # Load and score the successful runs.
+        load_config = self.load_config or LoadConfig()
+        succeeded_jobs = [j for j in batch_jobs if result_by_hash[j.run_hash].success]
+        if succeeded_jobs:
+            time.sleep(load_config.settle_delay)
+
+        rows_by_hash: dict[str, int] = {}
+        values_by_hash: dict[str, Any] = {}
+        errors_by_hash: dict[str, str] = {}
+        for k, job in enumerate(succeeded_jobs):
+            try:
+                rows_by_hash[job.run_hash] = self._load(
+                    job,
+                    sweep_result.run_ids.get(job.run_hash),
+                    load_config,
+                    succeeded_before=succeeded_before + k,
+                )
+            except Exception as e:
+                errors_by_hash[job.run_hash] = str(e)
+                if not self.quiet:
+                    print(f"  [WARN] Result loading failed: {e}")
+                continue
+
+            if score is None:
+                continue
+            try:
+                values_by_hash[job.run_hash] = score(self.registry, job.run_hash, job)
+            except Exception as e:
+                errors_by_hash[job.run_hash] = f"objective_error: {e}"
+                if not self.quiet:
+                    print(f"  [WARN] Objective evaluation failed: {e}")
+
+        if self.stop_on_failure:
+            for k, job in enumerate(batch_jobs):
+                result = result_by_hash[job.run_hash]
+                if not result.success:
+                    raise SweepExecutionError(
+                        job=job,
+                        result=result,
+                        trial_num=evaluated_before + k,
+                        succeeded_before=succeeded_before + sum(
+                            result_by_hash[j.run_hash].success for j in batch_jobs[:k]
+                        ),
+                    )
+
+        return BatchResult(
+            params=rows,
+            jobs=row_jobs,
+            results=[result_by_hash[j.run_hash] for j in row_jobs],
+            values=[values_by_hash.get(j.run_hash) for j in row_jobs],
+            rows_loaded=[rows_by_hash.get(j.run_hash, 0) for j in row_jobs],
+            errors={
+                i: errors_by_hash[j.run_hash]
+                for i, j in enumerate(row_jobs)
+                if j.run_hash in errors_by_hash
+            },
+            run_ids={
+                h: sweep_result.run_ids[h] for h in unique if h in sweep_result.run_ids
+            },
+        )
+
+    def job_set(self) -> JobSet:
+        """The jobs evaluated so far (one per run_hash), owning the work directory."""
+        from joshpy.jobs import JobSet
+
+        return JobSet(
+            jobs=list(self._jobs.values()),
+            temp_dir=self._work_dir,
+            template_path=self.config.template_path,
+        )
+
+    def cleanup(self) -> None:
+        """Remove the work directory."""
+        if self._work_dir is not None and self._work_dir.exists():
+            shutil.rmtree(self._work_dir, ignore_errors=True)
+        self._work_dir = None
+
+    def _config_for_expansion(self) -> Any:
+        """The JobConfig every batch expands from, resolved once per run.
+
+        Discovers a multi-file model's import closure once (instead of one
+        ``inspect-imports`` JVM call per batch) and applies the adaptive
+        config-name default.
+        """
+        if self._expansion_config is not None:
+            return self._expansion_config
+
+        from joshpy.jobs import (
+            _entry_has_imports,
+            _render_entry,
+            _source_root,
+            discover_import_files,
+        )
+
+        config = self.config
+        if not config.import_files and _source_root(config) is not None:
+            with tempfile.TemporaryDirectory(prefix="josh_adaptive_entry_") as tmp:
+                entry = _render_entry(config, Path(tmp))
+                has_imports = entry is not None and _entry_has_imports(entry)
+            if has_imports:
+                config = replace(config, import_files=discover_import_files(self.cli, config))
+        if config.config_name is None:
+            config = replace(config, config_name=_adaptive_config_name(config))
+
+        self._expansion_config = config
+        return config
+
+    def _load(
+        self,
+        job: ExpandedJob,
+        run_id: str | None,
+        load_config: Any,
+        *,
+        succeeded_before: int,
+    ) -> int:
+        """Load one job's results into ``cell_data``; returns rows loaded."""
+        from joshpy.cli import InspectExportsConfig
+        from joshpy.sweep import load_job_results
+
+        if run_id is None:
+            raise RuntimeError(f"No run was recorded for {job.run_hash}")
+        if job.source_path is None:
+            raise RuntimeError(f"Job {job.run_hash} has no source_path to inspect exports")
+
+        key = (str(job.source_path), job.simulation)
+        if key not in self._export_paths:
+            self._export_paths[key] = self.cli.inspect_exports(
+                InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+            )
+        return load_job_results(
+            self.cli,
+            job,
+            self.registry,
+            self._export_paths[key],
+            run_id=run_id,
+            quiet=True,
+            load_config=load_config,
+            succeeded_before=succeeded_before,
+        )
+
+
 def run_adaptive_sweep(
     cli: Any,  # JoshCLI
     config: Any,  # JobConfig
@@ -859,67 +1381,66 @@ def run_adaptive_sweep(
     poll_interval: int = 10,
     batch_timeout: int | None = None,
     auto_ingest: bool = True,
+    collision_policy: str = "fail",
+    on_complete: Callable[[Any, Any], None] | None = None,
     quiet: bool = False,
     load_config: Any | None = None,  # LoadConfig
     stop_on_failure: bool = True,
     jfr: Any | None = None,  # JfrConfig
     enable_profiler: bool = False,
     stream_output: bool = False,
-) -> Any:  # AdaptiveSweepResult
-    """Run an adaptive sweep using Optuna.
+) -> Any:
+    """Run an adaptive sweep: the strategy runs its own loop against joshpy.
 
-    Unlike run_sweep(), this generates jobs on-demand based on Optuna's
-    suggestions, loading results after each run to inform the next trial.
+    Builds an :class:`AdaptiveContext` and hands it to
+    ``config.sweep.strategy.run_adaptive(ctx)``. The strategy proposes
+    parameter sets and calls ``ctx.evaluate(...)`` for each batch; joshpy
+    expands, registers, runs, loads and scores them. For
+    :class:`OptunaStrategy` each trial is a batch of one.
 
-    The lifecycle for each trial:
-    1. Sample parameters from Optuna trial
-    2. Create and register job for these params
-    3. Execute CLI for all replicates
-    4. Wait briefly for export writes to settle
-    5. Load CSV results with retries
-    6. Evaluate objective function
-    7. Report metric back to Optuna and store in registry
-
-    Note: Optuna runs trials serially (one at a time). Josh maintains
-    parallel replicate execution internally. Metrics wait for all
-    replicates to finish before evaluation.
+    Session status is set to "running", then "completed" (or "failed" if any
+    evaluation failed or the strategy raised).
 
     Args:
         cli: JoshCLI instance to use for execution.
-        config: JobConfig with OptunaStrategy configured.
+        config: JobConfig whose ``sweep.strategy`` is adaptive.
         registry: RunRegistry for tracking (required).
         session_id: Session ID in registry (required).
-        objective: Optional objective function override. If not provided,
-            uses the objective from the strategy.
-        remote: If True, use run_remote() for cloud execution.
+        objective: Optional per-run score function override. If not provided,
+            the strategy uses its own (e.g. ``OptunaStrategy.objective``).
+        remote: If True, use run_remote() for Josh Cloud execution.
         api_key: API key for remote execution (optional for local servers).
         endpoint: Custom endpoint URL for remote execution.
+        batch_remote: If True, run each batch through batchRemote.
+        target: Target profile name (required if batch_remote=True).
+        batch_no_wait: If True, dispatch a batch with ``--no-wait`` then poll.
+        poll_interval: Seconds between polls in no-wait mode.
+        batch_timeout: Per-job timeout in seconds for no-wait polling.
+        auto_ingest: Accepted for signature compatibility. Adaptive sweeps
+            always load results, since the strategy needs them.
+        collision_policy: Collision policy for each batch (see ``run_sweep``).
+        on_complete: Optional callback invoked after each job completes.
         quiet: If True, suppress progress output.
         load_config: LoadConfig for result loading behavior.
-        stop_on_failure: If True (default), raise SweepExecutionError on first
-            trial failure. If False, continue with remaining trials and report
-            failures in the result.
+        stop_on_failure: If True (default), raise SweepExecutionError when a
+            run fails (after its batch finishes). If False, failed runs are
+            reported to the strategy and the sweep continues.
+        jfr: Optional JFR profiling configuration (one recording per job).
+        enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
+        stream_output: Stream JAR stdout/stderr to the terminal.
 
     Returns:
-        AdaptiveSweepResult with trial outcomes and best params.
+        The strategy's result (AdaptiveSweepResult for OptunaStrategy). It
+        carries ``run_ids`` and a ``job_set`` owning the work directory; call
+        ``result.job_set.cleanup()`` when done (SweepManager does this).
 
     Raises:
-        TypeError: If config.sweep.strategy is not OptunaStrategy.
-        ValueError: If no objective function is configured.
-        ImportError: If optuna is not installed.
-        SweepExecutionError: If stop_on_failure=True and a trial fails.
+        ValueError: If config.sweep is missing, or batch_remote without target.
+        TypeError: If config.sweep.strategy is not adaptive.
+        SweepExecutionError: If stop_on_failure=True and a run fails.
 
     Examples:
         >>> from joshpy.strategies import run_adaptive_sweep, OptunaStrategy
-        >>> from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
-        >>> from joshpy.registry import RunRegistry
-        >>> from joshpy.cli import JoshCLI
-        >>>
-        >>> def stability_metric(registry, run_hash, job):
-        ...     # Lower = more stable
-        ...     df = queries.get_timeseries("population", run_hash=run_hash)
-        ...     return df["value"].std() / df["value"].mean()
-        >>>
         >>> config = JobConfig(
         ...     template_path=Path("template.jshc.j2"),
         ...     source_path=Path("simulation.josh"),
@@ -930,448 +1451,62 @@ def run_adaptive_sweep(
         ...         strategy=OptunaStrategy(n_trials=50, direction="minimize"),
         ...     ),
         ... )
-        >>>
         >>> registry = RunRegistry("experiment.duckdb")
         >>> session_id = registry.create_session(config=config)
-        >>> cli = JoshCLI()
-        >>>
         >>> result = run_adaptive_sweep(
-        ...     cli, config,
+        ...     JoshCLI(), config,
         ...     registry=registry,
         ...     session_id=session_id,
         ...     objective=stability_metric,
         ... )
         >>> print(f"Best params: {result.best_params}")
-        >>> print(f"Best value: {result.best_value}")
     """
-    _check_optuna()
-
-    # Import here to avoid circular dependencies
-    from joshpy.cli import InspectExportsConfig
-    from joshpy.jobs import (
-        AdaptiveSweepResult,
-        _register_job_outputs,
-        to_run_config,
-        to_run_remote_config,
-    )
-    from joshpy.sweep import LoadConfig, load_job_results
-
-    if load_config is None:
-        load_config = LoadConfig()
-
-    # Validate strategy
     if config.sweep is None:
         raise ValueError("config.sweep is required for adaptive sweeps")
 
-    base_strategy = config.sweep.strategy
-    if not isinstance(base_strategy, OptunaStrategy):
+    strategy = config.sweep.strategy
+    if strategy is None or not strategy.is_adaptive:
         raise TypeError(
-            f"run_adaptive_sweep requires OptunaStrategy, got {type(base_strategy).__name__}. "
+            "run_adaptive_sweep requires OptunaStrategy or another adaptive strategy, "
+            f"got {type(strategy).__name__}. "
             "For non-adaptive strategies, use run_sweep() instead."
         )
+    if batch_remote and target is None:
+        raise ValueError("target is required when batch_remote=True")
 
-    # After isinstance check, we know it's OptunaStrategy
-    strategy: OptunaStrategy = base_strategy
-
-    # Get objective function (from arg or strategy)
-    obj_fn = objective or strategy.get_objective()
-
-    # Create Optuna study
-    study = strategy.create_study()
-
-    # Get export paths once (for result loading)
-    export_paths = cli.inspect_exports(
-        InspectExportsConfig(
-            script=config.source_path,
-            simulation=config.simulation,
-        )
+    ctx = AdaptiveContext(
+        cli=cli,
+        config=config,
+        registry=registry,
+        session_id=session_id,
+        objective=objective,
+        remote=remote,
+        api_key=api_key,
+        endpoint=endpoint,
+        batch_remote=batch_remote,
+        target=target,
+        batch_no_wait=batch_no_wait,
+        poll_interval=poll_interval,
+        batch_timeout=batch_timeout,
+        collision_policy=collision_policy,
+        on_complete=on_complete,
+        quiet=quiet,
+        load_config=load_config,
+        stop_on_failure=stop_on_failure,
+        jfr=jfr,
+        enable_profiler=enable_profiler,
+        stream_output=stream_output,
     )
 
-    from joshpy.jobs import _per_job_jfr
-
-    # Initialize tracking
-    job_results: list[tuple[ExpandedJob, Any]] = []
-    succeeded = 0
-    failed = 0
-    n_trials = strategy.n_trials
-
-    if not quiet:
-        print(f"Running adaptive sweep with {n_trials} trials")
-        print(f"  Direction: {strategy.direction}")
-        print(f"  Sampler: {strategy.sampler}")
-
-    # Set session status to running
     registry.update_session_status(session_id, "running")
-
-    # Per-sweep staging root for batch remote mode. Cleaned up in finally.
-    sweep_workdir: Path | None = None
-    if batch_remote:
-        import tempfile
-
-        sweep_workdir = Path(
-            tempfile.mkdtemp(prefix=f"joshpy-adaptive-{session_id}-")
-        )
-
     try:
-        for trial_num in range(n_trials):
-            # 1. Ask Optuna for next params
-            trial = study.ask()
-
-            # 2. Sample parameters from trial
-            params = sample_params_from_trial(
-                trial,
-                config.sweep.config_parameters,
-                config.sweep.file_parameters,
-                config.sweep.compound_parameters,
-            )
-
-            if not quiet:
-                # Format params for display
-                display_params = {
-                    k: v["label"] if isinstance(v, dict) and "label" in v else v
-                    for k, v in params.items()
-                }
-                print(f"[{trial_num + 1}/{n_trials}] Params: {display_params}")
-
-            # 3. Create job for these params
-            job = _create_single_job(config, params, trial_num)
-
-            # 4. Register job in registry
-            josh_content = None
-            if job.source_path and job.source_path.exists():
-                josh_content = job.source_path.read_text()
-
-            registry.register_run(
-                session_id=session_id,
-                run_hash=job.run_hash,
-                josh_path=str(job.source_path) if job.source_path else "",
-                config_content=job.config_content,
-                file_mappings=_convert_file_mappings(job.file_mappings),
-                parameters=job.parameters,
-                josh_content=josh_content,
-            )
-
-            # Forward JobConfig-declared attributes (see SweepManager.run).
-            if job.attributes:
-                registry.set_attributes(job.run_hash, **job.attributes)
-
-            # 5. Execute CLI
-            job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
-            if batch_remote:
-                from joshpy.batch_orchestrator import assemble_batch_workdir
-                from joshpy.cli import StageToMinioConfig
-                from joshpy.jobs import to_batch_remote_config
-
-                assert target is not None
-                assert sweep_workdir is not None
-
-                job_dir = assemble_batch_workdir(job, sweep_workdir)
-                per_job_prefix = (
-                    f"sweeps/{session_id}/jobs/{job.run_hash}/"
-                )
-                stage_result = cli.stage_to_minio(
-                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
-                )
-                if not stage_result.success:
-                    result = stage_result
-                else:
-                    br_config = to_batch_remote_config(
-                        job, target, per_job_prefix,
-                        no_wait=False,  # adaptive sweeps always block
-                        timeout=batch_timeout,
-                        require_prestaged=True,
-                    )
-                    result = cli.batch_remote(
-                        br_config, jfr=job_jfr, stream_output=stream_output,
-                    )
-            elif remote:
-                run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-                result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
-            else:
-                run_config = to_run_config(job, enable_profiler=enable_profiler)
-                result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
-
-            job_results.append((job, result))
-
-            # 6. Record the run result in the registry (needed for load_job_results)
-            run_id = registry.start_run(
-                run_hash=job.run_hash,
-                session_id=session_id,
-                replicate=0,  # CLI runs all replicates at once
-                output_path=str(job.config_path.parent) if job.config_path else None,
-                metadata={"parameters": job.parameters, "trial": trial_num},
-            )
-            error_msg = result.stderr if not result.success else None
-            registry.complete_run(
-                run_id=run_id,
-                exit_code=result.exit_code,
-                error_message=error_msg,
-            )
-
-            _register_job_outputs(
-                cli=cli,
-                registry=registry,
-                job=job,
-                run_id=run_id,
-                export_paths=export_paths,
-                quiet=quiet,
-            )
-
-            if result.success:
-                succeeded += 1
-
-                # 7. Wait for writes to settle and load results
-                import time
-
-                time.sleep(load_config.settle_delay)
-
-                try:
-                    rows_loaded = load_job_results(
-                        cli,
-                        job,
-                        registry,
-                        export_paths,
-                        quiet=True,
-                        load_config=load_config,
-                        succeeded_before=succeeded - 1,
-                        run_id=run_id,
-                    )
-                except Exception as e:
-                    # Log but don't fail the whole sweep
-                    if not quiet:
-                        print(f"  [WARN] Result loading failed: {e}")
-                    # Set user attrs BEFORE tell() since trial is finished after tell()
-                    trial.set_user_attr("error", str(e))
-                    trial.set_user_attr("run_hash", job.run_hash)
-                    study.tell(trial, float("inf"))
-                    continue
-
-                # 7. Compute objective
-                try:
-                    metric = obj_fn(registry, job.run_hash, job)
-                except Exception as e:
-                    if not quiet:
-                        print(f"  [WARN] Objective evaluation failed: {e}")
-                    # Set user attrs BEFORE tell() since trial is finished after tell()
-                    trial.set_user_attr("error", f"objective_error: {e}")
-                    trial.set_user_attr("run_hash", job.run_hash)
-                    study.tell(trial, float("inf"))
-                    continue
-
-                # 8. Store traceability info BEFORE tell() since trial is finished after
-                trial.set_user_attr("run_hash", job.run_hash)
-                trial.set_user_attr("metric", metric)
-                trial.set_user_attr("rows_loaded", rows_loaded)
-
-                # Report to Optuna (finishes the trial)
-                study.tell(trial, metric)
-
-                if not quiet:
-                    print(f"  [OK] metric={metric:.4f} (rows={rows_loaded})")
-
-            else:
-                failed += 1
-                # Set user attrs BEFORE tell() since trial is finished after tell()
-                trial.set_user_attr("run_hash", job.run_hash)
-                trial.set_user_attr("error", f"exit_code={result.exit_code}")
-                # Failed trial gets worst possible value
-                study.tell(trial, float("inf"))
-
-                if not quiet:
-                    print(f"  [FAIL] exit_code={result.exit_code}")
-                    if result.stderr:
-                        print(f"\n  STDERR:\n{result.stderr}")
-
-                if stop_on_failure:
-                    # Update session status before raising
-                    registry.update_session_status(session_id, "failed")
-                    raise SweepExecutionError(
-                        job=job,
-                        result=result,
-                        trial_num=trial_num,
-                        succeeded_before=succeeded,
-                    )
-
-        # Store study outcomes in registry
-        _store_study_outcomes(registry, session_id, study)
-
-        # Update session status
-        final_status = "completed" if failed == 0 else "failed"
-        registry.update_session_status(session_id, final_status)
-
-        if not quiet:
-            print("\nAdaptive sweep complete:")
-            print(f"  Trials: {n_trials} ({succeeded} succeeded, {failed} failed)")
-            if study.best_trial is not None:
-                print(f"  Best value: {study.best_value}")
-                print(f"  Best params: {study.best_params}")
-
-        return AdaptiveSweepResult(
-            job_results=job_results,
-            succeeded=succeeded,
-            failed=failed,
-            study=study,
-            best_params=study.best_params if study.best_trial else None,
-            best_value=study.best_value if study.best_trial else None,
-        )
-
+        result = strategy.run_adaptive(ctx)
     except Exception:
-        # Set status to failed on exception
         registry.update_session_status(session_id, "failed")
+        ctx.cleanup()
         raise
-    finally:
-        if sweep_workdir is not None:
-            import shutil
 
-            shutil.rmtree(sweep_workdir, ignore_errors=True)
-
-
-def _create_single_job(
-    config: Any,  # JobConfig
-    params: dict[str, Any],
-    trial_num: int,
-) -> Any:  # ExpandedJob
-    """Create a single ExpandedJob from sampled parameters.
-
-    Used by run_adaptive_sweep() to create jobs dynamically for each trial.
-
-    Args:
-        config: The JobConfig with template and settings.
-        params: Parameter values sampled from Optuna trial.
-        trial_num: Trial number (for unique directory naming).
-
-    Returns:
-        ExpandedJob ready for execution.
-    """
-    import tempfile
-    from pathlib import Path
-
-    # Import here to avoid circular dependencies
-    from joshpy.jobs import ExpandedJob, _compute_run_hash
-
-    try:
-        from jinja2 import Environment, FileSystemLoader
-    except ImportError:
-        raise ImportError(
-            "jinja2 is required for job templating. Install with: pip install joshpy[jobs]"
-        )
-
-    # Load template
-    if config.template_path:
-        template_dir = config.template_path.parent
-        template_name = config.template_path.name
-        env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
-        template = env.get_template(template_name)
-    elif config.template_string:
-        env = Environment(autoescape=False)
-        template = env.from_string(config.template_string)
-    else:
-        raise ValueError("Either template_path or template_string must be provided")
-
-    # Separate config params from file params
-    config_params: dict[str, Any] = {}
-    file_mappings = config.file_mappings.copy()
-    custom_tags: dict[str, str] = {}
-
-    for key, value in params.items():
-        if isinstance(value, dict) and "path" in value and "label" in value:
-            # File parameter
-            file_path = value["path"]
-            file_label = value["label"]
-            file_mappings[key] = file_path
-            config_params[key] = file_label
-            custom_tags[key] = file_label
-            if hasattr(file_path, "name"):
-                custom_tags[f"{key}_file"] = file_path.name
-            else:
-                custom_tags[f"{key}_file"] = str(file_path).split("/")[-1]
-        else:
-            # Config parameter
-            config_params[key] = value
-            custom_tags[str(key)] = str(value)
-
-    # Render template
-    rendered = template.render(**config_params)
-
-    # Compute run_hash
-    run_hash = _compute_run_hash(
-        josh_path=config.source_path,
-        config_content=rendered,
-        file_mappings=file_mappings if file_mappings else None,
-    )
-
-    # Add run_hash as custom tag
-    custom_tags["run_hash"] = run_hash
-
-    # Add label as a custom tag if provided
-    if config.label is not None:
-        custom_tags["label"] = config.label
-
-    # Derive config name from template path (e.g., "adaptive_config.jshc.j2" -> "adaptive_config.jshc")
-    # This ensures the config name matches what the Josh file references via "config <name>.xxx"
-    if config.template_path:
-        # Remove .j2 extension to get .jshc filename
-        config_name = config.template_path.stem  # "adaptive_config.jshc"
-        if not config_name.endswith(".jshc"):
-            config_name = config_name + ".jshc"
-    else:
-        config_name = "sweep_config.jshc"
-
-    # Write config file to temp directory
-    temp_dir = Path(tempfile.mkdtemp(prefix="josh_adaptive_"))
-    config_subdir = temp_dir / f"trial_{trial_num:04d}_{run_hash}"
-    config_subdir.mkdir(parents=True, exist_ok=True)
-    config_path = config_subdir / config_name
-    config_path.write_text(rendered)
-
-    return ExpandedJob(
-        config_content=rendered,
-        config_path=config_path,
-        config_name=config_name,
-        run_hash=run_hash,
-        parameters=config_params,
-        simulation=config.simulation,
-        replicates=config.replicates,
-        source_path=config.source_path,
-        file_mappings=file_mappings,
-        custom_tags=custom_tags,
-        label=config.label,
-        attributes=dict(config.attributes),
-        upload_source_path=config.upload_source_path,
-        upload_config_path=config.upload_config_path,
-        upload_data_path=config.upload_data_path,
-        output_steps=config.output_steps,
-        seed=config.seed,
-        crs=config.crs,
-        use_float64=config.use_float64,
-    )
-
-
-def _convert_file_mappings(
-    file_mappings: dict[str, Any],
-) -> dict[str, dict[str, str]] | None:
-    """Convert file_mappings from {name: Path} to registry format.
-
-    Args:
-        file_mappings: Dict mapping names to Path objects.
-
-    Returns:
-        Dict in {name: {path, hash}} format, or None if empty.
-    """
-    if not file_mappings:
-        return None
-
-    from pathlib import Path
-
-    from joshpy.jobs import _hash_file
-
-    result: dict[str, dict[str, str]] = {}
-    for name, path in file_mappings.items():
-        path = Path(path) if not isinstance(path, Path) else path
-        result[name] = {
-            "path": str(path),
-            "hash": _hash_file(path) if path.exists() else "",
-        }
+    registry.update_session_status(session_id, "completed" if ctx.failed == 0 else "failed")
     return result
 
 

@@ -866,6 +866,91 @@ class TestSweepManagerAdaptiveDispatch(unittest.TestCase):
                 manager.cleanup()
                 manager.close()
 
+    def _run_real_optuna_sweep(self):
+        """Run a 3-trial Optuna sweep end to end against a fake CLI."""
+        from joshpy.cli import CLIResult
+        from joshpy.strategies import OptunaStrategy
+
+        config = JobConfig(
+            template_string="x = {{ x }} meters",
+            source_path=self.josh_path,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2, 3])],
+                strategy=OptunaStrategy(n_trials=3, objective="math:sin"),
+            ),
+        )
+        cli = MagicMock()
+        cli.run.return_value = CLIResult(exit_code=0, stdout="", stderr="", command=[])
+        manager = (
+            SweepManager.builder(config).with_registry(":memory:").with_cli(cli).build()
+        )
+        with patch("joshpy.sweep.load_job_results", return_value=1):
+            result = manager.run(quiet=True, objective=lambda r, h, j: 0.5)
+        return manager, result
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_adaptive_run_adopts_evaluated_jobs(self):
+        """After an adaptive run the manager holds the evaluated jobs and run_ids."""
+        manager, result = self._run_real_optuna_sweep()
+        try:
+            self.assertEqual(result.succeeded, 3)
+            self.assertGreater(len(manager.job_set), 0)
+            self.assertIs(manager.job_set, result.job_set)
+            self.assertEqual(
+                set(manager._last_run_ids), {job.run_hash for job in manager.job_set}
+            )
+            work_dir = manager.job_set.temp_dir
+            self.assertTrue(work_dir.exists())
+        finally:
+            manager.cleanup()
+            manager.close()
+        self.assertFalse(work_dir.exists())
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_load_results_after_adaptive_run(self):
+        manager, _ = self._run_real_optuna_sweep()
+        try:
+            with patch("joshpy.sweep.load_job_results", return_value=2) as load:
+                rows = manager.load_results(quiet=True)
+            self.assertEqual(load.call_count, len(manager.job_set))
+            self.assertEqual(rows, 2 * len(manager.job_set))
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_ingest_after_adaptive_run(self):
+        manager, _ = self._run_real_optuna_sweep()
+        try:
+            with patch("joshpy.sweep.ingest_results", return_value=5) as ingest:
+                self.assertEqual(manager.ingest(quiet=True), 5)
+            self.assertEqual(
+                ingest.call_args.kwargs["label_or_hash"], manager.job_set.jobs[0].run_hash
+            )
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_ingest_before_adaptive_run_raises(self):
+        from joshpy.strategies import OptunaStrategy
+
+        config = JobConfig(
+            template_string="# config",
+            source_path=self.josh_path,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])],
+                strategy=OptunaStrategy(n_trials=2, objective="math:sin"),
+            ),
+        )
+        manager = SweepManager.from_config(config, registry=":memory:")
+        try:
+            with self.assertRaises(RuntimeError) as raised:
+                manager.ingest(quiet=True)
+            self.assertIn("call run() first", str(raised.exception))
+        finally:
+            manager.cleanup()
+            manager.close()
+
     def test_run_dry_run_with_adaptive_prints_message(self):
         """run(dry_run=True) should print message for adaptive without executing."""
         from joshpy.strategies import OptunaStrategy
