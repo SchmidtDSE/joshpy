@@ -331,6 +331,31 @@ class TestProjectCatalogExperiments(unittest.TestCase):
         self.assertEqual(exp.orchestration["sweep_summary"]["parameters"], ["maxGrowth"])
         self.assertEqual(exp.orchestration["sweep_summary"]["total_combinations"], 3)
 
+    def test_orchestration_sweep_summary_adaptive(self):
+        """Adaptive strategies have no combination count up front (len raises)."""
+        from joshpy.strategies import OptunaStrategy, SbiStrategy
+
+        for strategy, params in [
+            (OptunaStrategy(n_trials=5, objective="math:sin"), ["maxGrowth"]),
+            (SbiStrategy(prior={"maxGrowth": {"uniform": [10, 100]}}), ["maxGrowth"]),
+        ]:
+            with self.subTest(strategy=type(strategy).__name__):
+                sweep = SweepConfig(strategy=strategy)
+                if isinstance(strategy, OptunaStrategy):
+                    sweep.config_parameters = [
+                        ConfigSweepParameter(name="maxGrowth", values=[10, 50, 100])
+                    ]
+                config = JobConfig(
+                    template_string="maxGrowth = {{ maxGrowth }} meters",
+                    source_path=self.model,
+                    sweep=sweep,
+                )
+                exp_id = self.catalog.register_experiment(config, registry_path="a.duckdb")
+                summary = self.catalog.get_experiment(exp_id).orchestration["sweep_summary"]
+                self.assertEqual(summary["parameters"], params)
+                self.assertEqual(summary["strategy"], type(strategy).__name__)
+                self.assertIsNone(summary["total_combinations"])
+
 
 class TestProjectCatalogCrossQuery(unittest.TestCase):
     """Tests for cross-experiment query helper."""

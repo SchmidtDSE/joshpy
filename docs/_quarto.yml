@@ -201,6 +201,8 @@ website:
             - reference/strategies.SweepStrategy.qmd
             - reference/strategies.CartesianStrategy.qmd
             - reference/strategies.OptunaStrategy.qmd
+            - reference/strategies.SbiStrategy.qmd
+            - reference/strategies.SbiResult.qmd
             - reference/strategies.strategy_from_dict.qmd
             - reference/strategies.run_adaptive_sweep.qmd
             - reference/strategies.AdaptiveContext.qmd
@@ -310,6 +312,8 @@ quartodoc:
         - strategies.SweepStrategy
         - strategies.CartesianStrategy
         - strategies.OptunaStrategy
+        - strategies.SbiStrategy
+        - strategies.SbiResult
         - strategies.strategy_from_dict
         - strategies.run_adaptive_sweep
         - strategies.AdaptiveContext

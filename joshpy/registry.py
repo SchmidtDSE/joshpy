@@ -2131,6 +2131,34 @@ class RunRegistry:
             [status, session_id],
         )
 
+    def update_session_metadata(self, session_id: str, **fields: Any) -> dict[str, Any]:
+        """Merge top-level *fields* into a session's JSON metadata.
+
+        Existing keys not named in *fields* are kept; named keys are replaced.
+        This is where strategies record run-level outcomes (e.g. Optuna's best
+        trial, an sbi run's populations and tolerances).
+
+        Args:
+            session_id: The session to update.
+            **fields: JSON-serializable values to set.
+
+        Returns:
+            The merged metadata.
+
+        Raises:
+            KeyError: If the session does not exist.
+        """
+        session = self.get_session(session_id)
+        if session is None:
+            raise KeyError(f"Unknown session: {session_id}")
+        metadata = dict(session.metadata or {})
+        metadata.update(fields)
+        self.conn.execute(
+            "UPDATE sweep_sessions SET metadata = ? WHERE session_id = ?",
+            [json.dumps(metadata), session_id],
+        )
+        return metadata
+
     def get_session(self, session_id: str) -> SessionInfo | None:
         """Get session information by ID.
 

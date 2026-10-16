@@ -917,7 +917,9 @@ class JobConfig:
             result["template_vars"] = self.template_vars
         if self.import_files:
             result["import_files"] = [str(p) for p in self.import_files]
-        if self.sweep:
+        # Not truthiness: a sweep listing no parameters (an adaptive strategy
+        # with its own, e.g. SbiStrategy's prior) must still serialize.
+        if self.sweep is not None and self.sweep.to_dict():
             result["sweep"] = self.sweep.to_dict()
         if self.file_mappings:
             result["file_mappings"] = {k: str(v) for k, v in self.file_mappings.items()}

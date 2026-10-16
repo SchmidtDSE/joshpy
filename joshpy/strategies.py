@@ -973,6 +973,546 @@ def sample_params_from_trial(
     return params
 
 
+# Summary-statistics function for SbiStrategy:
+# (registry, run_hash, job) -> {"summary_name": value, ...}
+SummaryFn = Callable[["RunRegistry", str, "ExpandedJob"], dict[str, float]]
+
+_SBI_METHODS = ("smcabc", "mcabc")
+_SBI_PRIOR_KINDS = ("uniform", "normal")
+# Options that make sbi return something other than the simulated particles
+# (a KDE object, or regression-adjusted parameters that were never run).
+_SBI_UNSUPPORTED_KWARGS = ("kde", "kde_kwargs", "kde_sample_weights", "lra", "lra_with_weights",
+                           "sass", "sass_fraction", "sass_expansion_degree", "return_summary")
+
+
+def _check_sbi() -> None:
+    """Raise ImportError if sbi (and torch) are not available."""
+    try:
+        import sbi  # noqa: F401
+        import torch  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "sbi is required for SbiStrategy. Install with: pip install joshpy[sbi] "
+            "(for CPU-only torch, first: pip install torch "
+            "--index-url https://download.pytorch.org/whl/cpu)"
+        ) from None
+
+
+def _sbi_param_value(value: float) -> float:
+    """Normalize an sbi draw (a float32) to its shortest round-tripping decimal.
+
+    The rendered ``.jshc`` then reads ``1.0372891`` rather than the float64
+    expansion of the float32, and the same draw always renders (and hashes)
+    the same way, which replay-based resume relies on.
+    """
+    import numpy as np
+
+    return float(np.format_float_positional(np.float32(value), unique=True, trim="-"))
+
+
+@dataclass
+class SbiResult:
+    """Results from an :class:`SbiStrategy` run.
+
+    Attributes:
+        job_results: (ExpandedJob, CLIResult) for every simulation, in order.
+        succeeded: Number of simulations that ran successfully.
+        failed: Number of simulations that failed.
+        run_ids: run_hash -> run_id of its latest execution.
+        job_set: The evaluated jobs (one per run_hash), owning the work dir.
+        method: The sbi method that ran ("smcabc" or "mcabc").
+        param_names: Parameter order of ``samples`` columns.
+        samples: Accepted parameter sets of the final population, a
+            ``torch.Tensor`` of shape ``[N, len(param_names)]``.
+        weights: Normalized importance weights of ``samples`` (uniform for
+            MCABC), a ``torch.Tensor`` of shape ``[N]``.
+        run_hashes: The run each sample came from (registry join key).
+        populations: Per generation: ``generation``, ``epsilon``,
+            ``run_hashes``, ``weights``, ``distances`` (one population for MCABC).
+        observed: The observed summary statistics.
+        summary: sbi's raw ``return_summary`` dictionary.
+
+    Examples:
+        >>> result = manager.run()
+        >>> df = result.to_dataframe()   # one row per accepted particle
+        >>> df.groupby("run_hash").weight.sum()
+    """
+
+    job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
+    succeeded: int = 0
+    failed: int = 0
+    run_ids: dict[str, str] = field(default_factory=dict)
+    job_set: Any = None  # JobSet
+    method: str = "smcabc"
+    param_names: list[str] = field(default_factory=list)
+    samples: Any = None  # torch.Tensor
+    weights: Any = None  # torch.Tensor
+    run_hashes: list[str | None] = field(default_factory=list)
+    populations: list[dict[str, Any]] = field(default_factory=list)
+    observed: dict[str, float] = field(default_factory=dict)
+    summary: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_adaptive(self) -> bool:
+        """True - this result came from an adaptive strategy."""
+        return True
+
+    def to_dataframe(self) -> Any:
+        """Final population as a DataFrame: one column per parameter, plus
+        ``weight`` and ``run_hash``."""
+        import pandas as pd
+
+        if self.samples is None:
+            return pd.DataFrame(columns=[*self.param_names, "weight", "run_hash"])
+        df = pd.DataFrame(self.samples.tolist(), columns=self.param_names)
+        df["weight"] = self.weights.tolist()
+        df["run_hash"] = self.run_hashes
+        return df
+
+    def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
+        """Iterate over (job, result) tuples."""
+        return iter(self.job_results)
+
+    def __len__(self) -> int:
+        """Return total number of job results."""
+        return len(self.job_results)
+
+
+@register_strategy("sbi")
+@dataclass
+class SbiStrategy(SweepStrategy):
+    """Approximate Bayesian computation with the sbi package.
+
+    The search is sbi's own: rejection ABC (``"mcabc"``) or sequential Monte
+    Carlo ABC (``"smcabc"``, Toni et al. 2009; Beaumont et al. 2009). joshpy
+    supplies the simulator: each batch of parameter sets sbi proposes becomes
+    one :meth:`AdaptiveContext.evaluate` call, so every simulation is
+    registered, run in the configured mode (local, remote, batch remote),
+    loaded, and summarized with ``summaries``. joshpy implements no statistics.
+
+    Requires the ``sbi`` extra (``pip install joshpy[sbi]``).
+
+    Attributes:
+        prior: Parameter -> distribution, in the order sbi sees them, e.g.
+            ``{"maxNewGrowth": {"uniform": [0.2, 2.0]}}``. Supported:
+            ``{"uniform": [low, high]}`` and ``{"normal": [mean, std]}``.
+            Parameter names are the template variables.
+        summaries: ``(registry, run_hash, job) -> dict[str, float]``, or a
+            ``"module:function"`` path. Returns the summary statistics of one
+            run; its keys must cover ``observed``.
+        observed: Observed summary statistics (dict), a ``"module:function"``
+            path returning that dict, or a path to a JSON file. Its key order
+            fixes the order of the summary vector.
+        method: ``"smcabc"`` (default) or ``"mcabc"``.
+        method_kwargs: Passed to the sbi call, e.g. for SMC-ABC
+            ``num_particles``, ``num_initial_pop``, ``num_simulations``,
+            ``epsilon_decay``; for MC-ABC ``num_simulations`` and ``quantile``
+            or ``eps``. KDE/LRA/SASS options are not supported (they return
+            parameters that were never simulated).
+        distance: sbi distance name (default ``"l2"``). Standardize your
+            summaries so no single statistic dominates.
+        seed: Seeds torch and numpy before sbi runs. With the same seed, sbi
+            and torch versions, rerunning an interrupted sweep against the same
+            registry replays the same proposals and reuses completed runs.
+
+    Examples:
+        >>> strategy = SbiStrategy(
+        ...     prior={
+        ...         "maxNewGrowth": {"uniform": [0.2, 2.0]},
+        ...         "minPrecipImpactPct": {"uniform": [0.0, 100.0]},
+        ...     },
+        ...     summaries="my_project.summaries:final_height",
+        ...     observed={"mean_height": 7.1, "height_cv": 0.31},
+        ...     method_kwargs={"num_particles": 50, "num_initial_pop": 100,
+        ...                    "num_simulations": 600, "epsilon_decay": 0.5},
+        ... )
+        >>> config = JobConfig(..., sweep=SweepConfig(strategy=strategy))
+        >>> result = SweepManager.builder(config).with_registry("abc.duckdb").build().run()
+        >>> result.to_dataframe()
+    """
+
+    prior: dict[str, dict[str, list[float]]] = field(default_factory=dict)
+    summaries: SummaryFn | str | None = None
+    observed: dict[str, float] | str | None = None
+    method: str = "smcabc"
+    method_kwargs: dict[str, Any] = field(default_factory=dict)
+    distance: str = "l2"
+    seed: int = 0
+
+    _summaries_fn: SummaryFn | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate the method, prior spec and sbi options."""
+        if self.method not in _SBI_METHODS:
+            raise ValueError(f"Invalid method '{self.method}'. Must be one of: {_SBI_METHODS}")
+        if not self.prior:
+            raise ValueError("SbiStrategy needs a prior with at least one parameter")
+        for name, spec in self.prior.items():
+            if not isinstance(spec, dict) or len(spec) != 1:
+                raise ValueError(
+                    f"Prior for '{name}' must be a one-key dict like "
+                    "{'uniform': [low, high]} or {'normal': [mean, std]}"
+                )
+            ((kind, args),) = spec.items()
+            if kind not in _SBI_PRIOR_KINDS:
+                raise ValueError(
+                    f"Unsupported prior '{kind}' for '{name}'. Supported: {_SBI_PRIOR_KINDS}"
+                )
+            if len(args) != 2:
+                raise ValueError(f"Prior '{kind}' for '{name}' takes two numbers, got {args}")
+            a, b = (float(v) for v in args)
+            if kind == "uniform" and not a < b:
+                raise ValueError(f"Uniform prior for '{name}' needs low < high, got {args}")
+            if kind == "normal" and not b > 0:
+                raise ValueError(f"Normal prior for '{name}' needs std > 0, got {args}")
+        unsupported = sorted(set(self.method_kwargs) & set(_SBI_UNSUPPORTED_KWARGS))
+        if unsupported:
+            raise ValueError(
+                f"Unsupported sbi options {unsupported}: SbiStrategy returns the simulated "
+                "particles; fit a KDE or regression adjustment on result.samples instead."
+            )
+        if callable(self.summaries) and not isinstance(self.summaries, str):
+            self._summaries_fn = self.summaries
+
+    @property
+    def is_adaptive(self) -> bool:
+        """SbiStrategy is adaptive - sbi proposes parameters from results."""
+        return True
+
+    @property
+    def param_names(self) -> list[str]:
+        """Parameter names, in the order of sbi's parameter vector."""
+        return list(self.prior)
+
+    def expand(
+        self,
+        config_params: list[ConfigSweepParameter],
+        file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Not supported: sbi proposes parameters as the run progresses.
+
+        Raises:
+            RuntimeError: Always - use run_adaptive_sweep() or SweepManager.run().
+        """
+        raise RuntimeError(
+            "SbiStrategy is adaptive - use run_adaptive_sweep() or SweepManager.run() "
+            "instead of expand()."
+        )
+
+    def get_summaries(self) -> SummaryFn:
+        """The summary-statistics function, resolving a "module:function" path."""
+        if self._summaries_fn is None and isinstance(self.summaries, str):
+            self._summaries_fn = _load_objective_from_path(self.summaries)  # type: ignore[assignment]
+        if self._summaries_fn is None:
+            raise ValueError(
+                "No summaries function configured for SbiStrategy. Provide summaries= "
+                "in the constructor or pass objective= to SweepManager.run()."
+            )
+        return self._summaries_fn
+
+    def get_observed(self) -> dict[str, float]:
+        """The observed summary statistics, resolving a path or "module:function"."""
+        observed: Any = self.observed
+        if isinstance(observed, str):
+            if ":" in observed and not Path(observed).exists():
+                observed_fn: Callable[[], Any] = _load_objective_from_path(observed)  # type: ignore[assignment]
+                observed = observed_fn()
+            else:
+                import json
+
+                observed = json.loads(Path(observed).read_text())
+        if not isinstance(observed, dict) or not observed:
+            raise ValueError("SbiStrategy needs observed summary statistics (a non-empty dict)")
+        return {str(k): float(v) for k, v in observed.items()}
+
+    def build_prior(self) -> Any:
+        """The prior as a torch distribution sbi accepts.
+
+        All-uniform priors become ``sbi.utils.BoxUniform``; mixed priors become
+        ``sbi.utils.MultipleIndependent`` of per-parameter distributions.
+        """
+        _check_sbi()
+        import torch
+        from sbi.utils import BoxUniform, MultipleIndependent
+
+        specs = [next(iter(spec.items())) for spec in self.prior.values()]
+        if all(kind == "uniform" for kind, _ in specs):
+            low = torch.tensor([float(a) for _, (a, _) in specs])
+            high = torch.tensor([float(b) for _, (_, b) in specs])
+            return BoxUniform(low=low, high=high)
+
+        dists: list[Any] = []
+        for kind, (a, b) in specs:
+            a_t, b_t = torch.tensor([float(a)]), torch.tensor([float(b)])
+            if kind == "uniform":
+                dists.append(torch.distributions.Uniform(a_t, b_t))
+            else:
+                dists.append(torch.distributions.Normal(a_t, b_t))
+        return MultipleIndependent(dists)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization (callables become "module:name")."""
+
+        def ref(value: Any) -> Any:
+            if value is None or isinstance(value, (str, dict)):
+                return value
+            module = getattr(value, "__module__", None)
+            name = getattr(value, "__name__", None)
+            return f"{module}:{name}" if module and name else None
+
+        result: dict[str, Any] = {
+            "type": "sbi",
+            "method": self.method,
+            "prior": self.prior,
+            "distance": self.distance,
+            "seed": self.seed,
+        }
+        if self.method_kwargs:
+            result["method_kwargs"] = self.method_kwargs
+        summaries = ref(self.summaries)
+        if summaries is not None:
+            result["summaries"] = summaries
+        if self.observed is not None:
+            result["observed"] = self.observed
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SbiStrategy:
+        """Create from dict (YAML/JSON deserialization)."""
+        return cls(
+            prior=data.get("prior", {}),
+            summaries=data.get("summaries"),
+            observed=data.get("observed"),
+            method=data.get("method", "smcabc"),
+            method_kwargs=data.get("method_kwargs", {}),
+            distance=data.get("distance", "l2"),
+            seed=data.get("seed", 0),
+        )
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> SbiResult:
+        """Run sbi with joshpy as the simulator.
+
+        Each simulator call (one batch of proposals) is one ``ctx.evaluate``.
+        A run that fails, or whose results cannot be loaded or summarized,
+        returns NaN summaries, which sbi never accepts. Afterwards each
+        population member gets ``sbi_generation``, ``sbi_weight``,
+        ``sbi_distance`` and ``sbi_accepted`` run attributes, and the session
+        metadata gets the settings, versions and per-generation populations.
+
+        Args:
+            ctx: The AdaptiveContext for this run.
+
+        Returns:
+            SbiResult with the final population.
+        """
+        _check_sbi()
+        import numpy as np
+        import torch
+        from sbi.inference import MCABC, SMCABC
+
+        summaries_fn = ctx.objective or self.get_summaries()
+        observed = self.get_observed()
+        keys = list(observed)
+        names = self.param_names
+        prior = self.build_prior()
+        x_o = torch.tensor([[observed[k] for k in keys]], dtype=torch.float32)
+        settings = self._session_settings(observed)
+        self._warn_on_version_drift(ctx, settings)
+        ctx.registry.update_session_metadata(ctx.session_id, sbi=settings)
+
+        hash_by_theta: dict[tuple[float, ...], str] = {}
+        n_calls = 0
+
+        def simulator(theta: Any) -> Any:
+            nonlocal n_calls
+            rows = [
+                {name: _sbi_param_value(v) for name, v in zip(names, row, strict=True)}
+                for row in theta.tolist()
+            ]
+            batch = ctx.evaluate(rows, score=summaries_fn, attributes={"sbi_call": n_calls})
+            n_calls += 1
+
+            failed = set(batch.failures)
+            x = []
+            for i, (row, job) in enumerate(zip(rows, batch.jobs, strict=True)):
+                hash_by_theta[tuple(row[n] for n in names)] = job.run_hash
+                value = batch.values[i]
+                if i in failed or value is None:
+                    x.append([float("nan")] * len(keys))
+                    continue
+                missing = [k for k in keys if k not in value]
+                if missing:
+                    raise ValueError(
+                        f"summaries returned {sorted(value)} for {job.run_hash}, "
+                        f"missing observed statistics {missing}"
+                    )
+                x.append([float(value[k]) for k in keys])
+            return torch.tensor(x, dtype=torch.float32)
+
+        def lookup(particles: Any) -> list[str | None]:
+            return [
+                hash_by_theta.get(tuple(_sbi_param_value(v) for v in row))
+                for row in particles.tolist()
+            ]
+
+        torch.manual_seed(self.seed)
+        np.random.seed(self.seed)
+
+        common = dict(
+            simulator=simulator,
+            prior=prior,
+            distance=self.distance,
+            simulation_batch_size=None,  # each proposal round is one batch
+            num_workers=1,  # parallelism lives in Josh, not in sbi processes
+            show_progress_bars=False,
+        )
+        populations: list[dict[str, Any]] = []
+        if self.method == "smcabc":
+            samples, summary = SMCABC(**common)(
+                x_o=x_o, return_summary=True, **self.method_kwargs
+            )
+            for t, (particles, log_w, eps, dists) in enumerate(
+                zip(
+                    summary["particles"],
+                    summary["weights"],
+                    summary["epsilons"],
+                    summary["distances"],
+                    strict=True,
+                )
+            ):
+                w = log_w.exp()
+                populations.append(
+                    {
+                        "generation": t,
+                        "epsilon": float(eps),
+                        "run_hashes": lookup(particles),
+                        "weights": (w / w.sum()).tolist(),
+                        "distances": dists.tolist(),
+                    }
+                )
+        else:
+            samples, summary = MCABC(**common)(
+                x_o=x_o, return_summary=True, **self.method_kwargs
+            )
+            dists = summary["distances"]
+            populations.append(
+                {
+                    "generation": 0,
+                    "epsilon": float(dists.max()) if len(dists) else None,
+                    "run_hashes": lookup(samples),
+                    "weights": [1.0 / len(samples)] * len(samples) if len(samples) else [],
+                    "distances": dists.tolist(),
+                }
+            )
+
+        final = populations[-1]
+        run_hashes = lookup(samples)
+        if run_hashes == final["run_hashes"]:
+            weights = torch.tensor(final["weights"])
+        else:
+            weights = torch.full((len(samples),), 1.0 / max(len(samples), 1))
+
+        for pop in populations:
+            for run_hash, w, d in zip(
+                pop["run_hashes"], pop["weights"], pop["distances"], strict=True
+            ):
+                if run_hash is not None:
+                    ctx.registry.set_attributes(
+                        run_hash,
+                        sbi_accepted=True,
+                        sbi_generation=pop["generation"],
+                        sbi_weight=w,
+                        sbi_distance=d,
+                    )
+
+        settings.update(
+            populations=populations,
+            epsilons=[pop["epsilon"] for pop in populations],
+            simulations=ctx.succeeded + ctx.failed,
+            failed_simulations=ctx.failed,
+            final_run_hashes=run_hashes,
+        )
+        ctx.registry.update_session_metadata(ctx.session_id, sbi=settings)
+
+        if not ctx.quiet:
+            print(
+                f"sbi {self.method} complete: {len(populations)} population(s), "
+                f"{ctx.succeeded + ctx.failed} simulations ({ctx.failed} failed), "
+                f"final epsilon {final['epsilon']}"
+            )
+
+        return SbiResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+            method=self.method,
+            param_names=names,
+            samples=samples,
+            weights=weights,
+            run_hashes=run_hashes,
+            populations=populations,
+            observed=observed,
+            summary=summary,
+        )
+
+    def _session_settings(self, observed: dict[str, float]) -> dict[str, Any]:
+        """Settings recorded in session metadata, with a replay fingerprint."""
+        import hashlib
+        import json
+
+        import sbi
+        import torch
+
+        settings: dict[str, Any] = {
+            "method": self.method,
+            "prior": self.prior,
+            "param_names": self.param_names,
+            "observed": observed,
+            "summary_keys": list(observed),
+            "method_kwargs": self.method_kwargs,
+            "distance": self.distance,
+            "seed": self.seed,
+        }
+        settings["fingerprint"] = hashlib.sha256(
+            json.dumps(settings, sort_keys=True).encode()
+        ).hexdigest()[:12]
+        settings["versions"] = {
+            "sbi": sbi.__version__,
+            "torch": torch.__version__,
+            "device": "cpu",
+        }
+        return settings
+
+    def _warn_on_version_drift(self, ctx: AdaptiveContext, settings: dict[str, Any]) -> None:
+        """Warn if an earlier session with the same settings ran other versions.
+
+        Replay-based resume needs identical proposals; a different sbi or torch
+        version may propose differently, so completed runs may not be reused.
+        """
+        import json
+        import warnings
+
+        rows = ctx.registry.conn.execute(
+            "SELECT session_id, metadata FROM sweep_sessions WHERE session_id != ?",
+            [ctx.session_id],
+        ).fetchall()
+        for session_id, raw in rows:
+            earlier = (json.loads(raw) if raw else {}).get("sbi") or {}
+            if (
+                earlier.get("fingerprint") == settings["fingerprint"]
+                and earlier.get("versions") != settings["versions"]
+            ):
+                warnings.warn(
+                    f"Session {session_id} ran these sbi settings under "
+                    f"{earlier.get('versions')}; this run uses {settings['versions']}. "
+                    "Proposals may differ, so its completed runs may not be reused.",
+                    stacklevel=2,
+                )
+
+
 @dataclass
 class BatchResult:
     """Outcome of evaluating one batch of parameter sets.
@@ -1224,6 +1764,7 @@ class AdaptiveContext:
                 source_by_hash[run_hash] = "reattached"
 
         if to_run:
+            self._check_distinct_exports(to_run)
             show_progress = not self.quiet and len(to_run) > 1
             done = 0
 
@@ -1481,6 +2022,32 @@ class AdaptiveContext:
         self._expansion_config = config
         return config
 
+    def _check_distinct_exports(self, jobs: list[ExpandedJob]) -> None:
+        """Refuse a multi-job batch whose jobs would all write the same patch file.
+
+        evaluate() runs a whole batch before loading it, so jobs sharing one
+        export path would overwrite each other and the wrong rows would load.
+        Only ``{run_hash}`` and ``{label}`` are unique per job.
+
+        Raises:
+            ValueError: If the patch export path has neither placeholder.
+        """
+        if len(jobs) < 2 or jobs[0].source_path is None:
+            return
+        try:
+            info = self._exports_for(jobs[0]).export_files.get("patch")
+        except Exception:
+            return
+        path = getattr(info, "path", None)
+        if not isinstance(path, str) or "{run_hash}" in path or "{label}" in path:
+            return
+        raise ValueError(
+            f"exportFiles.patch ({path!r}) has no {{run_hash}} or {{label}}, so all "
+            f"{len(jobs)} jobs in this batch would write the same file and their "
+            "results could not be told apart. Add {run_hash} to the export path, "
+            'e.g. "file:///tmp/results_{run_hash}_{replicate}.csv".'
+        )
+
     def _exports_for(self, job: ExpandedJob) -> Any:
         """inspect-exports result for *job*'s script, cached per (script, simulation)."""
         from joshpy.cli import InspectExportsConfig
@@ -1663,7 +2230,9 @@ def run_adaptive_sweep(
     registry.update_session_status(session_id, "running")
     try:
         result = strategy.run_adaptive(ctx)
-    except Exception:
+    except BaseException:
+        # Includes KeyboardInterrupt: an interrupted sweep is marked failed;
+        # rerunning it resumes from the runs already in the registry.
         registry.update_session_status(session_id, "failed")
         ctx.cleanup()
         raise
@@ -1686,8 +2255,6 @@ def _store_study_outcomes(
         session_id: Session ID to update.
         study: Completed Optuna study.
     """
-    import json
-
     # Build metadata dict
     metadata: dict[str, Any] = {
         "optuna_n_trials": len(study.trials),
@@ -1699,15 +2266,4 @@ def _store_study_outcomes(
         metadata["optuna_best_value"] = study.best_value
         metadata["optuna_best_trial_number"] = study.best_trial.number
 
-    # Get existing session metadata and merge
-    session = registry.get_session(session_id)
-    if session and session.metadata:
-        existing = session.metadata
-        existing.update(metadata)
-        metadata = existing
-
-    # Update session metadata via direct SQL (registry doesn't have update_session_metadata)
-    registry.conn.execute(
-        "UPDATE sweep_sessions SET metadata = ? WHERE session_id = ?",
-        [json.dumps(metadata), session_id],
-    )
+    registry.update_session_metadata(session_id, **metadata)
