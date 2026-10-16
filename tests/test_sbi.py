@@ -184,7 +184,7 @@ class TestSbiStrategyRuns(unittest.TestCase):
         self.registries.append(registry)
         return registry
 
-    def run_sbi(self, registry, summaries=model_summaries, **strategy_kwargs):
+    def run_sbi(self, registry, summaries=model_summaries, job_seed=None, **strategy_kwargs):
         from joshpy.jobs import JobConfig, SweepConfig
         from joshpy.strategies import run_adaptive_sweep
 
@@ -204,6 +204,7 @@ class TestSbiStrategyRuns(unittest.TestCase):
         config = JobConfig(
             template_string="growth = {{ growth }} m\nprecip = {{ precip }} %",
             source_path=self.josh_path,
+            seed=job_seed,
             sweep=SweepConfig(strategy=SbiStrategy(**kwargs)),
         )
         session_id = registry.create_session(config=config)
@@ -260,6 +261,63 @@ class TestSbiStrategyRuns(unittest.TestCase):
         self.assertEqual(len(result.samples), 15)
         self.assertEqual(len(result.populations), 1)
         self.assertEqual(self.cli.run.call_count, 150)
+
+    def test_generations_account_for_every_simulation(self):
+        registry = self.registry()
+        result, session_id = self.run_sbi(registry)
+
+        populations = result.populations
+        self.assertEqual(
+            sum(p["simulations"] for p in populations), result.succeeded + result.failed
+        )
+        self.assertEqual(populations[0]["simulations"], 40)  # num_initial_pop
+        for pop in populations[:-1]:
+            self.assertEqual(pop["carried_over"], 0)
+            self.assertGreaterEqual(pop["simulations"], 20)  # num_particles
+        recorded = registry.get_session(session_id).metadata["sbi"]["populations"]
+        self.assertEqual(
+            [p["simulations"] for p in recorded], [p["simulations"] for p in populations]
+        )
+
+    def test_budget_spent_mid_generation_is_carried_over(self):
+        registry = self.registry()
+        result, _ = self.run_sbi(
+            registry,
+            method_kwargs={
+                "num_particles": 20,
+                "num_initial_pop": 40,
+                "num_simulations": 45,  # 5 left for generation 1
+                "epsilon_decay": 0.5,
+            },
+        )
+        initial, final = result.populations
+        self.assertEqual((initial["simulations"], initial["carried_over"]), (40, 0))
+        self.assertEqual(final["simulations"], 5)
+        # At most 5 new particles; sbi fills the rest from generation 0.
+        self.assertGreaterEqual(final["carried_over"], 15)
+        initial_hashes = set(initial["run_hashes"])
+        carried = [h for h in final["run_hashes"] if h in initial_hashes]
+        self.assertEqual(len(carried), final["carried_over"])
+
+    def test_warns_when_every_simulation_shares_a_seed(self):
+        registry = self.registry()
+        with self.assertWarnsRegex(UserWarning, "same Josh random draws"):
+            self.run_sbi(
+                registry, job_seed=3, method="mcabc",
+                method_kwargs={"num_simulations": 10, "quantile": 0.5},
+            )
+
+    def test_no_seed_warning_without_a_job_seed(self):
+        import warnings
+
+        registry = self.registry()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.run_sbi(
+                registry, method="mcabc",
+                method_kwargs={"num_simulations": 10, "quantile": 0.5},
+            )
+        self.assertFalse(any("same Josh random draws" in str(w.message) for w in caught))
 
     def test_failed_runs_are_never_accepted(self):
         from joshpy.cli import CLIResult

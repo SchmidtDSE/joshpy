@@ -1382,7 +1382,8 @@ manager = SweepManager.builder(config).with_registry("abc.duckdb").build()
 result = manager.run(stop_on_failure=False)   # failed runs become NaN, never accepted
 
 df = result.to_dataframe()        # final population: params, weight, run_hash
-result.populations                # per generation: epsilon, run_hashes, weights, distances
+result.populations                # per generation: epsilon, run_hashes, weights, distances,
+                                  # simulations, carried_over
 ```
 
 A complete known-truth example is `examples/sbi_forevertree/run_abc.py`.
@@ -1403,6 +1404,15 @@ A complete known-truth example is `examples/sbi_forevertree/run_abc.py`.
   contain `{run_hash}` (or `{label}`); otherwise `evaluate` raises rather than
   load the wrong file.
 - **Summaries:** standardize them; `l2` lets the largest statistic dominate.
+- **Seeds:** `SbiStrategy.seed` fixes sbi's proposals, not Josh's random draws.
+  Leave `JobConfig.seed` unset so each simulation draws its own noise (a
+  warning is emitted if it is set); seed only the run that makes the observed
+  data.
+- **Budget:** when `num_simulations` runs out mid-generation, sbi fills the last
+  population with particles from the previous one (`use_last_pop_samples=True`,
+  sbi's default). `populations[-1]["carried_over"]` counts them; their
+  distances may exceed that generation's `epsilon`. Each population's
+  `simulations` gives its acceptance rate.
 - **Resume:** rerun with the same seed against the same registry. Completed runs
   are reused and sbi replays the same proposals (a warning is emitted if an
   earlier session with the same settings ran other sbi/torch versions).

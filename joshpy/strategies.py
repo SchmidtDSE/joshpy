@@ -1010,9 +1010,33 @@ def _sbi_param_value(value: float) -> float:
     return float(np.format_float_positional(np.float32(value), unique=True, trim="-"))
 
 
+def _count_generation_simulations(
+    populations: list[dict[str, Any]],
+    call_of: dict[str, int],
+    call_sizes: list[int],
+) -> None:
+    """Add ``simulations`` and ``carried_over`` to each population, in place.
+
+    sbi simulates generations in order, each over one or more simulator calls,
+    and a generation ends with the call that accepted its last particle. So a
+    generation's calls run from the call after the previous generation's last
+    one to the latest call among its own new particles; the final generation
+    also owns any calls after that (a budget that ran out mid-generation).
+    Particles from earlier calls were carried over from the previous population.
+    """
+    boundary = -1  # last simulator call of the previous generation
+    for i, pop in enumerate(populations):
+        calls = [call_of.get(h, -1) if h is not None else -1 for h in pop["run_hashes"]]
+        new = [c for c in calls if c > boundary]
+        last = len(call_sizes) - 1 if i == len(populations) - 1 else max(new, default=boundary)
+        pop["simulations"] = sum(call_sizes[boundary + 1 : last + 1])
+        pop["carried_over"] = len(calls) - len(new)
+        boundary = last
+
+
 @dataclass
 class SbiResult:
-    """Results from an :class:`SbiStrategy` run.
+    """Results from an SbiStrategy run.
 
     Attributes:
         job_results: (ExpandedJob, CLIResult) for every simulation, in order.
@@ -1027,8 +1051,13 @@ class SbiResult:
         weights: Normalized importance weights of ``samples`` (uniform for
             MCABC), a ``torch.Tensor`` of shape ``[N]``.
         run_hashes: The run each sample came from (registry join key).
-        populations: Per generation: ``generation``, ``epsilon``,
-            ``run_hashes``, ``weights``, ``distances`` (one population for MCABC).
+        populations: Per generation: ``generation``, ``epsilon`` (the target
+            tolerance), ``run_hashes``, ``weights``, ``distances``,
+            ``simulations`` (simulator evaluations the generation used, reused
+            runs included) and ``carried_over`` (particles taken from the
+            previous population: sbi fills the last population this way when
+            the budget runs out mid-generation, so their distances may exceed
+            ``epsilon``). One population for MCABC.
         observed: The observed summary statistics.
         summary: sbi's raw ``return_summary`` dictionary.
 
@@ -1318,10 +1347,13 @@ class SbiStrategy(SweepStrategy):
         prior = self.build_prior()
         x_o = torch.tensor([[observed[k] for k in keys]], dtype=torch.float32)
         settings = self._session_settings(observed)
+        self._warn_on_shared_seed(ctx)
         self._warn_on_version_drift(ctx, settings)
         ctx.registry.update_session_metadata(ctx.session_id, sbi=settings)
 
         hash_by_theta: dict[tuple[float, ...], str] = {}
+        call_of: dict[str, int] = {}  # run_hash -> simulator call that ran it
+        call_sizes: list[int] = []
         n_calls = 0
 
         def simulator(theta: Any) -> Any:
@@ -1331,12 +1363,13 @@ class SbiStrategy(SweepStrategy):
                 for row in theta.tolist()
             ]
             batch = ctx.evaluate(rows, score=summaries_fn, attributes={"sbi_call": n_calls})
-            n_calls += 1
+            call_sizes.append(len(rows))
 
             failed = set(batch.failures)
             x = []
             for i, (row, job) in enumerate(zip(rows, batch.jobs, strict=True)):
                 hash_by_theta[tuple(row[n] for n in names)] = job.run_hash
+                call_of[job.run_hash] = n_calls
                 value = batch.values[i]
                 if i in failed or value is None:
                     x.append([float("nan")] * len(keys))
@@ -1348,6 +1381,7 @@ class SbiStrategy(SweepStrategy):
                         f"missing observed statistics {missing}"
                     )
                 x.append([float(value[k]) for k in keys])
+            n_calls += 1
             return torch.tensor(x, dtype=torch.float32)
 
         def lookup(particles: Any) -> list[str | None]:
@@ -1405,6 +1439,7 @@ class SbiStrategy(SweepStrategy):
                     "distances": dists.tolist(),
                 }
             )
+        _count_generation_simulations(populations, call_of, call_sizes)
 
         final = populations[-1]
         run_hashes = lookup(samples)
@@ -1485,6 +1520,25 @@ class SbiStrategy(SweepStrategy):
             "device": "cpu",
         }
         return settings
+
+    @staticmethod
+    def _warn_on_shared_seed(ctx: AdaptiveContext) -> None:
+        """Warn if JobConfig.seed gives every simulation the same random draws.
+
+        ABC compares one stochastic simulation per proposal with the data. With
+        a fixed Josh seed every proposal reuses one noise realization, so the
+        posterior conditions on that realization and ignores the model's noise.
+        """
+        import warnings
+
+        if ctx.config.seed is not None:
+            warnings.warn(
+                f"JobConfig.seed={ctx.config.seed} gives every simulation the same Josh "
+                "random draws, so ABC conditions on one noise realization and the "
+                "posterior ignores the model's stochasticity. Leave seed unset for "
+                "SbiStrategy runs and seed only the run that produces the observed data.",
+                stacklevel=2,
+            )
 
     def _warn_on_version_drift(self, ctx: AdaptiveContext, settings: dict[str, Any]) -> None:
         """Warn if an earlier session with the same settings ran other versions.
