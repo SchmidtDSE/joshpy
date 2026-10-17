@@ -178,6 +178,13 @@ Use Optuna's Bayesian optimization for intelligent parameter search:
 
 Best for: Finding optimal parameters without exhaustive grid search.
 
+### [Simulation-Based Inference](../inference/index.qmd)
+
+Estimating the distribution of parameter values consistent with observed data,
+not just the best one, has its own section: [Inference](../inference/index.qmd).
+It covers `SbiStrategy` (ABC from the sbi package, with joshpy running and
+recording every simulation) through a known-truth case study.
+
 ### [Spin-up / Spin-down](spinup-spindown.qmd)
 
 Warm a simulation to equilibrium before the observed period and watch recovery

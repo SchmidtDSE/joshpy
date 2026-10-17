@@ -29,9 +29,11 @@ project:
     - tutorials/multi-session-sweeps.qmd    # ProjectCatalog for sweeps
     - tutorials/remote-execution.qmd     # Josh Cloud execution
     - tutorials/low-level-components.qmd # Advanced: manual component usage
+    - inference/index.qmd                # Inference landing page (no code)
     - templating.qmd
     - architecture.qmd
     - best-practices.qmd
+    - references.qmd                     # Bibliography, by tutorial (references.bib)
     - reference/
 
 website:
@@ -94,14 +96,20 @@ website:
             href: tutorials/switching-versions.qmd
           - text: "Remote Execution"
             href: tutorials/remote-execution.qmd
+      - text: "Inference"
+        menu:
+          - text: "Overview"
+            href: inference/index.qmd
       - text: "Templating"
         href: templating.qmd
       - text: "Architecture"
         href: architecture.qmd
       - text: "Best Practices"
         href: best-practices.qmd
-      - text: "Reference"
+      - text: "API Reference"
         href: reference/index.qmd
+      - text: "References"
+        href: references.qmd
     right:
       - icon: github
         href: https://github.com/SchmidtDSE/joshpy
@@ -150,6 +158,10 @@ website:
             - tutorials/switching-versions.qmd
             - tutorials/remote-execution.qmd
     
+    - title: "Inference"
+      contents:
+        - inference/index.qmd
+
     - title: "Templating"
       contents:
         - templating.qmd
@@ -161,6 +173,10 @@ website:
     - title: "Best Practices"
       contents:
         - best-practices.qmd
+
+    - title: "References"
+      contents:
+        - references.qmd
     
     - title: "API Reference"
       contents:
@@ -260,6 +276,10 @@ format:
 
 execute:
   freeze: true
+
+# Site-wide bibliography: cite with [@key] in any page (see references.qmd)
+bibliography: references.bib
+link-citations: true
 
 # Quartodoc API reference generation
 quartodoc:

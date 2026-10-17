@@ -13,6 +13,7 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 - **Orchestration**: Define parameter sweeps with Jinja templating and execute simulations
 - **Tracking**: DuckDB-backed registry for experiment management  
 - **Analysis**: Query results across parameter values and replicates
+- **Inference**: Estimate parameters from data with simulation-based inference (sbi), every simulation recorded in the registry
 - **Visualization**: Quick matplotlib diagnostics + R/ggplot2 for publication-quality figures
 
 ## Get Started
@@ -21,6 +22,7 @@ for [Josh](https://joshsim.org) agent-based ecological simulations.
 - [Quickstart](getting-started/quickstart.qmd) - Run your first simulation
 - [Architecture](architecture.qmd) - How GridSpec, JobConfig, SweepManager, RunRegistry, and ProjectCatalog fit together
 - [Tutorials](tutorials/index.qmd) - Step-by-step guides
+- [Inference](inference/index.qmd) - Fit models to data with simulation-based inference
 
 ## Tutorials
 

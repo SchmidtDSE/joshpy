@@ -1,0 +1,100 @@
+---
+title: "Inference"
+description: "Estimate model parameters from data with established simulation-based inference methods, with joshpy running and recording every simulation"
+---
+
+## Why simulation-based inference
+
+A Josh model is a stochastic simulator. Each run is one draw from a distribution
+of outputs that can be sampled but not written down, so the likelihood of the
+observed data can't be computed directly [@hartig2011; @cranmer2020].
+Simulation-based inference estimates parameters from simulations alone: it
+compares simulated output with observed data and keeps the parameter values that
+reproduce it.
+
+These pages estimate the **distribution** of parameter values consistent with
+the data, not one best fit. For a single best fit, see
+[Adaptive Parameter Optimization](../tutorials/adaptive-sweep.qmd).
+
+## Who does what
+
+- **The inference method comes from established packages.** `SbiStrategy` runs
+  the [sbi](https://sbi.readthedocs.io/) package [@boelts2025], which owns the
+  algorithm: proposals, weights and tolerances. joshpy implements no statistics
+  of its own.
+- **joshpy owns the simulations.** Each batch of parameter sets the method
+  proposes is rendered, run (locally, remotely or on Kubernetes), registered,
+  loaded and summarized, exactly like a sweep.
+- **The registry is the only store.** Every simulation, accepted or not, is a
+  registered run you can query later. Runs are content-addressed, so an
+  interrupted search resumes by reusing completed runs, and a seeded search
+  replays exactly.
+
+## Notation
+
+| Symbol | Meaning |
+|--------|---------|
+| $\theta$ | Model parameters ($\varphi$ in @hartig2011) |
+| $D_\text{obs}$, $D_\text{sim}$ | Observed and simulated data |
+| $S_\text{obs}$, $S_\text{sim}$ | Their summary statistics |
+| $d(\cdot, \cdot)$ | Distance between summaries |
+| $\varepsilon$ | Tolerance |
+| $p(\theta)$ | Prior |
+| $p(D_\text{obs} \mid \theta)$ | Likelihood, intractable for a stochastic simulator |
+| $p(\theta \mid S_\text{obs})$ | The posterior that ABC approximates |
+
+## Three steps
+
+@hartig2011 organize inference for stochastic simulation models in three steps:
+
+| Step | What it does |
+|------|--------------|
+| **Aggregation** | Reduce simulated and observed data to summary statistics $S$, computed the same way for both |
+| **Likelihood approximation** | Approximate the likelihood of $S_\text{obs}$ at a single $\theta$ from simulations |
+| **Sampling** | Explore $\theta$ efficiently to recover the shape of the likelihood or posterior |
+
+They give four options for the middle step, which differ in where the
+variability comes from:
+
+| Option | Variability comes from | Example |
+|--------|------------------------|---------|
+| (a) Nonparametric | Within the stochastic simulation | ABC: a simulation counts as a match if $d(S_\text{sim}, S_\text{obs}) \le \varepsilon$ [@toni2009; @beaumont2009] |
+| (b) Parametric | Within the simulation, through an assumed distribution | Synthetic likelihood [@wood2010] |
+| (c) External error model or informal likelihood | Outside the simulation | An explicit observation-error model; the ABC tolerance read this way [@wilkinson2013] |
+| (d) Rejection filter | Either, depending on the filter criteria | Keep the parameter sets whose output meets stated criteria |
+
+## Methods available
+
+| Method | `SbiStrategy` | Notes |
+|--------|---------------|-------|
+| Rejection ABC | `method="mcabc"` | One filter over prior draws |
+| Sequential Monte Carlo ABC | `method="smcabc"` | Generations that tighten the tolerance, with importance weights [@toni2009; @beaumont2009] |
+| Neural likelihood, ratio and posterior estimators | Not yet | Learn a surrogate from simulations; trained on prior draws, they apply to new observations without new simulations [@cranmer2020] |
+
+## Roadmap
+
+The pages in this section build toward fitting a Joshua tree model to I&M
+survey data, using the ForeverTree model as a known
+truth:
+
+1. **ForeverTree case study**: the model, a simulated survey, prior simulations,
+   and choosing summary statistics.
+2. **SMC-ABC on a simulated survey**: option (a), with a sufficiency test and a
+   coverage check.
+3. **Rejection filter on a model property**: option (d), asking which
+   parameters produce a target behaviour.
+4. **Posterior probability of a model property**: combining the two.
+
+| ForeverTree example | Joshua tree case |
+|---------------------|------------------|
+| Survey of fixed cells with measurement error | I&M sites, plot sizes, stage classes, detection |
+| Mean height and CV of the surveyed cells | Log juvenile:adult ratio; optionally density or the spread between sites |
+| Final window of the same run | End window of a separate long spin-up under normal climate |
+| Annual height gain inside a band | Log λ inside $[-\delta, \delta]$ |
+| Within-window SD of the gain | The "not chaotic" criterion |
+| Truth outside the band | A declining truth: P(stable \| I&M) should come out low |
+
+## References
+
+::: {#refs}
+:::

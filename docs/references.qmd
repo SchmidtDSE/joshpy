@@ -1,0 +1,45 @@
+---
+title: "References"
+description: "Works the joshpy documentation draws on, grouped by page"
+---
+
+joshpy implements no statistics of its own. Optimization and inference come from
+established packages maintained by others, and the docs describe them in the
+terms of the papers below. Each page lists the works it cites at its end. This
+page collects them, grouped by page.
+
+::: {.callout-tip collapse="true"}
+## Adding a reference
+
+Add the BibTeX entry to `docs/references.bib`, cite it in a page with `[@key]`,
+and list it below under that page's heading. Quarto formats the citation and
+adds the entry to the page's own reference list.
+:::
+
+## Inference: overview
+
+[Page](inference/index.qmd)
+
+- @hartig2011: the framework the Inference pages follow for stochastic
+  ecological simulation models: aggregation into summary statistics, likelihood
+  approximation, and sampling, with four options for the approximation.
+- @cranmer2020: the wider field of simulation-based inference, including
+  amortized neural estimators.
+- @boelts2025: the sbi package that `SbiStrategy` runs.
+- @toni2009 and @beaumont2009: sequential Monte Carlo ABC and its importance
+  weights, as implemented in sbi.
+- @wood2010: synthetic likelihood, a parametric likelihood approximation.
+- @wilkinson2013: the tolerance read as an explicit model-error term.
+
+## Adaptive Parameter Optimization
+
+[Tutorial](tutorials/adaptive-sweep.qmd)
+
+- @akiba2019: Optuna, the framework behind `OptunaStrategy`.
+- @bergstra2011: the tree-structured Parzen estimator (TPE), the sampler the
+  tutorial uses.
+
+## Bibliography
+
+::: {#refs}
+:::
