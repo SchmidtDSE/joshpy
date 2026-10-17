@@ -234,6 +234,15 @@ PR 1 drops the tutorial page, so neither render ships.
   - recording the statistics spec in session metadata.
 
   After PR 5, propose the smallest primitive set those uses justify.
+
+  Logged in PR 2 (`forevertree_case.py`):
+  - No "last step" helper, so `FINAL_STEP = 10` is hard-coded from the model.
+  - Per-cell values come from `DiagnosticQueries.get_all_variables_at_step`, which
+    selects every variable; that is adequate.
+  - Survey selection by `(x, y)`, measurement noise and the statistics are pandas/numpy
+    helpers (`survey`, `measurement_rng`, `statistics`).
+  - The scaled-summaries closure (`CaseStudy.abc_target`) would serialize as an
+    unimportable path in `SbiStrategy.to_dict`.
 - **A batch prior-sampling strategy** (random or Latin hypercube via `scipy.stats.qmc`). Revisit if
   the `mcabc` workaround gets in the way: placeholder `observed` for filters, or more parameters
   where a Latin hypercube matters.
