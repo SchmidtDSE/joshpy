@@ -68,9 +68,11 @@ configure-reticulate = "bash scripts/configure-reticulate.sh"
 # - docs-build: Incremental build (uses _freeze cache when available)
 # - docs-preview: Build + live preview
 # - docs-clean: Remove all build artifacts including _freeze cache
+# - docs-inference: Execute the Inference pages in order (needs sbi; slow, then cached in a registry)
 # For a full rebuild: pixi run docs-clean && pixi run docs-build
 docs-install = "pip install -e '.[full,docs]' --quiet"
 docs-api = { cmd = "python -m quartodoc build --config docs/_quarto.yml", depends-on = ["docs-install"] }
 docs-build = { cmd = "bash scripts/render-docs.sh", depends-on = ["docs-install"] }
 docs-preview = { cmd = "echo '# cmd: conda' > $CONDA_PREFIX/conda-meta/history && RETICULATE_PYTHON=$CONDA_PREFIX/bin/python quarto preview docs", depends-on = ["docs-build"] }
-docs-clean = "rm -rf docs/_site docs/_freeze docs/reference/*.qmd && rm -f docs/tutorials/*.duckdb docs/tutorials/*.duckdb.wal"
+docs-clean = "rm -rf docs/_site docs/_freeze docs/reference/*.qmd && rm -f docs/tutorials/*.duckdb docs/tutorials/*.duckdb.wal docs/inference/*.duckdb docs/inference/*.duckdb.wal"
+docs-inference = { cmd = "bash scripts/render-inference.sh", depends-on = ["install-sbi"] }

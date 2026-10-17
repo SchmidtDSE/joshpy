@@ -1,0 +1,33 @@
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+```
+
+```{python}
+#| include: false
+# Docs-build only. Load scipy's C++ runtime before torch (some environments
+# otherwise pick up an older system libstdc++), set table display options, and
+# work around reticulate redirecting every logging handler's `stream` while it
+# captures output: torch's stderr handler has a read-only `stream` that already
+# follows sys.stderr, so make the redirect a no-op. One function call, so torch
+# is imported and patched within a single captured statement.
+import scipy.spatial  # noqa: F401
+import pandas as pd
+
+pd.set_option("display.width", 120)
+pd.set_option("display.max_columns", None)
+
+
+def _follow_stderr_quietly():
+    import sys
+
+    import torch._logging._internal as torch_logging
+
+    torch_logging._StderrHandler.stream = property(
+        lambda self: sys.stderr, lambda self, value: None
+    )
+
+
+_follow_stderr_quietly()
+```

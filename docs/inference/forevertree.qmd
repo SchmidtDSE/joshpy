@@ -1,0 +1,352 @@
+---
+title: "ForeverTree Case Study"
+description: "A known-truth setup for simulation-based inference: the model, a simulated survey, prior simulations, and choosing summary statistics"
+execute:
+  warning: false
+---
+
+{{< include _sbi-setup.qmd >}}
+
+## Introduction
+
+The Inference pages share one **known-truth** case study. We pick parameter
+values, simulate *pseudo-observed* data there, and check whether a method
+recovers them. Run this kind of recovery test before pointing a method at field
+data.
+
+This page builds the case study and covers the first of the three steps in
+@hartig2011: **aggregation**, the choice of summary statistics. It ends with
+everything a method page needs: the pseudo-observed data, 200 simulations from
+the prior, and the scale of each statistic. Method pages start from the middle
+with one call, `case.load(...)`, which reuses the runs this page made.
+
+::: {.callout-note}
+## Runtime
+
+The first render runs about 250 simulations of a small model (roughly 15
+minutes on a laptop, one simulation at a time). They are stored in the shared
+registry `forevertree.duckdb`, so later pages reuse them instead of
+re-simulating.
+:::
+
+The case study's code lives in one module,
+`examples/sbi_forevertree/forevertree_case.py`. The docs pages and the
+command-line example `run_abc.py` both import it:
+
+```{python}
+import sys
+
+sys.path.insert(0, "../../examples/sbi_forevertree")
+import forevertree_case as case
+import pandas as pd
+
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry("forevertree.duckdb")  # shared by the Inference pages
+cli = JoshCLI(josh_jar=JarMode.DEV)
+```
+
+## The Model
+
+We use the ForeverTree model from the Josh paper: ten trees per 16 km cell, on
+a grid of 63 cells, grow each year by up to `maxNewGrowth`, scaled by a
+temperature response and a precipitation response. Drought slows growth, and
+`minPrecipImpactPct` sets how much: at 0% a dry year halts growth, at 100%
+drought has no effect.
+
+The model is **stochastic**: each tree's growth each year is multiplied by a
+draw from a normal distribution with mean 100% and standard deviation 5%. Each
+run is therefore one draw from a distribution of outputs,
+$p(D_\text{sim} \mid \theta)$, that we can sample but can't write down. That is
+why the likelihood is intractable and has to be approximated
+[@hartig2011, fig. 2].
+
+| Parameter | Meaning | Prior | Truth |
+|-----------|---------|-------|-------|
+| `maxNewGrowth` | Maximum height gain per year | Uniform, 0.2 to 2.0 m | 1.0 m |
+| `minPrecipImpactPct` | Growth retained in the driest years | Uniform, 0 to 100% | 40% |
+
+::: {.callout-note collapse="true"}
+## View Simulation File (forevertree.josh)
+
+```{python}
+#| echo: false
+print((case.HERE / "forevertree.josh").read_text())
+```
+:::
+
+::: {.callout-note collapse="true"}
+## View Configuration Template (forevertree.jshc.j2)
+
+```{python}
+#| echo: false
+print((case.HERE / "forevertree.jshc.j2").read_text())
+```
+:::
+
+::: {.callout-note collapse="true"}
+## View the Case Study Module (forevertree_case.py)
+
+```{python}
+#| echo: false
+#| output: asis
+print("````python\n" + (case.HERE / "forevertree_case.py").read_text().rstrip() + "\n````")
+```
+:::
+
+::: {.callout-important}
+## Put `{run_hash}` in the export path
+
+`SbiStrategy` runs each batch of parameter sets **before** loading any of them,
+so every run needs its own output file:
+
+```josh
+exportFiles.patch = "file:///tmp/forevertree_abc_{run_hash}_{replicate}.csv"
+```
+
+Without `{run_hash}` (or `{label}`), every run in a batch would write the same
+CSV, so joshpy refuses such a batch with an error.
+:::
+
+## The Pseudo-Observed Data: a Survey
+
+Field data are never as complete as a simulation's output. A monitoring program
+measures a fixed set of sites, each with error. To mirror that, the
+pseudo-observed data are a **survey**:
+
+- the final-year mean tree height of **8 fixed cells**, spread across the
+  climate gradient;
+- each **measured with error**: normal, with a standard deviation of
+  0.25 m.
+
+The same survey is applied to the truth and to every simulation. Statistics
+must be computed the same way for observed and simulated data, and simulating
+the survey makes its error part of the variability that comes from within the
+model. The tolerance $\varepsilon$ then carries only the approximation error.
+The alternative is to leave the survey unsimulated and size $\varepsilon$ to the
+observation error, which makes ABC exact for the model plus that error model
+[@wilkinson2013].
+
+The survey, from raw output to measured heights:
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.final_heights, case.measurement_rng, case.survey)
+```
+
+The measurement noise is seeded from the run and replicate, so a run that is
+reused or replayed is measured exactly as before.
+
+The truth run gets its own seed (`seed=1`), so the page is reproducible. The
+simulations used for inference leave `seed` unset, so each draws its own noise,
+as independent realizations of a stochastic model should.
+
+```{python}
+truth_job, observed = case.observe_truth(registry, cli)
+truth_survey = case.survey(registry, truth_job.run_hash)
+truth_survey.round(2)
+```
+
+## Simulating the Prior
+
+Every ABC method starts by simulating parameter sets drawn from the prior. We
+draw 200 with sbi's rejection ABC (`method="mcabc"`) set to keep every draw
+(`quantile=1.0`), which makes it a plain prior simulation:
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.simulate_prior)
+```
+
+```{python}
+prior = case.simulate_prior(registry, cli, observed)
+reference = case.reference_table(registry, [job for job, _ in prior.job_results])
+reference.drop(columns="run_hash").describe().loc[["count", "mean", "std", "min", "max"]].round(3)
+```
+
+Each row of `reference` holds one simulation's parameters and its candidate
+statistics: the **reference table** of ABC [@csillery2012]. The registry holds
+every run's full output, so statistics we haven't thought of yet can be
+computed later without re-simulating.
+
+## Choosing Summary Statistics
+
+A summary statistic must change with the parameters, and it must be computed
+the same way for observed and simulated data. From the survey, four candidates
+come to mind:
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.statistics)
+```
+
+Plotting each candidate against each parameter, over the prior simulations,
+shows what each one can tell us. The dashed line is the pseudo-observed value
+and the dotted line the true parameter; ρ is the Spearman rank correlation.
+
+```{python}
+#| label: fig-candidates
+#| fig-cap: "Candidate statistics of the survey against each parameter, over 200 prior simulations. The mean moves with both parameters; the CV moves with drought sensitivity (minPrecipImpactPct) and hardly at all with growth."
+case.plot_candidates(reference, case.statistics(truth_survey["measured"]))
+```
+
+```{python}
+statistic_names = list(case.LABELS)
+correlations = reference[list(case.PRIOR) + statistic_names].corr(method="spearman")
+correlations.loc[statistic_names, list(case.PRIOR)].rename(index=case.LABELS).round(2)
+```
+
+**Why the CV and not the variance?** The pair (mean, variance) and the pair
+(mean, CV) carry the same information: each can be computed from the other, so
+neither is more sufficient. What differs is how the distance combines them,
+and that matters because the tolerance is not zero.
+
+ForeverTree is multiplicative in `maxNewGrowth`:
+
+```josh
+newGrowth.step = meta.maxNewGrowth * temperatureImpact * precipImpact * stochastic
+```
+
+So every cell's height scales with `maxNewGrowth`. The mean and the SD of the
+surveyed heights scale with it, and the variance with its square. The CV
+(SD / mean) cancels it and tracks drought sensitivity, which spreads wet and dry
+cells apart. A little dependence on growth remains, because the measurement
+error is additive and weighs more when trees are short.
+
+So **mean + CV gives roughly one statistic per parameter**: the CV pins down
+`minPrecipImpactPct`, and the mean then pins down `maxNewGrowth`. Mean + variance
+mixes both parameters in both statistics, and the variance's prior spread is
+dominated by the fastest-growing draws, which leaves it little resolution near
+the truth.
+
+**Are these statistics sufficient?** A statistic is *sufficient* if it keeps all
+the information in the data that is relevant to the parameters. Then
+$p(\theta \mid S_\text{obs}) = p(\theta \mid D_\text{obs})$. Minimal sufficiency
+is desirable but not required [@hartig2011]. We don't know whether mean and CV
+are sufficient: the figure shows they are *informative*, which is weaker. The
+survey also discards most cells and the whole height trajectory before the
+final year. Sufficiency usually has to be tested on artificial data
+[@hartig2011]; the SMC-ABC page does that by dropping the CV.
+
+Pattern-oriented modelling makes the same point in ecological terms: its
+"patterns" are summary statistics, and combining patterns observed at different
+scales is a recognized way to approach sufficiency [@grimm2005; @hartig2011].
+
+## Scaling
+
+Most ABC methods compare statistics with a Euclidean distance, which adds up the
+differences in each statistic, so a statistic with a larger spread would
+dominate. Following @hartig2011, who cite @beaumont2002, we divide each
+statistic by its standard deviation across the prior simulations:
+
+```{python}
+scale = {name: float(reference[name].std()) for name in case.STATISTICS}
+study = case.CaseStudy(truth_job, truth_survey, reference, scale)
+
+pd.DataFrame(
+    {
+        "pseudo-observed": study.observed,
+        "prior SD (scale)": scale,
+        "pseudo-observed (prior SDs)": study.observed_scaled,
+    }
+).rename(index=case.LABELS).round(3)
+```
+
+## From Model Output to a Comparison
+
+Here is the whole aggregation step for the truth run, ending in the comparison
+an ABC method makes. For illustration, the tolerance $\varepsilon$ is set so
+that the closest 10% of the prior simulations fall within it, which is
+rejection ABC at a 10% acceptance rate.
+
+```{python}
+epsilon = float(study.distance(reference).quantile(0.1))
+print(f"ε = {epsilon:.3f} prior SDs")
+```
+
+```{python}
+#| label: fig-pipeline
+#| fig-cap: "From model output to a comparison, for the pseudo-observed run. (1) Final-year height of all 63 cells; outlined cells are surveyed. (2) The survey measures each with error. (3) The measured heights reduce to a mean and a CV. (4) In units of prior SDs, the pseudo-observed statistics are compared with each prior simulation's; those within ε (dashed circle) are accepted."
+case.plot_pipeline(study, registry, epsilon)
+```
+
+## What the Likelihood Approximation Compares
+
+At a single $\theta$, ABC's likelihood approximation asks how often a
+simulation lands within $\varepsilon$ of $S_\text{obs}$. To see what that
+involves, we run 50 replicates at the truth, as one job with its own seed
+(`seed=2`), and survey each one twice: once without measurement error (model
+noise only) and once with it.
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.replicate_study)
+```
+
+```{python}
+replicates = case.replicate_study(registry, cli, n=50)
+replicates["distance"] = study.distance(replicates)
+
+spread = replicates.groupby("observation")[case.STATISTICS].std() / pd.Series(scale)
+spread.rename(columns=case.LABELS).round(4)
+```
+
+```{python}
+replicates.groupby("observation")["distance"].describe()[["50%", "max"]].round(4)
+```
+
+The first table gives each statistic's spread between replicates, in prior SDs;
+the second, how far the replicates land from $S_\text{obs}$.
+
+```{python}
+#| label: fig-replicates
+#| fig-cap: "Fifty replicate simulations at the true parameters, surveyed without (model only) and with measurement error, in units of each statistic's prior SD. Left and centre: offsets from the pseudo-observed statistics (dashed), which are themselves one draw with measurement error. Right: the fraction of replicates within ε of the pseudo-observed statistics, the indicator-kernel estimate of the ABC likelihood at the truth, against ε; the dashed line marks the 10% rejection tolerance."
+case.plot_replicates(study, replicates, epsilon)
+```
+
+The fraction of replicates within $\varepsilon$ estimates the ABC likelihood at
+the truth for that tolerance (an indicator kernel). An ABC method estimates it
+implicitly at every $\theta$ it proposes, with one simulation each.
+
+Two things follow from the figure:
+
+- **The survey's measurement error is the larger noise source.** Model noise
+  averages out over the 10 trees in each cell, so it barely moves the survey
+  statistics; the measurement error on 8 cells moves them much more. The
+  pseudo-observed data are one draw from the orange distributions, not their
+  centre.
+- **The tolerance decides what the posterior's width means.** Where
+  $\varepsilon$ is far above the replicate distances, every replicate counts as
+  a match, the likelihood at the truth is close to 1, and the posterior's width
+  reflects the tolerance rather than the data's noise. The width starts to
+  reflect the survey's noise only once a search tightens $\varepsilon$ toward
+  the replicate distances, which is what the SMC-ABC page's simulation budget
+  has to buy.
+
+## Starting a Method Page
+
+Everything above is stored in the registry. A method page starts from the
+middle with one call, which reuses these runs instead of re-simulating:
+
+```{python}
+#| eval: false
+import forevertree_case as case
+
+study = case.load(registry, cli)  # pseudo-observed survey, prior simulations, scale
+summaries, observed = study.abc_target()  # scaled summaries function and S_obs, for SbiStrategy
+```
+
+```{python}
+registry.close()  # the registry stays on disk for the other Inference pages
+```
+
+## References
+
+::: {#refs}
+:::
