@@ -73,7 +73,7 @@ why the likelihood is intractable and has to be approximated
 
 ```{python}
 #| echo: false
-print((case.HERE / "forevertree.josh").read_text())
+print((case.HERE / "forevertree.josh").read_text(encoding="utf-8"))
 ```
 :::
 
@@ -82,7 +82,7 @@ print((case.HERE / "forevertree.josh").read_text())
 
 ```{python}
 #| echo: false
-print((case.HERE / "forevertree.jshc.j2").read_text())
+print((case.HERE / "forevertree.jshc.j2").read_text(encoding="utf-8"))
 ```
 :::
 
@@ -92,7 +92,7 @@ print((case.HERE / "forevertree.jshc.j2").read_text())
 ```{python}
 #| echo: false
 #| output: asis
-print("````python\n" + (case.HERE / "forevertree_case.py").read_text().rstrip() + "\n````")
+print("````python\n" + (case.HERE / "forevertree_case.py").read_text(encoding="utf-8").rstrip() + "\n````")
 ```
 :::
 
