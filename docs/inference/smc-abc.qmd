@@ -24,10 +24,10 @@ it, and whether the method's intervals are calibrated.
 ## Runtime
 
 The first render runs about 1,100 simulations: two SMC-ABC searches of 600
-evaluations each, 60 of which each search reuses from the case study (roughly
-an hour on a laptop, one simulation at a time). They are stored in the shared
-registry `forevertree.duckdb`, so a later render replays them instead of
-re-simulating.
+evaluations each, 60 of which each search reuses from the case study, and 30
+for a posterior predictive check (roughly an hour on a laptop, one simulation
+at a time). They are stored in the shared registry `forevertree.duckdb`, so a
+later render replays them instead of re-simulating.
 :::
 
 ```{python}
@@ -210,12 +210,25 @@ print(
 )
 ```
 
-SMC-ABC spends its simulations near the particles it has already accepted,
-so it reaches tolerances that rejection sampling would reach only with many
-more draws from the prior. Where the final tolerance sits relative to the
-replicate distances tells us what the posterior's width means: well above them,
-the width is mostly tolerance; close to them, it begins to reflect the survey's
-noise. A larger budget buys a smaller tolerance (see
+Two things to read from this:
+
+- **The last generation is mostly carried over.** Generation 5 had only 21
+  simulations left and accepted one of them; the other 29 particles were
+  carried over from generation 4. So the final population effectively sits at
+  generation 4's tolerance, about 0.09 prior SDs: the largest distance in it.
+  Passing `use_last_pop_samples=False` in `method_kwargs` would end on the
+  last complete generation instead.
+- **The budget was enough.** Even 0.09 is below the median replicate distance
+  at the truth (0.12), so at this tolerance fewer than half of the replicates
+  of the true parameters would count as a match. The posterior's width now
+  reflects the survey's noise more than the tolerance. Shrinking the tolerance
+  further would change the posterior less and less, at a rising cost: the
+  acceptance rate fell from 50% in generation 0 to 17% in generation 4.
+
+None of the 200 prior simulations lies this close to $S_\text{obs}$, so
+rejection sampling would need far more draws from the prior to get here.
+SMC-ABC got here by spending its simulations near the particles it had already
+accepted. If a budget falls short, raise it without starting over (see
 [Resuming and Replaying](#resuming-and-replaying)).
 
 ## Results
@@ -272,7 +285,8 @@ posterior_table(result).round(3)
 print(f"effective sample size: {effective_sample_size(result):.1f} of {len(result.run_hashes)} particles")
 ```
 
-Three notes on reading this table:
+Both intervals contain the truth, and each spans about 8% of the prior's 90%
+width. Three notes on reading this table:
 
 - **The intervals are marginal.** Each describes one parameter on its own. The
   joint posterior can be much narrower in some directions than the two
@@ -299,7 +313,8 @@ generation_table(result_mean).round(3)
 ```
 
 With one statistic instead of two, the same budget reaches a smaller
-tolerance: a simulation has only one dimension in which to land close.
+tolerance (0.011 prior SDs, against 0.045): a simulation has only one
+dimension in which to land close.
 
 ```{python}
 posterior_table(result_mean).round(3)
@@ -333,9 +348,11 @@ sensitivity gives the same mean height as slower growth with less. The
 accepted parameter sets spread along that trade-off. Different parameter sets
 that reproduce the data equally well are **equifinal** [@beven2006]; the
 parameters are not identifiable from the mean. Neither marginal interval shows
-this on its own. The intervals can look moderately narrow, or contain the
-truth, while the joint posterior is a ridge, so check the correlations or the
-joint plot, not only the marginal intervals.
+this on its own: both contain the truth, and the one for `maxNewGrowth` spans
+only 27% of the prior's width, yet a correlation of −0.98 means the joint
+posterior is a thin ridge. So check the correlations or the joint plot, not
+only the marginal intervals. Even with the CV, the two parameters remain
+somewhat correlated (−0.46).
 
 What do equifinal parameter sets look like? Here are the truth and, from each
 search, the final particle farthest from the truth (in units of the prior
@@ -354,15 +371,18 @@ case.plot_final_states(
 )
 ```
 
-A mean-only particle can match the observed mean while the landscape behind it
-differs: the spread between wet and dry cells, which the CV measures, is
-where such parameter sets part ways.
+The mean-only particle matches the observed mean (7.15 m, against 7.14 m)
+with `minPrecipImpactPct` at 81% instead of 40%, so drought barely slows its
+trees. Its landscape is much more uniform, with a CV of 0.15 instead of 0.39.
+The spread between wet and dry cells, which the CV measures, is where such
+parameter sets part ways.
 
 ## What the Registry Holds
 
 Every simulation of both searches is a registered run, accepted or not. Each
 final particle carries run attributes: the simulator call that ran it, and its
-generation, weight and distance.
+generation, weight and distance. A carried-over particle is labelled with the
+last generation it belongs to.
 
 ```{python}
 particles = result.to_dataframe()
@@ -460,9 +480,16 @@ pd.DataFrame(
 ).T.round(3)
 ```
 
-Coverage tests calibration, not sufficiency. The mean-only intervals can be
-calibrated too, and still much wider: honest about knowing less. The
-sufficiency test above is what shows how much the CV adds.
+With mean and CV, both parameters over-cover (0.975 and 0.97, against
+0.905 ± 0.021), as expected with $\varepsilon > 0$. With the mean alone,
+`minPrecipImpactPct` covers close to the nominal rate (0.91), while its
+accepted range spans 82% of the prior, against 33% with the CV: calibrated,
+and honest about knowing less. The mean alone gives a slightly narrower range
+for `maxNewGrowth`: from 199 simulations, the 20 nearest in two statistics lie
+farther away than the 20 nearest in one, the cost of each added statistic.
+
+Coverage tests calibration, not sufficiency. The sufficiency test above is
+what shows how much the CV adds.
 
 ## Model Misspecification
 
@@ -506,13 +533,15 @@ def predictive_range(sites):
 check = predictive.groupby(["x", "y"]).apply(predictive_range, include_groups=False)
 check = study.truth_survey.set_index(["x", "y"])[["measured"]].join(check)
 check["inside"] = (check["5%"] <= check["measured"]) & (check["measured"] <= check["95%"])
-check.sort_index(level="x").round(2)
+check = check.sort_index(level="x")
+check.insert(0, "site", range(1, len(check) + 1))  # numbered west to east, as in the maps
+check.round(2)
 ```
 
 Each row is a survey site: its observed measured height, and the central 90%
 of the posterior predictive heights there. With a correct model, the observed
-values should fall inside for most sites; a site that is consistently missed
-points to a part of the landscape the model gets wrong.
+values should fall inside for most sites; here all 8 do. A site that is
+consistently missed points to a part of the landscape the model gets wrong.
 
 ## Scaling Up
 
