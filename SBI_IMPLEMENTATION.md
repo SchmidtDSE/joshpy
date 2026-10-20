@@ -147,7 +147,7 @@ These findings apply to every page and experiment.
 | #86, #87, #88 | `feat/adaptive-evaluate-batch`, `feat/batch-no-wait-resume`, `feat/sbi-strategy` | Open, awaiting merge |
 | #89 (PR 1) | `docs/sbi-tutorial` | Done. Inference tab and landing page, site-wide references, old tutorial retired |
 | #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. The user's review isn't finished yet |
-| PR 3 | `docs/inference-smc-abc` | Rendered and committed. **Next: open the draft PR** (below) |
+| #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Awaiting the user's review of the render |
 
 ### PR 3: status
 
@@ -155,10 +155,8 @@ These findings apply to every page and experiment.
 references, roadmap) and rendered at the decided budget; the case study links to it. Both freezes
 are committed.
 
-**Left to do:**
-- Push the branch, then open a **draft** PR with base `docs/inference-forevertree`, titled
-  "… (SBI stack 6/6)". Renumber #86–#90 to "/6".
-- The user reviews the render; the PR stays a draft until then.
+**Opened as draft #91** (base `docs/inference-forevertree`, "SBI stack 6/6"); #86–#90 are
+renumbered to "/6". It stays a draft until the user has reviewed the render.
 
 **Verified on the way:**
 - The `observe()` refactor: `case.load()` on the warm registry simulated nothing (202 `job_runs`
