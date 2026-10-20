@@ -124,6 +124,10 @@ These findings apply to every page and experiment.
   - Check every freeze for leaks before committing:
     `grep -c 'Text(\|Line2D\|BarContainer' docs/_freeze/inference/*/execute-results/html.json`
     should print 0.
+  - A render can crash once at the end of a page's knit with `corrupted double-linked list`
+    (glibc), seen once on a warm re-render. No freeze is written, `set -e` stops the script, and
+    `docs/inference/<page>_files/` is left behind. Delete that and rerun; the retry passed. It
+    costs little, because the registry replays.
 - **Devcontainer.** In standalone scripts, import scipy (or joshpy) before torch or sbi. Otherwise
   scipy's extensions can fail to load against the system libstdc++ (`CXXABI_1.3.15`). pytest and
   Quarto renders are unaffected.
@@ -143,67 +147,54 @@ These findings apply to every page and experiment.
 | #86, #87, #88 | `feat/adaptive-evaluate-batch`, `feat/batch-no-wait-resume`, `feat/sbi-strategy` | Open, awaiting merge |
 | #89 (PR 1) | `docs/sbi-tutorial` | Done. Inference tab and landing page, site-wide references, old tutorial retired |
 | #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. The user's review isn't finished yet |
-| PR 3 | `docs/inference-smc-abc` (pushed, no PR yet) | **In progress. Start here** |
+| PR 3 | `docs/inference-smc-abc` | Rendered and committed. **Next: open the draft PR** (below) |
 
-### Handoff: picking up PR 3
+### PR 3: status
 
-**Start on `docs/inference-smc-abc`.** It branches from `docs/inference-forevertree` and has one
-work-in-progress commit. That commit changes `examples/sbi_forevertree/forevertree_case.py`; the
-changes are **written but not verified**:
-- `observe(registry, run_hash, replicate, rng)` (`rng=None` means no measurement error), in the
-  parked toolkit's shape. `survey()` wraps it with the same seed derivation and draw order, so every
-  number should be unchanged.
-- `DISTANCE = "l2"`, passed to `SbiStrategy` by `run_sbi`. It is sbi's default, so session
-  fingerprints don't change.
-- New helpers `_draw_map` and `_numbered_sites`, now used by `plot_pipeline`.
-- SMC helpers: `particle_parameters`, `farthest_particle`, `carried_into`, `plot_generations`,
-  `plot_final_populations`, `plot_final_states`.
+`docs/inference/smc-abc.qmd` is written, registered (render script, render list, navbar, sidebar,
+references, roadmap) and rendered at the decided budget; the case study links to it. Both freezes
+are committed.
 
-**First steps:**
-1. **Verify the refactor.** Run `case.load()` against the warm registry
-   `docs/inference/forevertree.duckdb`:
-   - it must simulate nothing (count `job_runs` before and after);
-   - it must reproduce S_obs (mean 7.141, CV 0.387) and the scale (4.468, 0.188).
-2. **Re-render the case-study page** with `pixi run docs-inference` (about 1 min warm). No number
-   changes, but the page displays the module's source, so its freeze is stale. Commit the new freeze.
-3. **Write `docs/inference/smc-abc.qmd`** (outline below), and register it:
-   - `PAGES` in `scripts/render-inference.sh`;
-   - `docs/_quarto.yml`: the render list (after `forevertree.qmd`), the Inference navbar menu and
-     the sidebar;
-   - a section in `docs/references.qmd`;
-   - a link from the roadmap in `docs/inference/index.qmd`.
-4. **Smoke-test before the long render.**
-   - Run the page's Python chunks outside Quarto, against a scratch registry, with small budgets
-     (substitute `n_prior`, the replicate count and the SMC settings).
-   - Use `LANG=C MPLBACKEND=Agg`.
-   - Parse chunks line by line: a chunk ends only on a line of backticks, and the page contains
-     backticks inside strings.
-5. **Render and ship.**
-   - Run `pixi run docs-inference` (about an hour at 600 simulations).
-   - Check the freeze: numbers against prose, no leaked matplotlib reprs, the figures.
-   - Commit with `git add docs/_freeze/inference`, then push.
-   - Open a **draft** PR with base `docs/inference-forevertree`, titled "… (SBI stack 6/6)".
-     Renumber #86–#90 to "/6".
+**Left to do:**
+- Push the branch, then open a **draft** PR with base `docs/inference-forevertree`, titled
+  "… (SBI stack 6/6)". Renumber #86–#90 to "/6".
+- The user reviews the render; the PR stays a draft until then.
 
-**Budget (decided): start small and raise it on evidence.**
-- Begin with `num_initial_pop=60`, `num_particles=30`, `epsilon_decay=0.5` and
-  `num_simulations=600`.
-- **The real test:** compare the final target ε and the largest accepted distance with PR 2's
-  replicate distances at the truth (median 0.12, largest 0.26 prior SDs).
-- If the final ε is still well above about 0.26, raise the budget (e.g. 1,000) and re-render. With
-  the same seed the first 600 evaluations replay from the registry, so only the extra simulations
-  run.
-- Slow is fine: these pages render locally and ship frozen.
+**Verified on the way:**
+- The `observe()` refactor: `case.load()` on the warm registry simulated nothing (202 `job_runs`
+  before and after) and reproduced S_obs (7.141, 0.387) and the scale (4.468, 0.188). The case
+  study's freeze changed only in its displayed source; its survey display now includes `observe`.
+- The page's chunks, outside Quarto, against a copy of the warm registry at small budgets.
+- Figure fixes: `plot_final_states` puts θ on its own title line, and `plot_generations` wraps at 3
+  columns with ε to 2 significant figures.
 
-**Working rules:**
-- **The shared registry `docs/inference/forevertree.duckdb`** is warm and holds about an hour of
-  simulations. Don't delete it at the end of a page, and don't add it to `render-docs.sh`; only
+**Results at 600 simulations** (the first render ran 1,110 new simulations, about an hour; the
+registry now holds 1,312 runs):
+- **The budget was enough; no raise.** Final target ε 0.045, but generation 5 had 21 simulations
+  left and accepted 1, so 29 of 30 particles were carried over from generation 4. The effective
+  tolerance is 0.09 (largest distance 0.088), below the replicate median (0.12).
+- Mean + CV: both 90% intervals contain the truth, each about 8% of the prior's width; ESS 26.2 of 30.
+- Mean only: ε reaches 0.011 with the same budget. Both intervals contain the truth, but the
+  correlation is −0.98, against −0.46 with the CV: the ridge.
+- Leave-one-out coverage (k = 20, expected 0.905 ± 0.021): mean + CV 0.975 and 0.97 (over-covers);
+  mean only 0.95 and 0.91, with the `minPrecipImpactPct` range at 82% of the prior against 33%.
+- Posterior predictive check (30 fresh seeded runs at the final particles): all 8 sites inside.
+- Replay of 600 evaluations: 36 s, 0 new simulations, identical population. A warm re-render of
+  both pages takes about 3.5 min.
+
+**Working rules (unchanged, for PR 4 onward):**
+- **The shared registry `docs/inference/forevertree.duckdb`** is warm and now holds about two hours
+  of simulations. Don't delete it at the end of a page, and don't add it to `render-docs.sh`; only
   `docs-clean` removes it.
 - **Run scripts through `pixi run`.** `render-inference.sh` needs `CONDA_PREFIX`.
+- **`render-inference.sh` renders every page in order**, so a module change re-renders (and
+  re-freezes) the case study too.
 - **Renders run under an ASCII locale.** Read any displayed file with `encoding="utf-8"`.
 - **Figure helpers draw and return `None`.** No other matplotlib call may be an expression statement
   in a chunk.
 - **Keep the example in the parked toolkit's shape**, and keep the noise-seed derivation unchanged.
+- **Smoke-test against a copy of the warm registry** (in a scratch directory) with small SMC
+  settings: the prior runs replay, so only the searches simulate.
 
 ### PR 3 outline: SMC-ABC on the survey (Hartig Fig. 5a)
 
