@@ -50,6 +50,22 @@ adds the entry to the page's own reference list.
 - @wood2010: synthetic likelihood, the parametric alternative to ABC's match
   counting.
 
+## Inference: SMC-ABC on a simulated survey
+
+[Page](inference/smc-abc.qmd)
+
+- @hartig2011: the nonparametric likelihood approximation, the tolerance as
+  approximation error, and testing sufficiency on artificial data.
+- @toni2009 and @beaumont2009: sequential Monte Carlo ABC and its importance
+  weights.
+- @cranmer2020: the tolerance as approximation error, and neural estimators
+  beyond a handful of statistics.
+- @wilkinson2013: the tolerance read as an unsimulated observation error.
+- @beven2006: equifinality, parameter sets that reproduce the data equally
+  well.
+- @talts2018 and @csillery2012: the coverage check over held-out simulations.
+- @beaumont2002: regression adjustment of accepted parameters.
+
 ## Adaptive Parameter Optimization
 
 [Tutorial](tutorials/adaptive-sweep.qmd)
