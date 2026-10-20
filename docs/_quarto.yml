@@ -31,6 +31,7 @@ project:
     - tutorials/low-level-components.qmd # Advanced: manual component usage
     - inference/index.qmd                # Inference landing page (no code)
     - inference/forevertree.qmd          # Case study; creates forevertree.duckdb (needs sbi; frozen)
+    - inference/smc-abc.qmd              # SMC-ABC; reuses forevertree.duckdb (needs sbi; frozen)
     - templating.qmd
     - architecture.qmd
     - best-practices.qmd
@@ -103,6 +104,8 @@ website:
             href: inference/index.qmd
           - text: "ForeverTree Case Study"
             href: inference/forevertree.qmd
+          - text: "SMC-ABC on a Simulated Survey"
+            href: inference/smc-abc.qmd
       - text: "Templating"
         href: templating.qmd
       - text: "Architecture"
@@ -165,6 +168,7 @@ website:
       contents:
         - inference/index.qmd
         - inference/forevertree.qmd
+        - inference/smc-abc.qmd
 
     - title: "Templating"
       contents:

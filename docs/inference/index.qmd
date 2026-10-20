@@ -79,8 +79,8 @@ truth:
 
 1. **[ForeverTree case study](forevertree.qmd)**: the model, a simulated
    survey, prior simulations, and choosing summary statistics.
-2. **SMC-ABC on a simulated survey**: option (a), with a sufficiency test and a
-   coverage check.
+2. **[SMC-ABC on a simulated survey](smc-abc.qmd)**: option (a), with a
+   sufficiency test and a coverage check.
 3. **Rejection filter on a model property**: option (d), asking which
    parameters produce a target behaviour.
 4. **Posterior probability of a model property**: combining the two.
