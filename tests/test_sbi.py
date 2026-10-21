@@ -99,6 +99,15 @@ class TestSbiStrategyConfig(unittest.TestCase):
         data = SbiStrategy(prior=PRIOR, summaries=model_summaries).to_dict()
         self.assertEqual(data["summaries"], "tests.test_sbi:model_summaries")
 
+    def test_closure_summaries_are_named_not_saved_as_a_path(self):
+        def model_summaries(registry, run_hash, job):  # shadows the module-level name
+            return {}
+
+        data = SbiStrategy(prior=PRIOR, summaries=model_summaries).to_dict()
+        self.assertNotIn("summaries", data)
+        self.assertIn("<locals>.model_summaries", data["summaries_not_importable"])
+        self.assertIsNone(strategy_from_dict(data).summaries)
+
     def test_observed_from_json_file(self):
         import json
 
