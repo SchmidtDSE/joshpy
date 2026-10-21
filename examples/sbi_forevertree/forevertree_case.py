@@ -487,3 +487,144 @@ def plot_replicates(study: LoadedStudy, replicates: pd.DataFrame, epsilon: float
     _title(ax, "Estimated ABC likelihood at the truth")
     fig.tight_layout()
     plt.show()
+
+
+# --- SMC-ABC results ---------------------------------------------------------------
+
+
+def particle_parameters(result: Any) -> dict[str, dict[str, float]]:
+    """run_hash -> parameters, for every run a search evaluated."""
+    return {job.run_hash: job.parameters for job, _ in result.job_results}
+
+
+def farthest_particle(result: Any) -> str:
+    """run_hash of the final particle farthest from the truth, in units of the prior ranges."""
+    df = result.to_dataframe()
+    span = {name: spec["uniform"][1] - spec["uniform"][0] for name, spec in PRIOR.items()}
+    offset = sum(((df[name] - TRUTH[name]) / span[name]) ** 2 for name in PRIOR)
+    return str(df.loc[offset.idxmax(), "run_hash"])
+
+
+def carried_into(populations: list[dict[str, Any]], t: int) -> set[str]:
+    """Members of population t carried over from population t - 1 (budget top-up)."""
+    if t == 0:
+        return set()
+    return set(populations[t - 1]["run_hashes"]) & set(populations[t]["run_hashes"])
+
+
+def _draw_population(
+    ax: Any, hashes: list[str], params: dict[str, dict[str, float]], title: str, carried: set[str]
+) -> None:
+    """Accepted parameter sets over the prior box; hollow points were carried over."""
+    _style(ax)
+    names = list(PRIOR)
+    for subset, filled in [([h for h in hashes if h not in carried], True),
+                           ([h for h in hashes if h in carried], False)]:  # fmt: skip
+        if not subset:
+            continue
+        x = [params[h][names[0]] for h in subset]
+        y = [params[h][names[1]] for h in subset]
+        if filled:
+            ax.scatter(x, y, s=36, color=BLUE, edgecolor=SURFACE, linewidth=1.2, zorder=2)
+        else:
+            ax.scatter(x, y, s=36, facecolor="none", edgecolor=BLUE, linewidth=1.2, zorder=2)
+    tx, ty = (TRUTH[name] for name in names)
+    ax.scatter([tx], [ty], marker="x", s=90, color=INK, linewidth=2, zorder=3)
+    ax.annotate(
+        "truth", (tx, ty), xytext=(7, 7), textcoords="offset points", color=INK, fontsize=9,
+        bbox=dict(boxstyle="round,pad=0.15", facecolor=SURFACE, edgecolor="none", alpha=0.85),
+        zorder=4,
+    )  # fmt: skip
+    ax.set_xlim(*PRIOR[names[0]]["uniform"])
+    ax.set_ylim(*PRIOR[names[1]]["uniform"])
+    ax.set_xlabel(f"{names[0]} (m/yr)", color=INK_2)
+    _title(ax, title)
+
+
+def plot_generations(result: Any, columns: int = 3) -> None:
+    """Each SMC-ABC generation's accepted parameter sets, over the prior box."""
+    import matplotlib.pyplot as plt
+
+    params = particle_parameters(result)
+    populations = result.populations
+    columns = min(columns, len(populations))
+    rows = -(-len(populations) // columns)
+    fig, axes = _figure(rows, columns, figsize=(3.4 * columns, 3.4 * rows), squeeze=False)
+    for t, ax in enumerate(axes.flat):
+        if t >= len(populations):
+            ax.set_visible(False)
+            continue
+        population = populations[t]
+        _draw_population(
+            ax, population["run_hashes"], params,
+            f"Generation {population['generation']}  ε = {population['epsilon']:.2g}",
+            carried_into(populations, t),
+        )  # fmt: skip
+    for row in axes:
+        row[0].set_ylabel(f"{list(PRIOR)[1]} (%)", color=INK_2)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_final_populations(searches: list[tuple[str, Any]]) -> None:
+    """Final populations of several searches side by side: (title, SbiResult) pairs."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = _figure(
+        1, len(searches), figsize=(3.7 * len(searches), 3.7), sharex=True, sharey=True,
+        squeeze=False,
+    )  # fmt: skip
+    for ax, (title, result) in zip(axes[0], searches, strict=True):
+        last = len(result.populations) - 1
+        _draw_population(
+            ax, result.populations[last]["run_hashes"], particle_parameters(result), title,
+            carried_into(result.populations, last),
+        )  # fmt: skip
+    axes[0][0].set_ylabel(f"{list(PRIOR)[1]} (%)", color=INK_2)
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_final_states(registry: RunRegistry, runs: list[tuple[str, str]]) -> None:
+    """Final-year maps and measured surveys of several runs: (label, run_hash) pairs.
+
+    The maps share one color scale, so differences between rows are real.
+    """
+    import matplotlib.pyplot as plt
+
+    cells = {run_hash: final_heights(registry, run_hash) for _, run_hash in runs}
+    low = min(c["height"].min() for c in cells.values())
+    high = max(c["height"].max() for c in cells.values())
+    fig, axes = _figure(len(runs), 2, figsize=(10, 3.4 * len(runs)), squeeze=False)
+    for (label, run_hash), (ax_map, ax_survey) in zip(runs, axes, strict=True):
+        params = registry.get_config_by_hash(run_hash).parameters
+        theta = ", ".join(f"{name} = {float(params[name]):.3g}" for name in PRIOR)
+        sites = _numbered_sites(observe(registry, run_hash))
+        _draw_map(fig, ax_map, cells[run_hash], sites, limits=(low, high))
+        _title(ax_map, f"{label}\n{theta}")
+
+        _style(ax_survey)
+        stats = statistics(sites)
+        mean, sd = stats["mean_height"], stats["height_sd"]
+        ax_survey.axvspan(mean - sd, mean + sd, color=GRID, zorder=0)
+        ax_survey.axvline(mean, color=INK, linewidth=1.4)
+        ax_survey.scatter(
+            sites["measured"], np.zeros(len(sites)), s=46, color=ORANGE, edgecolor=SURFACE,
+            linewidth=1.2, zorder=3,
+        )  # fmt: skip
+        for _, row in sites.iterrows():
+            ax_survey.annotate(
+                str(int(row["site"])), (row["measured"], 0), xytext=(0, 9),
+                textcoords="offset points", ha="center", fontsize=8, color=INK_2,
+            )  # fmt: skip
+        ax_survey.set_xlim(low - 0.5, high + 0.5)
+        ax_survey.set_ylim(-1, 1)
+        ax_survey.set_yticks([])
+        ax_survey.set_xlabel("measured height (m)", color=INK_2)
+        ax_survey.text(
+            0.02, 0.95, f"mean {mean:.2f} m   CV {stats['height_cv']:.3f}",
+            transform=ax_survey.transAxes, va="top", fontsize=9, color=INK,
+        )  # fmt: skip
+        _title(ax_survey, "Survey: measured heights (band: ±1 SD)")
+    fig.tight_layout()
+    plt.show()
