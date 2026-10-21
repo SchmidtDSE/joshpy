@@ -79,6 +79,8 @@ docs/demo_registry.duckdb
 docs/*.csv
 docs/tutorials/demo_registry.duckdb
 docs/tutorials/target_designs_demo.duckdb
+docs/inference/*.duckdb
+docs/inference/*.duckdb.wal
 
 # Quarto build output
 docs/_site/

@@ -234,6 +234,40 @@ PR 1 drops the tutorial page, so neither render ships.
   - recording the statistics spec in session metadata.
 
   After PR 5, propose the smallest primitive set those uses justify.
+
+  Logged in PR 2 (`forevertree_case.py`):
+  - No "last step" helper, so `FINAL_STEP = 10` is hard-coded from the model.
+  - Per-cell values come from `DiagnosticQueries.get_all_variables_at_step`, which
+    selects every variable; that is adequate.
+  - Survey selection by `(x, y)`, measurement noise and the statistics are pandas/numpy
+    helpers (`survey`, `measurement_rng`, `statistics`).
+  - The scaled-summaries closure (`CaseStudy.abc_target`) would serialize as an
+    unimportable path in `SbiStrategy.to_dict`.
+- **A general known-truth toolkit (`joshpy.inference`).** It would turn the case-study
+  workflow into an API for testing whether statistics are sufficient before fitting
+  field data.
+  - **The user supplies functions:**
+    - `observe(registry, run_hash, replicate, rng)`, where `rng=None` means no
+      observation error;
+    - `statistics(data)`;
+    - which statistics to compare;
+    - a scale;
+    - a distance, given as an sbi name or a callable. sbi accepts both, so one object
+      serves both the diagnostics and the `SbiStrategy` search.
+  - **joshpy supplies the workflow:**
+    - seeding `rng` from `(run_hash, replicate)`, and naming the replicate explicitly;
+    - the truth run and the prior simulations, reused from the registry;
+    - the reference table, statistic × parameter correlations and distances;
+    - the replicate study;
+    - leave-one-out coverage.
+  - **Can be layered on later.** It is additive, and runs are keyed by model, config,
+    data and seed, not by how statistics are computed, so nothing needs re-simulating.
+  - **Meanwhile:**
+    - keep the example's functions in this shape: `observe` with that signature,
+      `statistics(data)` separate, one named distance function, and the scale as plain
+      data;
+    - keep the noise-seed derivation, `sha256("{run_hash}:{replicate}")`, unchanged.
+  - Extending `SbiStrategy.distance` to accept a callable is a small, separate change.
 - **A batch prior-sampling strategy** (random or Latin hypercube via `scipy.stats.qmc`). Revisit if
   the `mcabc` workaround gets in the way: placeholder `observed` for filters, or more parameters
   where a Latin hypercube matters.
