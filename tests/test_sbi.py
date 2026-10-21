@@ -99,6 +99,15 @@ class TestSbiStrategyConfig(unittest.TestCase):
         data = SbiStrategy(prior=PRIOR, summaries=model_summaries).to_dict()
         self.assertEqual(data["summaries"], "tests.test_sbi:model_summaries")
 
+    def test_closure_summaries_are_named_not_saved_as_a_path(self):
+        def model_summaries(registry, run_hash, job):  # shadows the module-level name
+            return {}
+
+        data = SbiStrategy(prior=PRIOR, summaries=model_summaries).to_dict()
+        self.assertNotIn("summaries", data)
+        self.assertIn("<locals>.model_summaries", data["summaries_not_importable"])
+        self.assertIsNone(strategy_from_dict(data).summaries)
+
     def test_observed_from_json_file(self):
         import json
 
@@ -332,6 +341,82 @@ class TestSbiStrategyRuns(unittest.TestCase):
 
         self.assertGreater(result.failed, 0)
         self.assertTrue((result.samples[:, 0] <= 1.5).all())
+
+    def test_nan_statistics_reject_runs(self):
+        def rejecting(registry, run_hash, job):
+            if float(job.parameters["growth"]) > 1.5:
+                return {"height": float("nan"), "spread": float("nan")}
+            return model_summaries(registry, run_hash, job)
+
+        result, _ = self.run_sbi(self.registry(), summaries=rejecting)
+        self.assertTrue((result.samples[:, 0] <= 1.5).all())
+
+    def test_summaries_exception_stops_the_search(self):
+        def buggy(registry, run_hash, job):
+            if float(job.parameters["growth"]) > 1.5:
+                raise KeyError("meanHeight")
+            return model_summaries(registry, run_hash, job)
+
+        registry = self.registry()
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_sbi(registry, summaries=buggy)
+        self.assertIn("meanHeight", str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, KeyError)
+        # The batch (the 40 initial draws) finished first, so a rerun reuses its runs.
+        runs = registry.conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
+        self.assertEqual(runs, 40)
+
+    def test_summaries_returning_none_fail_fast(self):
+        with self.assertRaises(ValueError) as raised:
+            self.run_sbi(self.registry(), summaries=lambda r, h, j: None)
+        self.assertIn("returned None", str(raised.exception))
+
+    def test_load_errors_are_reported_and_never_accepted(self):
+        def flaky_load(cli, job, registry, export_paths, *, run_id, **kwargs):
+            if float(job.parameters["growth"]) > 1.5:
+                raise FileNotFoundError("no export written")
+            return self._fake_load(cli, job, registry, export_paths, run_id=run_id, **kwargs)
+
+        registry = self.registry()
+        with patch("joshpy.sweep.load_job_results", side_effect=flaky_load):
+            with self.assertWarns(UserWarning) as warned:
+                result, session_id = self.run_sbi(registry)
+
+        self.assertGreater(len(result.load_errors), 0)
+        self.assertEqual(result.failed, 0)
+        self.assertTrue(all("no export written" in m for m in result.load_errors.values()))
+        self.assertTrue((result.samples[:, 0] <= 1.5).all())
+        metadata = registry.get_session(session_id).metadata["sbi"]
+        self.assertEqual(metadata["load_errors"], result.load_errors)
+        self.assertTrue(
+            any("could not be loaded" in str(w.message) for w in warned.warnings)
+        )
+
+    def test_initial_population_without_enough_usable_runs_stops(self):
+        def mostly_nan(registry, run_hash, job):
+            if float(job.parameters["growth"]) > 0.5:
+                return {"height": float("nan"), "spread": float("nan")}
+            return model_summaries(registry, run_hash, job)
+
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_sbi(self.registry(), summaries=mostly_nan)
+        self.assertIn("num_particles=20", str(raised.exception))
+        self.assertIn("returned non-finite statistics", str(raised.exception))
+
+    def test_mcabc_quantile_warns_when_it_keeps_unusable_runs(self):
+        def rejecting(registry, run_hash, job):
+            if float(job.parameters["growth"]) > 1.5:
+                return {"height": float("nan"), "spread": float("nan")}
+            return model_summaries(registry, run_hash, job)
+
+        with self.assertWarns(UserWarning) as warned:
+            self.run_sbi(
+                self.registry(), summaries=rejecting, method="mcabc",
+                method_kwargs={"num_simulations": 40, "quantile": 1.0},
+            )
+        self.assertTrue(
+            any("accepted samples have non-finite" in str(w.message) for w in warned.warnings)
+        )
 
     def test_objective_override_is_used_as_summaries(self):
         from joshpy.cli import CLIResult  # noqa: F401

@@ -39,10 +39,12 @@ Example usage:
 
 from __future__ import annotations
 
+import functools
 import importlib
 import itertools
 import re
 import shutil
+import sys
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -599,7 +601,8 @@ def _load_objective_from_path(path: str) -> ObjectiveFn:
     """Load function from 'module.submodule:function_name' format.
 
     Args:
-        path: Import path in "module:function" format.
+        path: Import path in "module:function" format, or "module:Class.attribute"
+            for a function on a module-level class (e.g. a staticmethod).
 
     Returns:
         The loaded callable.
@@ -616,11 +619,45 @@ def _load_objective_from_path(path: str) -> ObjectiveFn:
     if ":" not in path:
         raise ValueError(f"Invalid objective path '{path}'. Expected 'module:function' format.")
     module_path, func_name = path.rsplit(":", 1)
-    module = importlib.import_module(module_path)
-    fn = getattr(module, func_name)
+    fn: Any = importlib.import_module(module_path)
+    for attribute in func_name.split("."):
+        fn = getattr(fn, attribute)
     if not callable(fn):
         raise ValueError(f"{path} is not callable")
-    return fn  # type: ignore[return-value]
+    return fn  # type: ignore[no-any-return]
+
+
+def _callable_path(fn: Any) -> str | None:
+    """The "module:qualname" path that loads *fn* back, or None if there is none.
+
+    A path is returned only when importing it would give back *fn* itself: a
+    module-level function, or a function on a module-level class. Lambdas,
+    nested functions and closures, bound methods, partials and callable
+    instances have no such path, and neither does anything defined in
+    ``__main__`` (a script, notebook or docs page), which another process
+    cannot import.
+    """
+    module_name = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if not module_name or not qualname or module_name == "__main__" or "<" in qualname:
+        return None
+    target: Any = sys.modules.get(module_name)
+    try:
+        for attribute in qualname.split("."):
+            target = getattr(target, attribute)
+        same = target is fn or bool(target == fn)  # == matches classmethods, rebound each access
+    except Exception:
+        return None
+    return f"{module_name}:{qualname}" if same else None
+
+
+def _callable_name(fn: Any) -> str:
+    """A readable "module:qualname" name for *fn*, for provenance only."""
+    if isinstance(fn, functools.partial):
+        return f"functools.partial({_callable_name(fn.func)})"
+    module_name = getattr(fn, "__module__", None) or type(fn).__module__
+    qualname = getattr(fn, "__qualname__", None) or f"{type(fn).__qualname__} instance"
+    return f"{module_name}:{qualname}"
 
 
 @register_strategy("optuna")
@@ -793,7 +830,11 @@ class OptunaStrategy(SweepStrategy):
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization.
 
-        Note: Callable objectives cannot be serialized - only string paths.
+        A callable objective is saved as its "module:qualname" path when that
+        path loads it back. Otherwise (a lambda, closure, bound method, or a
+        function defined in ``__main__``) its name is kept under
+        ``objective_not_importable``, for provenance only, and ``from_dict``
+        leaves the objective to be provided at runtime.
         """
         result: dict[str, Any] = {
             "type": "optuna",
@@ -804,14 +845,14 @@ class OptunaStrategy(SweepStrategy):
         if self.seed is not None:
             result["seed"] = self.seed
 
-        # Only serialize objective if it's a string path
         if isinstance(self.objective, str):
             result["objective"] = self.objective
         elif self.objective is not None:
-            # Callable - try to get qualified name
-            if hasattr(self.objective, "__module__") and hasattr(self.objective, "__name__"):
-                result["objective"] = f"{self.objective.__module__}:{self.objective.__name__}"
-            # Otherwise skip - user will need to provide at runtime
+            path = _callable_path(self.objective)
+            if path is not None:
+                result["objective"] = path
+            else:
+                result["objective_not_importable"] = _callable_name(self.objective)
 
         return result
 
@@ -1060,6 +1101,9 @@ class SbiResult:
             ``epsilon``). One population for MCABC.
         observed: The observed summary statistics.
         summary: sbi's raw ``return_summary`` dictionary.
+        load_errors: run_hash -> message, for runs that succeeded but whose
+            results could not be loaded. Their summaries were NaN, so sbi
+            never accepted them; they are not counted in ``failed``.
 
     Examples:
         >>> result = manager.run()
@@ -1080,6 +1124,7 @@ class SbiResult:
     populations: list[dict[str, Any]] = field(default_factory=list)
     observed: dict[str, float] = field(default_factory=dict)
     summary: dict[str, Any] = field(default_factory=dict)
+    load_errors: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_adaptive(self) -> bool:
@@ -1128,7 +1173,10 @@ class SbiStrategy(SweepStrategy):
             Parameter names are the template variables.
         summaries: ``(registry, run_hash, job) -> dict[str, float]``, or a
             ``"module:function"`` path. Returns the summary statistics of one
-            run; its keys must cover ``observed``.
+            run; its keys must cover ``observed``. Return NaN statistics to
+            reject a run. An exception stops the search once its batch has
+            finished (it usually means a bug); after a fix, a rerun reuses
+            the completed runs.
         observed: Observed summary statistics (dict), a ``"module:function"``
             path returning that dict, or a path to a JSON file. Its key order
             fixes the order of the summary vector.
@@ -1281,15 +1329,14 @@ class SbiStrategy(SweepStrategy):
         return MultipleIndependent(dists)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dict for serialization (callables become "module:name")."""
+        """Convert to dict for serialization.
 
-        def ref(value: Any) -> Any:
-            if value is None or isinstance(value, (str, dict)):
-                return value
-            module = getattr(value, "__module__", None)
-            name = getattr(value, "__name__", None)
-            return f"{module}:{name}" if module and name else None
-
+        A callable ``summaries`` is saved as its "module:qualname" path when
+        that path loads it back. Otherwise (a lambda, closure, bound method,
+        or a function defined in ``__main__``) its name is kept under
+        ``summaries_not_importable``, for provenance only, and ``from_dict``
+        leaves ``summaries`` unset.
+        """
         result: dict[str, Any] = {
             "type": "sbi",
             "method": self.method,
@@ -1299,9 +1346,14 @@ class SbiStrategy(SweepStrategy):
         }
         if self.method_kwargs:
             result["method_kwargs"] = self.method_kwargs
-        summaries = ref(self.summaries)
-        if summaries is not None:
-            result["summaries"] = summaries
+        if isinstance(self.summaries, str):
+            result["summaries"] = self.summaries
+        elif self.summaries is not None:
+            path = _callable_path(self.summaries)
+            if path is not None:
+                result["summaries"] = path
+            else:
+                result["summaries_not_importable"] = _callable_name(self.summaries)
         if self.observed is not None:
             result["observed"] = self.observed
         return result
@@ -1323,8 +1375,11 @@ class SbiStrategy(SweepStrategy):
         """Run sbi with joshpy as the simulator.
 
         Each simulator call (one batch of proposals) is one ``ctx.evaluate``.
-        A run that fails, or whose results cannot be loaded or summarized,
-        returns NaN summaries, which sbi never accepts. Afterwards each
+        A run that fails, or whose results cannot be loaded, returns NaN
+        summaries, which sbi never accepts; load errors are reported in
+        ``SbiResult.load_errors`` and a warning. An exception from
+        ``summaries``, or SMC-ABC's initial population having fewer than
+        ``num_particles`` usable runs, stops the search. Afterwards each
         population member gets ``sbi_generation``, ``sbi_weight``,
         ``sbi_distance`` and ``sbi_accepted`` run attributes, and the session
         metadata gets the settings, versions and per-generation populations.
@@ -1356,6 +1411,8 @@ class SbiStrategy(SweepStrategy):
         call_sizes: list[int] = []
         n_calls = 0
 
+        load_errors: dict[str, str] = {}  # run_hash -> why its results could not be loaded
+
         def simulator(theta: Any) -> Any:
             nonlocal n_calls
             rows = [
@@ -1364,16 +1421,31 @@ class SbiStrategy(SweepStrategy):
             ]
             batch = ctx.evaluate(rows, score=summaries_fn, attributes={"sbi_call": n_calls})
             call_sizes.append(len(rows))
+            if batch.score_exceptions:
+                i, error = next(iter(batch.score_exceptions.items()))
+                raise RuntimeError(
+                    f"summaries raised for {len(batch.score_exceptions)} of {len(rows)} runs "
+                    f"in this batch, first for {batch.jobs[i].run_hash}: {error!r}. This "
+                    "usually means a bug in the summaries function: fix it and rerun, and "
+                    "completed runs are reused. To reject a run instead, return NaN statistics."
+                ) from error
 
             failed = set(batch.failures)
             x = []
             for i, (row, job) in enumerate(zip(rows, batch.jobs, strict=True)):
                 hash_by_theta[tuple(row[n] for n in names)] = job.run_hash
                 call_of[job.run_hash] = n_calls
-                value = batch.values[i]
-                if i in failed or value is None:
+                if i in failed:
+                    if i in batch.errors:
+                        load_errors[job.run_hash] = batch.errors[i]
                     x.append([float("nan")] * len(keys))
                     continue
+                value = batch.values[i]
+                if value is None:
+                    raise ValueError(
+                        f"summaries returned None for {job.run_hash}; return a dict of "
+                        "statistics (NaN statistics reject a run)"
+                    )
                 missing = [k for k in keys if k not in value]
                 if missing:
                     raise ValueError(
@@ -1381,8 +1453,26 @@ class SbiStrategy(SweepStrategy):
                         f"missing observed statistics {missing}"
                     )
                 x.append([float(value[k]) for k in keys])
+            x_batch = torch.tensor(x, dtype=torch.float32)
+
+            # sbi keeps the initial population's num_particles closest runs, sorting NaN
+            # last, so with too few usable runs it would keep runs without statistics and
+            # replace the non-finite tolerance with 1e8.
+            needed = self.method_kwargs.get("num_particles")
+            if self.method == "smcabc" and n_calls == 0 and needed is not None:
+                usable = int(torch.isfinite(x_batch).all(dim=1).sum())
+                if usable < needed:
+                    crashed = sum(not result.success for result in batch.results)
+                    unloaded = len(batch.errors)
+                    raise RuntimeError(
+                        f"Only {usable} of {len(rows)} initial SMC-ABC simulations have "
+                        f"finite summaries, fewer than num_particles={needed} ({crashed} "
+                        f"failed, {unloaded} could not be loaded, "
+                        f"{len(rows) - usable - crashed - unloaded} returned non-finite "
+                        "statistics). Check those runs, or raise num_initial_pop."
+                    )
             n_calls += 1
-            return torch.tensor(x, dtype=torch.float32)
+            return x_batch
 
         def lookup(particles: Any) -> list[str | None]:
             return [
@@ -1466,15 +1556,17 @@ class SbiStrategy(SweepStrategy):
             epsilons=[pop["epsilon"] for pop in populations],
             simulations=ctx.succeeded + ctx.failed,
             failed_simulations=ctx.failed,
+            load_errors=load_errors,
             final_run_hashes=run_hashes,
         )
         ctx.registry.update_session_metadata(ctx.session_id, sbi=settings)
+        self._warn_on_unusable_runs(load_errors, final)
 
         if not ctx.quiet:
             print(
                 f"sbi {self.method} complete: {len(populations)} population(s), "
-                f"{ctx.succeeded + ctx.failed} simulations ({ctx.failed} failed), "
-                f"final epsilon {final['epsilon']}"
+                f"{ctx.succeeded + ctx.failed} simulations ({ctx.failed} failed, "
+                f"{len(load_errors)} not loaded), final epsilon {final['epsilon']}"
             )
 
         return SbiResult(
@@ -1491,7 +1583,38 @@ class SbiStrategy(SweepStrategy):
             populations=populations,
             observed=observed,
             summary=summary,
+            load_errors=load_errors,
         )
+
+    @staticmethod
+    def _warn_on_unusable_runs(load_errors: dict[str, str], final: dict[str, Any]) -> None:
+        """Warn, even when quiet, about runs whose NaN summaries sbi saw.
+
+        A run whose results could not be loaded is never accepted, so it drops
+        out of the search unnoticed. A quantile-based MCABC keeps its share of
+        the simulations whether or not they have usable statistics, so its
+        accepted samples can include such runs.
+        """
+        import math
+        import warnings
+
+        if load_errors:
+            run_hash, message = next(iter(load_errors.items()))
+            warnings.warn(
+                f"{len(load_errors)} simulation(s) ran but their results could not be "
+                f"loaded, so their summaries were NaN and sbi never accepted them (first: "
+                f"{run_hash}: {message}). They are listed in SbiResult.load_errors and "
+                "the session metadata.",
+                stacklevel=2,
+            )
+        unusable = sum(not math.isfinite(d) for d in final["distances"])
+        if unusable:
+            warnings.warn(
+                f"{unusable} of {len(final['distances'])} accepted samples have non-finite "
+                "summaries (failed, unloaded or NaN-returning runs): a quantile keeps its "
+                "share of the simulations whether or not they have usable statistics.",
+                stacklevel=2,
+            )
 
     def _session_settings(self, observed: dict[str, float]) -> dict[str, Any]:
         """Settings recorded in session metadata, with a replay fingerprint."""
@@ -1585,6 +1708,9 @@ class BatchResult:
         rows_loaded: Rows loaded into ``cell_data`` for each row's job.
         errors: Row index -> message for rows whose run succeeded but whose
             results could not be loaded or scored.
+        score_exceptions: Row index -> the exception ``score`` raised, for
+            rows whose results loaded but could not be scored (a subset of
+            ``errors``).
         run_ids: run_hash -> run_id of the run each job's results come from.
         sources: Per row, where its result came from: ``"ran"`` (dispatched
             in this batch), ``"reused"`` (an earlier completed, loaded run of
@@ -1606,6 +1732,7 @@ class BatchResult:
     errors: dict[int, str] = field(default_factory=dict)
     run_ids: dict[str, str] = field(default_factory=dict)
     sources: list[str] = field(default_factory=list)
+    score_exceptions: dict[int, Exception] = field(default_factory=dict)
 
     @property
     def run_hashes(self) -> list[str]:
@@ -1891,6 +2018,7 @@ class AdaptiveContext:
         rows_by_hash: dict[str, int] = {}
         values_by_hash: dict[str, Any] = {}
         errors_by_hash: dict[str, str] = {}
+        score_exceptions_by_hash: dict[str, Exception] = {}
         for k, job in enumerate(succeeded_jobs):
             try:
                 rows_by_hash[job.run_hash] = self._load(
@@ -1911,6 +2039,7 @@ class AdaptiveContext:
                 values_by_hash[job.run_hash] = score(self.registry, job.run_hash, job)
             except Exception as e:
                 errors_by_hash[job.run_hash] = f"objective_error: {e}"
+                score_exceptions_by_hash[job.run_hash] = e
                 if not self.quiet:
                     print(f"  [WARN] Objective evaluation failed: {e}")
 
@@ -1940,6 +2069,11 @@ class AdaptiveContext:
             },
             run_ids={h: run_id_by_hash[h] for h in unique if h in run_id_by_hash},
             sources=[source_by_hash[j.run_hash] for j in row_jobs],
+            score_exceptions={
+                i: score_exceptions_by_hash[j.run_hash]
+                for i, j in enumerate(row_jobs)
+                if j.run_hash in score_exceptions_by_hash
+            },
         )
 
     def _prior_run(self, job: ExpandedJob, load_config: Any) -> tuple[str, Any]:
