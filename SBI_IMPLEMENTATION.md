@@ -1,6 +1,6 @@
 # SBI Implementation for joshpy
 
-Oct 20, 2026 · @nick · joshpy 0.0.9.32 · sbi 0.27.0 with CPU-only torch 2.14.1
+Oct 20, 2026 · @nick · joshpy 0.0.9.33 · sbi 0.27.0 with CPU-only torch 2.14.1
 
 How joshpy runs the filter-and-refine search in [SBI.md](SBI.md). The machinery is proved on
 the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to the grass–shrub and Joshua
@@ -60,7 +60,7 @@ Contracts the stack implements; the tests named here pin them.
 - **Failures.** A failed run gets NaN summaries, which sbi never accepts
   (`test_failed_runs_are_never_accepted`). With `stop_on_failure=True`, `evaluate` raises only after
   the failing run's batch has finished and its successful runs are loaded.
-- **Summaries errors** (the fix PR after #91):
+- **Summaries errors** (#92):
   - NaN statistics reject a run (`test_nan_statistics_reject_runs`).
   - An exception from `summaries` stops the search after its batch, chained to the original error,
     and a rerun reuses the batch (`test_summaries_exception_stops_the_search`). Returning `None`
@@ -163,6 +163,7 @@ These findings apply to every page and experiment.
 | #89 (PR 1) | `docs/sbi-tutorial` | Done. Inference tab and landing page, site-wide references, old tutorial retired |
 | #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. The user's review isn't finished yet |
 | #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Awaiting the user's review of the render |
+| #92 | `fix/sbi-summaries` | Open. Callables saved only as loadable paths; summaries errors stop the search (Behavior notes) |
 
 ### PR 3: status
 
@@ -253,7 +254,7 @@ registry now holds 1,312 runs):
     [@beaumont2002], and the choice of tolerance, summaries and metric.
 - **joshpy friction:** if it appears, fix it first in a small code PR placed before this one. Two
   known candidates: a batch whose summaries all error yields silent NaN; summary closures serialize
-  as unimportable paths. Both were fixed in the PR stacked after #91 (see Behavior notes).
+  as unimportable paths. Both were fixed in #92 (see Behavior notes).
 
 ### PR 4: Rejection filter on a model property, Hartig Fig. 5d (render about 30–40 min)
 
