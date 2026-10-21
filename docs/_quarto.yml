@@ -224,6 +224,13 @@ website:
             - reference/strategies.AdaptiveContext.qmd
             - reference/strategies.BatchResult.qmd
             - reference/strategies.sample_params_from_trial.qmd
+        - section: "Inference (experimental)"
+          contents:
+            - reference/inference.KnownTruthStudy.qmd
+            - reference/inference.LoadedStudy.qmd
+            - reference/inference.prior_interval.qmd
+            - reference/inference.weighted_quantile.qmd
+            - reference/inference.effective_sample_size.qmd
         - section: "Registry"
           contents:
             - reference/registry.RunRegistry.qmd
@@ -339,6 +346,15 @@ quartodoc:
         - strategies.AdaptiveContext
         - strategies.BatchResult
         - strategies.sample_params_from_trial
+    
+    - title: Inference Module (experimental)
+      desc: Known-truth studies for testing an inference setup on simulated data
+      contents:
+        - inference.KnownTruthStudy
+        - inference.LoadedStudy
+        - inference.prior_interval
+        - inference.weighted_quantile
+        - inference.effective_sample_size
     
     - title: Registry Module
       desc: DuckDB-backed experiment tracking

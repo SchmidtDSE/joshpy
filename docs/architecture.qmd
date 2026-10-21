@@ -37,6 +37,7 @@ flowchart TD
 | [**SweepManager**](#sweepmanager) | Ephemeral (per execution) | Orchestrates job expansion, execution, result loading |
 | [**RunRegistry**](#runregistry) | Persistent (DuckDB file) | Stores results for one experiment |
 | [**ProjectCatalog**](#projectcatalog) | Persistent (DuckDB file) | Indexes experiments across a project |
+| [**KnownTruthStudy**](#knowntruthstudy) (experimental) | Ephemeral (spec) | Tests an inference setup on simulated data with known parameters |
 
 ---
 
@@ -302,7 +303,9 @@ erDiagram
 Key design decisions:
 
 - **One registry per experiment.** Reusing registries across unrelated experiments
-  causes hash collisions and query ambiguity.
+  causes hash collisions and query ambiguity. Related experiments that should share
+  runs, such as a [known-truth study](#knowntruthstudy)'s truth run, prior
+  simulations and searches, belong in one registry: reuse goes by `run_hash`.
 - **`run_hash` is the universal key.** A deterministic 12-char hash of josh source +
   config content + data file hashes. Same inputs = same hash.
 - **Typed parameter columns.** `config_parameters` has one column per parameter
@@ -412,3 +415,34 @@ builder, which auto-registers the experiment on `build()` and updates status aft
 API: [ProjectCatalog](reference/index.qmd)
 | Tutorial: [Project Organization](tutorials/project-organization.qmd),
 [Single Run & Iteration](tutorials/manual-workflow.qmd)
+
+---
+
+## KnownTruthStudy
+
+::: {.callout-note title="Experimental: test an inference setup before fitting field data"}
+Simulates pseudo-observed data at parameter values you pick (the truth), and
+checks whether an inference method recovers them.
+:::
+
+A `KnownTruthStudy` is a specification, like a `JobConfig`. It holds a
+`JobConfig` without a sweep (the model, config template and data), the prior and
+the truth, and two functions specific to your model: `observe(registry,
+run_hash, replicate)`, what a field study would record from one run, and
+`statistics(data)`, the candidate summary statistics.
+
+`study.load(registry, cli)` runs the truth and the prior simulations through
+`SweepManager` and returns a `LoadedStudy`: the reference table, z-scored
+statistics and distances, correlations, sbi searches, posterior summaries and
+leave-one-out coverage, each as a DataFrame or an `SbiResult`. Nothing is stored
+outside the `RunRegistry`. A rerun reuses every run by `run_hash`, so the
+`LoadedStudy` can be rebuilt at any time without simulating.
+
+A study is one experiment family in one registry. Its runs are recorded under
+experiment names prefixed with the study's `name` (`{name}_truth`,
+`{name}_prior`, `{name}_replicates`), and each search gets its own experiment
+name.
+
+API: [KnownTruthStudy](reference/inference.KnownTruthStudy.qmd),
+[LoadedStudy](reference/inference.LoadedStudy.qmd)
+| Section: [Inference](inference/index.qmd)
