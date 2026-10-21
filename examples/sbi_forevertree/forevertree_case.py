@@ -6,28 +6,31 @@ Put this directory on ``sys.path`` and import it::
     import forevertree_case as case
 
     registry = RunRegistry("forevertree.duckdb")
-    study = case.load(registry, JoshCLI(josh_jar=JarMode.DEV))
+    study = case.known_truth_study().load(registry, JoshCLI(josh_jar=JarMode.DEV))
 
-Nothing runs at import. ``load()`` makes sure the pseudo-observed run and the
-prior simulations exist in the registry, reusing them by ``run_hash`` when they
-are already there, so a docs page can start from the middle of the case study.
+joshpy's :class:`~joshpy.inference.KnownTruthStudy` runs the workflow: the
+pseudo-observed run, the prior simulations, z-scores and searches, reusing runs
+the registry already holds. This module holds what is specific to ForeverTree:
+the model, its prior and truth, the survey and the candidate statistics, and
+the docs' figures.
 
-The pseudo-observed data are a **survey**: the final-year mean tree height of a
-fixed set of cells, each measured with error. The same survey is applied to the
-truth and to every simulation.
+The pseudo-observed data are a **survey**: the final-year measured mean tree
+height of a fixed set of cells. The model draws the measurement error itself
+(``measuredHeight`` in forevertree.josh), so every run and replicate is measured
+with its own error, and the same survey applies to the truth and to every
+simulation.
 
 Only the pseudo-observed run and the replicate study are seeded. The prior
 simulations draw their own noise, as independent realizations should, so a
 registry built from scratch gives slightly different numbers than a reused one.
-After changing this module, re-render the Inference pages in order
+After changing this module or the model, re-render the Inference pages in order
 (``pixi run docs-inference``).
 """
 
 from __future__ import annotations
 
-import hashlib
 import inspect
-from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -36,10 +39,9 @@ import pandas as pd
 
 from joshpy.cell_data import DiagnosticQueries
 from joshpy.cli import JoshCLI
-from joshpy.jobs import ConfigSweepParameter, JobConfig, SweepConfig
+from joshpy.inference import KnownTruthStudy, LoadedStudy
+from joshpy.jobs import JobConfig
 from joshpy.registry import RunRegistry
-from joshpy.strategies import SbiStrategy
-from joshpy.sweep import SweepManager
 
 HERE = Path(__file__).resolve().parent
 DATA = HERE.parent / "demo"
@@ -49,9 +51,8 @@ PRIOR = {
     "maxNewGrowth": {"uniform": [0.2, 2.0]},
     "minPrecipImpactPct": {"uniform": [0.0, 100.0]},
 }
-TRUTH_SEED = 1  # Josh seed of the pseudo-observed run
+TRUTH_SEED = 3  # Josh seed of the pseudo-observed run
 REPLICATE_SEED = 2  # Josh seed of the replicate study
-SBI_SEED = 0  # fixes sbi's proposals, not Josh's noise
 N_PRIOR = 200
 FINAL_STEP = 10  # steps.high in forevertree.josh
 
@@ -67,7 +68,7 @@ SURVEY_CELLS = [
     (6.5, 6.5),
     (8.5, 1.5),
 ]
-MEASUREMENT_SD = 0.25  # m, error in each surveyed cell's mean height
+MEASUREMENT_SD = 0.25  # m; drawn in forevertree.josh (measuredHeight), shown in figures
 STATISTICS = ["mean_height", "height_cv"]  # what ABC compares
 
 
@@ -85,224 +86,75 @@ def model_config(**kwargs: Any) -> JobConfig:
     )
 
 
-def run_at(
-    registry: RunRegistry, cli: JoshCLI, params: dict[str, float], experiment: str, **kwargs: Any
-) -> Any:
-    """Run the model once at fixed parameters, unless that run is already loaded.
-
-    Returns the expanded job; its ``run_hash`` keys the results in the registry.
-    """
-    config = model_config(
-        sweep=SweepConfig(
-            config_parameters=[
-                ConfigSweepParameter(name=name, values=[value]) for name, value in params.items()
-            ]
-        ),
-        **kwargs,
-    )
-    manager = (
-        SweepManager.builder(config)
-        .with_registry(registry, experiment_name=experiment)
-        .with_cli(cli)
-        .build()
-    )
-    try:
-        job = manager.job_set.jobs[0]
-        if len(registry.loaded_replicates(job.run_hash)) < job.replicates:
-            manager.run(quiet=True)
-            manager.load_results(quiet=True)
-        return job
-    finally:
-        manager.cleanup()
-
-
-def run_sbi(
-    registry: RunRegistry,
-    cli: JoshCLI,
-    summaries: Any,
-    observed: dict[str, float],
-    method: str,
-    method_kwargs: dict[str, Any],
-    experiment: str,
-) -> tuple[Any, str]:
-    """Run sbi with joshpy as the simulator; returns (SbiResult, session_id).
-
-    A rerun with the same arguments against the same registry replays the
-    search, reusing every completed run.
-    """
-    strategy = SbiStrategy(
-        prior=PRIOR,
-        summaries=summaries,
-        observed=observed,
-        method=method,
-        method_kwargs=method_kwargs,
-        seed=SBI_SEED,
-    )
-    manager = (
-        SweepManager.builder(model_config(sweep=SweepConfig(strategy=strategy)))
-        .with_registry(registry, experiment_name=experiment)
-        .with_cli(cli)
-        .build()
-    )
-    try:
-        return manager.run(quiet=True, stop_on_failure=False), manager.session_id
-    finally:
-        manager.cleanup()
-
-
 # --- Observation: raw output -> survey -> statistics ---------------------------------
 
 
 def final_heights(registry: RunRegistry, run_hash: str, replicate: int = 0) -> pd.DataFrame:
-    """Final-year mean tree height of every cell: columns x, y, height."""
+    """Final-year mean tree height of every cell: columns x, y, height (true) and measured."""
     cells = DiagnosticQueries(registry).get_all_variables_at_step(FINAL_STEP, run_hash, replicate)
     if cells.empty:
         raise ValueError(f"No final-year cells for run {run_hash}, replicate {replicate}")
-    cells = cells.rename(columns={"position_x": "x", "position_y": "y", "meanHeight": "height"})
-    return cells[["x", "y", "height"]].sort_values(["y", "x"], ignore_index=True)
+    cells = cells.rename(
+        columns={
+            "position_x": "x",
+            "position_y": "y",
+            "meanHeight": "height",
+            "measuredHeight": "measured",
+        }
+    )
+    return cells[["x", "y", "height", "measured"]].sort_values(["y", "x"], ignore_index=True)
 
 
-def measurement_rng(run_hash: str, replicate: int) -> np.random.Generator:
-    """Measurement noise seeded by the run and replicate, so replay reproduces it."""
-    digest = hashlib.sha256(f"{run_hash}:{replicate}".encode()).digest()
-    return np.random.default_rng(int.from_bytes(digest[:8], "big"))
-
-
-def survey(
+def observe(
     registry: RunRegistry, run_hash: str, replicate: int = 0, *, error: bool = True
 ) -> pd.DataFrame:
-    """Survey one run: the true and measured final-year height of each surveyed cell."""
+    """The survey of one run: true and measured final-year height of each surveyed cell.
+
+    With ``error=False``, the survey records the true heights (model noise only).
+    """
     cells = final_heights(registry, run_hash, replicate).set_index(["x", "y"])
     surveyed = cells.loc[SURVEY_CELLS].reset_index()
-    noise = measurement_rng(run_hash, replicate).normal(0.0, MEASUREMENT_SD, len(surveyed))
-    surveyed["measured"] = surveyed["height"] + (noise if error else 0.0)
+    if not error:
+        surveyed["measured"] = surveyed["height"]
     return surveyed
 
 
-def statistics(heights: Any) -> dict[str, float]:
-    """Candidate summary statistics of a set of measured heights."""
-    values = np.asarray(heights, dtype=float)
+def statistics(survey: pd.DataFrame) -> dict[str, float]:
+    """Candidate summary statistics of a survey's measured heights."""
+    values = survey["measured"].to_numpy(dtype=float)
     mean, sd = float(values.mean()), float(values.std(ddof=1))
     return {"mean_height": mean, "height_sd": sd, "height_var": sd**2, "height_cv": sd / mean}
 
 
-def survey_summaries(registry: RunRegistry, run_hash: str, job: Any) -> dict[str, float]:
-    """S_sim for ABC: mean and CV of one run's measured survey (replicate 0)."""
-    measured = statistics(survey(registry, run_hash)["measured"])
-    return {name: measured[name] for name in STATISTICS}
-
-
-# --- The case study ---------------------------------------------------------------
-
-
-@dataclass
-class CaseStudy:
-    """The known-truth setup every Inference page starts from."""
-
-    truth_job: Any  # the pseudo-observed run
-    truth_survey: pd.DataFrame  # its surveyed cells: x, y, height, measured
-    reference: pd.DataFrame  # prior simulations: run_hash, parameters, statistics
-    scale: dict[str, float]  # prior SD of each statistic in STATISTICS
-
-    @property
-    def candidates(self) -> dict[str, float]:
-        """Every candidate statistic of the pseudo-observed survey."""
-        return statistics(self.truth_survey["measured"])
-
-    @property
-    def observed(self) -> dict[str, float]:
-        """S_obs: the statistics ABC compares, unscaled."""
-        return {name: self.candidates[name] for name in STATISTICS}
-
-    @property
-    def observed_scaled(self) -> dict[str, float]:
-        """S_obs in units of each statistic's prior SD."""
-        return {name: self.observed[name] / self.scale[name] for name in STATISTICS}
-
-    def distance(self, table: pd.DataFrame) -> pd.Series:
-        """Euclidean distance from S_obs of each row's statistics, in prior SDs."""
-        offsets = [(table[name] - self.observed[name]) / self.scale[name] for name in STATISTICS]
-        return np.sqrt(sum(offset**2 for offset in offsets))
-
-    def abc_target(self, names: list[str] | None = None) -> tuple[Any, dict[str, float]]:
-        """(summaries function, S_obs) for ABC on ``names``, both in prior SDs."""
-        names = list(names or STATISTICS)
-        scale = {name: self.scale[name] for name in names}
-
-        def scaled_summaries(registry: RunRegistry, run_hash: str, job: Any) -> dict[str, float]:
-            measured = statistics(survey(registry, run_hash)["measured"])
-            return {name: measured[name] / scale[name] for name in names}
-
-        return scaled_summaries, {name: self.observed[name] / scale[name] for name in names}
-
-
-def observe_truth(registry: RunRegistry, cli: JoshCLI) -> tuple[Any, dict[str, float]]:
-    """Run the model at the truth (seeded) and survey it: (job, S_obs)."""
-    job = run_at(registry, cli, TRUTH, "forevertree_truth", seed=TRUTH_SEED)
-    return job, survey_summaries(registry, job.run_hash, job)
-
-
-def simulate_prior(
-    registry: RunRegistry, cli: JoshCLI, observed: dict[str, float], n: int = N_PRIOR
-) -> Any:
-    """Simulate n parameter sets drawn from the prior; returns the SbiResult.
-
-    sbi's rejection ABC keeping every draw (quantile=1.0) is a plain prior
-    simulation. With the same seed, its first draws are SMC-ABC's first
-    generation, so a later SMC-ABC search reuses these runs.
-    """
-    result, _ = run_sbi(
-        registry,
-        cli,
-        survey_summaries,
-        observed,
-        "mcabc",
-        {"num_simulations": n, "quantile": 1.0},
-        "forevertree_prior",
+def known_truth_study() -> KnownTruthStudy:
+    """The ForeverTree study: what joshpy simulates, and how each run is observed."""
+    return KnownTruthStudy(
+        name="forevertree",  # runs are recorded as forevertree_truth, forevertree_prior, ...
+        model=model_config(),
+        prior=PRIOR,
+        truth=TRUTH,
+        observe=observe,
+        statistics=statistics,
+        compare=STATISTICS,
+        truth_seed=TRUTH_SEED,
     )
-    if result.failed:
-        raise RuntimeError(f"{result.failed} prior simulation(s) failed")
-    return result
-
-
-def reference_table(registry: RunRegistry, jobs: list[Any]) -> pd.DataFrame:
-    """Parameters and candidate statistics of each run: the ABC reference table."""
-    rows = []
-    for job in jobs:
-        measured = statistics(survey(registry, job.run_hash)["measured"])
-        rows.append({"run_hash": job.run_hash, **job.parameters, **measured})
-    return pd.DataFrame(rows)
-
-
-def load(registry: RunRegistry, cli: JoshCLI, n_prior: int = N_PRIOR) -> CaseStudy:
-    """The case study, simulating only what the registry doesn't already hold."""
-    truth_job, observed = observe_truth(registry, cli)
-    prior = simulate_prior(registry, cli, observed, n_prior)
-    reference = reference_table(registry, [job for job, _ in prior.job_results])
-    scale = {name: float(reference[name].std()) for name in STATISTICS}
-    return CaseStudy(truth_job, survey(registry, truth_job.run_hash), reference, scale)
 
 
 def replicate_study(registry: RunRegistry, cli: JoshCLI, n: int = 50) -> pd.DataFrame:
-    """Survey n replicates at the truth, with and without measurement error.
+    """Statistics of n replicates at the truth, surveyed without and with measurement error.
 
-    Returns one row per replicate and observation ("model only": the surveyed
-    cells' true heights; "survey": with measurement error), with the candidate
-    statistics.
+    One row per replicate and observation: "model only" (the surveyed cells'
+    true heights) or "survey" (with measurement error). Both read the same runs.
     """
-    job = run_at(registry, cli, TRUTH, "forevertree_replicates", seed=REPLICATE_SEED, replicates=n)
-    rows = []
-    for replicate in range(n):
-        for observation, error in [("model only", False), ("survey", True)]:
-            surveyed = survey(registry, job.run_hash, replicate, error=error)
-            rows.append(
-                {
-                    "replicate": replicate,
-                    "observation": observation,
-                    **statistics(surveyed["measured"]),
-                }
-            )
-    return pd.DataFrame(rows)
+    study = known_truth_study()
+    without_error = partial(observe, error=False)
+    tables = {
+        "model only": study.replicates(registry, cli, n, REPLICATE_SEED, observe=without_error),
+        "survey": study.replicates(registry, cli, n, REPLICATE_SEED),
+    }
+    return pd.concat(
+        [table.assign(observation=name) for name, table in tables.items()], ignore_index=True
+    )
 
 
 def show_source(*objects: Any) -> None:
@@ -332,6 +184,8 @@ LABELS = {
     "height_var": "variance",
     "height_cv": "CV",
 }
+AXIS_LABELS = {"mean_height": "mean height (m)", "height_cv": "CV of height"}
+Z_LABELS = {"mean_height": "mean height, z-score", "height_cv": "CV of height, z-score"}
 
 
 def _style(ax: Any, grid: bool = True) -> None:
@@ -357,136 +211,212 @@ def _figure(*args: Any, **kwargs: Any) -> Any:
     return fig, axes
 
 
-def plot_pipeline(study: CaseStudy, registry: RunRegistry, epsilon: float) -> None:
-    """Raw output -> survey -> statistics -> comparison, for the pseudo-observed run."""
-    import matplotlib.pyplot as plt
+def _legend(ax: Any, **kwargs: Any) -> None:
+    ax.legend(
+        fontsize=9, labelcolor=INK_2, facecolor=SURFACE, edgecolor="none", framealpha=0.9,
+        **kwargs,
+    )  # fmt: skip
+
+
+def _draw_map(
+    fig: Any,
+    ax: Any,
+    cells: pd.DataFrame,
+    sites: pd.DataFrame,
+    *,
+    limits: tuple[float, float] | None = None,
+) -> None:
+    """Final-year height of every cell, with the surveyed cells outlined and numbered."""
     from matplotlib.colors import LinearSegmentedColormap
-    from matplotlib.patches import Circle, Rectangle
+    from matplotlib.patches import Rectangle
 
-    run_hash = study.truth_job.run_hash
-    cells = final_heights(registry, run_hash)
-    surveyed = survey(registry, run_hash)
-    order = surveyed.sort_values("x", ignore_index=True)
-    order["site"] = np.arange(1, len(order) + 1)
-    stats = statistics(surveyed["measured"])
-
-    fig, axes = _figure(2, 2, figsize=(10, 7.6))
-    (ax_map, ax_survey), (ax_stats, ax_compare) = axes
-
-    # 1. Raw output: every cell's final-year height.
     grid = cells.pivot(index="y", columns="x", values="height")
     ramp = LinearSegmentedColormap.from_list("height", HEIGHT_RAMP)
-    image = ax_map.imshow(
-        grid.to_numpy(), cmap=ramp, origin="upper",
+    vmin, vmax = limits if limits else (None, None)
+    image = ax.imshow(
+        grid.to_numpy(), cmap=ramp, origin="upper", vmin=vmin, vmax=vmax,
         extent=(0, grid.shape[1], grid.shape[0], 0),
     )  # fmt: skip
-    for _, row in order.iterrows():
-        ax_map.add_patch(
+    for _, row in sites.iterrows():
+        ax.add_patch(
             Rectangle(
                 (row["x"] - 0.5, row["y"] - 0.5), 1, 1,
                 fill=False, edgecolor=INK, linewidth=1.6,
             )
         )  # fmt: skip
-        ax_map.text(
+        ax.text(
             row["x"], row["y"], str(int(row["site"])), ha="center", va="center", fontsize=8,
             color=INK, bbox=dict(boxstyle="round,pad=0.12", facecolor=SURFACE, edgecolor="none"),
         )  # fmt: skip
-    colorbar = fig.colorbar(image, ax=ax_map, fraction=0.035, pad=0.03)
-    colorbar.set_label("height (m)", color=INK_2, fontsize=9)
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.035, pad=0.03)
+    colorbar.set_label("true height (m)", color=INK_2, fontsize=9)
     colorbar.ax.tick_params(colors=MUTED, labelcolor=INK_2, labelsize=8)
     colorbar.outline.set_edgecolor(AXIS)
-    ax_map.set_xticks([])
-    ax_map.set_yticks([])
-    ax_map.set_xlabel("west → east", color=INK_2)
-    ax_map.set_ylabel("north → south", color=INK_2)
-    _title(ax_map, f"1  Model output: final-year height, {len(cells)} cells")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_xlabel("west → east", color=INK_2)
+    ax.set_ylabel("north → south", color=INK_2)
+
+
+def _numbered_sites(surveyed: pd.DataFrame) -> pd.DataFrame:
+    """Surveyed cells ordered west to east, numbered from 1."""
+    order = surveyed.sort_values("x", ignore_index=True)
+    order["site"] = np.arange(1, len(order) + 1)
+    return order
+
+
+def plot_observation(study: LoadedStudy, registry: RunRegistry) -> None:
+    """Model output -> survey -> statistics, for the pseudo-observed run."""
+    import matplotlib.pyplot as plt
+
+    run_hash = study.truth_job.run_hash
+    cells = final_heights(registry, run_hash)
+    sites = _numbered_sites(study.truth_data)
+    stats = statistics(sites)
+    mean, sd, cv = stats["mean_height"], stats["height_sd"], stats["height_cv"]
+
+    fig, (ax_map, ax_survey, ax_stats) = _figure(
+        1, 3, figsize=(13, 4.3), gridspec_kw={"width_ratios": [1.25, 1.1, 0.75]}
+    )
+
+    # 1. Model output: every cell's final-year height.
+    _draw_map(fig, ax_map, cells, sites)
+    _title(
+        ax_map,
+        f"1  Model output: final-year height of\n    {len(cells)} cells, outlined if surveyed",
+    )
 
     # 2. Survey: the outlined cells, measured with error.
     _style(ax_survey)
-    for _, row in order.iterrows():
+    for _, row in sites.iterrows():
         ax_survey.plot(
             [row["site"]] * 2, [row["height"], row["measured"]], color=AXIS, linewidth=1.2
         )
     ax_survey.scatter(
-        order["site"], order["height"], s=46, facecolor=SURFACE, edgecolor=INK_2,
+        sites["site"], sites["height"], s=46, facecolor=SURFACE, edgecolor=INK_2,
         linewidth=1.4, zorder=3, label="true",
     )  # fmt: skip
     ax_survey.scatter(
-        order["site"], order["measured"], s=46, color=ORANGE, edgecolor=SURFACE,
+        sites["site"], sites["measured"], s=46, color=ORANGE, edgecolor=SURFACE,
         linewidth=1.2, zorder=4, label="measured",
     )  # fmt: skip
-    ax_survey.set_xticks(order["site"])
+    ax_survey.set_xticks(sites["site"])
     ax_survey.set_xlabel("survey site (west → east)", color=INK_2)
     ax_survey.set_ylabel("height (m)", color=INK_2)
-    ax_survey.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper right")
-    _title(ax_survey, f"2  Survey: {len(order)} sites, measurement SD {MEASUREMENT_SD} m")
-
-    # 3. Statistics of the measured heights.
-    _style(ax_stats)
-    mean, sd = stats["mean_height"], stats["height_sd"]
-    ax_stats.axvspan(mean - sd, mean + sd, color=GRID, zorder=0)
-    ax_stats.axvline(mean, color=INK, linewidth=1.4)
-    ax_stats.scatter(
-        surveyed["measured"], np.zeros(len(surveyed)), s=46, color=ORANGE,
-        edgecolor=SURFACE, linewidth=1.2, zorder=3,
-    )  # fmt: skip
-    ax_stats.set_ylim(-1, 1)
-    ax_stats.set_yticks([])
-    ax_stats.set_xlabel("measured height (m)", color=INK_2)
-    ax_stats.text(
-        0.02, 0.95,
-        f"mean {mean:.2f} m\nSD {sd:.2f} m (band)\nCV = SD / mean = {stats['height_cv']:.3f}",
-        transform=ax_stats.transAxes, va="top", fontsize=9, color=INK,
-    )  # fmt: skip
-    _title(ax_stats, "3  Summary statistics")
-
-    # 4. Comparison with the prior simulations, in prior SDs.
-    _style(ax_compare)
-    reference = study.reference
-    inside = study.distance(reference) <= epsilon
-    sx, sy = (reference[name] / study.scale[name] for name in STATISTICS)
-    ox, oy = (study.observed_scaled[name] for name in STATISTICS)
-    ax_compare.scatter(
-        sx[~inside], sy[~inside], s=20, facecolor="none", edgecolor=MUTED, linewidth=0.8,
-        label="prior simulation",
-    )  # fmt: skip
-    ax_compare.scatter(
-        sx[inside], sy[inside], s=26, color=BLUE, edgecolor=SURFACE, linewidth=0.8,
-        label="within ε of S_obs", zorder=3,
-    )  # fmt: skip
-    ax_compare.add_patch(
-        Circle((ox, oy), epsilon, fill=False, edgecolor=INK, linestyle="--", linewidth=1.2)
+    _legend(ax_survey, loc="upper right")
+    _title(
+        ax_survey,
+        f"2  Survey: {len(sites)} sites, each measured\n    with error (SD {MEASUREMENT_SD} m)",
     )
-    ax_compare.scatter([ox], [oy], marker="x", s=80, color=INK, linewidth=2, zorder=4)
-    ax_compare.annotate(
-        r"$S_\mathrm{obs}$", (ox, oy), xytext=(8, 6), textcoords="offset points",
+
+    # 3. Statistics: the measured heights reduce to a mean and a CV.
+    _style(ax_stats)
+    ax_stats.sharey(ax_survey)
+    ax_stats.axhspan(mean - sd, mean + sd, color=GRID, zorder=0)
+    ax_stats.axhline(mean, color=INK, linewidth=1.4)
+    ax_stats.scatter(
+        np.zeros(len(sites)), sites["measured"], s=46, color=ORANGE, edgecolor=SURFACE,
+        linewidth=1.2, zorder=3,
+    )  # fmt: skip
+    ax_stats.set_xlim(-0.6, 1.6)
+    ax_stats.set_xticks([])
+    ax_stats.annotate(
+        f"mean {mean:.2f} m", (0.35, mean), xytext=(0, 4), textcoords="offset points",
         fontsize=9, color=INK,
     )  # fmt: skip
-    ax_compare.set_aspect("equal", adjustable="datalim")
-    ax_compare.set_xlabel("mean height (prior SDs)", color=INK_2)
-    ax_compare.set_ylabel("CV (prior SDs)", color=INK_2)
-    ax_compare.legend(
-        fontsize=9,
-        labelcolor=INK_2,
-        loc="best",
-        facecolor=SURFACE,
-        edgecolor="none",
-        framealpha=0.9,
+    ax_stats.annotate(
+        f"±1 SD ({sd:.2f} m)", (0.35, mean + sd), xytext=(0, -12), textcoords="offset points",
+        fontsize=9, color=INK_2,
+    )  # fmt: skip
+    summary = (
+        f"CV = SD / mean = {cv:.3f}\n"
+        r"$S_\mathrm{obs}$ = (mean, CV)" + f"\n      = ({mean:.2f} m, {cv:.3f})"
     )
-    _title(ax_compare, "4  Comparison: within ε of S_obs?")
+    ax_stats.text(
+        0.04, 0.03, summary,
+        transform=ax_stats.transAxes, va="bottom", fontsize=9, color=INK,
+        bbox=dict(boxstyle="round,pad=0.3", facecolor=SURFACE, edgecolor=AXIS),
+    )  # fmt: skip
+    _title(ax_stats, "3  Summary statistics\n    of the measured heights")
 
     fig.tight_layout()
     plt.show()
 
 
-def plot_candidates(reference: pd.DataFrame, observed: dict[str, float]) -> None:
-    """Each candidate statistic against each parameter, over the prior simulations.
+def plot_comparison(study: LoadedStudy, epsilon: float) -> None:
+    """Prior simulations against S_obs, in measured units (left) and as z-scores (right)."""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle, Ellipse
 
-    ``observed`` holds the pseudo-observed value of each statistic (dashed line).
-    """
+    x, y = STATISTICS
+    reference = study.reference
+    distance = study.distance(reference)
+    inside = distance <= epsilon
+    z = study.zscore(reference)
+    observed, observed_z = study.observed, study.zscore(study.observed)
+
+    fig, (ax_raw, ax_z) = _figure(1, 2, figsize=(11.5, 4.8))
+    panels = [
+        (ax_raw, reference, observed, AXIS_LABELS[x], AXIS_LABELS[y]),
+        (ax_z, z, observed_z, Z_LABELS[x], Z_LABELS[y]),
+    ]
+    for ax, table, point, xlabel, ylabel in panels:
+        _style(ax)
+        ax.scatter(
+            table.loc[~inside, x], table.loc[~inside, y], s=20, facecolor="none",
+            edgecolor=MUTED, linewidth=0.8, label="prior simulation",
+        )  # fmt: skip
+        ax.scatter(
+            table.loc[inside, x], table.loc[inside, y], s=26, color=BLUE, edgecolor=SURFACE,
+            linewidth=0.8, label="within ε of S_obs (accepted)", zorder=3,
+        )  # fmt: skip
+        ax.scatter(
+            [point[x]], [point[y]], marker="X", s=110, color=ORANGE, edgecolor=INK,
+            linewidth=0.8, zorder=5, label=r"$S_\mathrm{obs}$",
+        )  # fmt: skip
+        ax.set_xlabel(xlabel, color=INK_2)
+        ax.set_ylabel(ylabel, color=INK_2)
+
+    # Left: in measured units, the region within ε is an ellipse, wider along the
+    # statistic with the larger spread.
+    ax_raw.add_patch(
+        Ellipse(
+            (observed[x], observed[y]), 2 * epsilon * study.scale[x], 2 * epsilon * study.scale[y],
+            fill=False, edgecolor=INK, linestyle="--", linewidth=1.2,
+        )
+    )  # fmt: skip
+    _legend(ax_raw, loc="best")
+    _title(ax_raw, "4  Prior simulations and S_obs, in measured units")
+
+    # Right: as z-scores, it is a circle of radius ε. One rejected simulation shows
+    # the distance being compared.
+    ax_z.add_patch(
+        Circle(
+            (observed_z[x], observed_z[y]), epsilon, fill=False, edgecolor=INK,
+            linestyle="--", linewidth=1.2,
+        )
+    )  # fmt: skip
+    example = (distance[~inside] - 3 * epsilon).abs().idxmin()
+    ex, ey = z.at[example, x], z.at[example, y]
+    ax_z.plot([observed_z[x], ex], [observed_z[y], ey], color=INK_2, linewidth=1.1, zorder=4)
+    ax_z.annotate(
+        f"distance {distance[example]:.2f} > ε: rejected", (ex, ey), xytext=(8, -4),
+        textcoords="offset points", fontsize=9, color=INK,
+        bbox=dict(boxstyle="round,pad=0.15", facecolor=SURFACE, edgecolor="none", alpha=0.85),
+    )  # fmt: skip
+    ax_z.set_aspect("equal", adjustable="datalim")
+    _title(ax_z, f"5  As z-scores: accepted if distance ≤ ε = {epsilon:.2f}")
+
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_candidates(study: LoadedStudy) -> None:
+    """Each candidate statistic against each parameter, over the prior simulations."""
     import matplotlib.pyplot as plt
 
-    fig, axes = _figure(2, len(LABELS), figsize=(11, 5.4), sharey="col")
+    reference, observed = study.reference, study.candidates
+    fig, axes = _figure(2, len(LABELS), figsize=(11, 5.9), sharey="col")
     for row, param in enumerate(PRIOR):
         for col, (name, label) in enumerate(LABELS.items()):
             ax = axes[row, col]
@@ -495,8 +425,11 @@ def plot_candidates(reference: pd.DataFrame, observed: dict[str, float]) -> None
                 reference[param], reference[name], s=14, color=BLUE, edgecolor=SURFACE,
                 linewidth=0.4,
             )  # fmt: skip
-            ax.axhline(observed[name], color=INK_2, linestyle="--", linewidth=0.9)
-            ax.axvline(TRUTH[param], color=MUTED, linestyle=":", linewidth=0.9)
+            ax.axhline(
+                observed[name], color=ORANGE, linestyle="--", linewidth=1.5,
+                label="pseudo-observed value of the statistic",
+            )  # fmt: skip
+            ax.axvline(TRUTH[param], color=INK, linewidth=1.0, label="true parameter value")
             rho = reference[param].corr(reference[name], method="spearman")
             ax.text(
                 0.03, 0.95, f"ρ = {rho:+.2f}", transform=ax.transAxes, va="top", fontsize=9,
@@ -506,24 +439,29 @@ def plot_candidates(reference: pd.DataFrame, observed: dict[str, float]) -> None
             if row == 0:
                 _title(ax, label)
             ax.set_xlabel(param, color=INK_2, fontsize=9)
-    fig.tight_layout()
+    fig.legend(
+        *axes[0, 0].get_legend_handles_labels(), loc="upper center", ncol=2, frameon=False,
+        fontsize=9, labelcolor=INK_2,
+    )  # fmt: skip
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     plt.show()
 
 
-def plot_replicates(study: CaseStudy, replicates: pd.DataFrame, epsilon: float) -> None:
+def plot_replicates(study: LoadedStudy, replicates: pd.DataFrame, epsilon: float) -> None:
     """Replicates at the truth around S_obs, and the fraction within each tolerance."""
     import matplotlib.pyplot as plt
 
     series = [("model only", BLUE), ("survey", ORANGE)]
+    observed_z = study.zscore(study.observed)
     fig, axes = _figure(1, 3, figsize=(11, 3.5))
     for ax, name in zip(axes[:2], STATISTICS, strict=True):
         _style(ax)
         for observation, color in series:
-            values = replicates.loc[replicates["observation"] == observation, name]
-            offset = (values - study.observed[name]) / study.scale[name]
+            rows = replicates[replicates["observation"] == observation]
+            offset = study.zscore(rows)[name] - observed_z[name]
             ax.hist(offset, bins=12, histtype="step", linewidth=2, color=color, label=observation)
         ax.axvline(0, color=INK, linestyle="--", linewidth=1.2)
-        ax.set_xlabel(r"$S_\mathrm{sim} - S_\mathrm{obs}$ (prior SDs)", color=INK_2)
+        ax.set_xlabel(r"$S_\mathrm{sim} - S_\mathrm{obs}$ (z-score units)", color=INK_2)
         _title(ax, LABELS[name])
     axes[0].set_ylabel("replicates", color=INK_2)
 
@@ -543,7 +481,7 @@ def plot_replicates(study: CaseStudy, replicates: pd.DataFrame, epsilon: float) 
     ax.set_xscale("log")
     ax.set_xlim(smallest * 0.7, epsilon * 2)
     ax.set_ylim(0, 1.05)
-    ax.set_xlabel("tolerance ε (prior SDs, log scale)", color=INK_2)
+    ax.set_xlabel("tolerance ε (z-score units, log scale)", color=INK_2)
     ax.set_ylabel("fraction within ε", color=INK_2)
     ax.legend(frameon=False, fontsize=9, labelcolor=INK_2, loc="upper left")
     _title(ax, "Estimated ABC likelihood at the truth")
