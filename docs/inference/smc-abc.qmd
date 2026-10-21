@@ -13,8 +13,10 @@ This page fits the [ForeverTree case study](forevertree.qmd) with sequential
 Monte Carlo ABC (SMC-ABC), option (a) of @hartig2011: a nonparametric
 likelihood approximation, where all the variability comes from within the
 stochastic simulation. The case study page covered the first of their three
-steps, aggregation. This page covers the other two: the **likelihood
-approximation**, and **sampling** with SMC-ABC [@toni2009; @beaumont2009].
+steps, aggregation, and showed the second at the true parameters alone. This
+page runs the other two across the whole prior: the **likelihood
+approximation** at every proposed parameter set, and **sampling** with SMC-ABC
+[@toni2009; @beaumont2009].
 
 Because the truth is known, every result can be checked: whether the posterior
 contains the truth, whether the summary statistics are sufficient to recover
@@ -40,6 +42,7 @@ import numpy as np
 import pandas as pd
 
 from joshpy.cli import JoshCLI
+from joshpy.inference import KnownTruthStudy, effective_sample_size, weighted_quantile
 from joshpy.jar import JarMode
 from joshpy.registry import RunRegistry
 
@@ -50,32 +53,33 @@ cli = JoshCLI(josh_jar=JarMode.DEV)
 ## Starting from the Middle
 
 One call loads the case study: the pseudo-observed survey, the 200 prior
-simulations and the scale of each statistic. It reuses the case study's runs
+simulations and the z-score of each statistic. It reuses the case study's runs
 from the registry and simulates only what is missing.
 
 ```{python}
-study = case.load(registry, cli)  # pseudo-observed survey, prior simulations, scale
-summaries, observed = study.abc_target()  # scaled summaries function and S_obs, for SbiStrategy
+spec = case.known_truth_study()  # the KnownTruthStudy definition
+study = spec.load(registry, cli)  # pseudo-observed survey, prior simulations, z-scores
 ```
 
 As a reminder, the truth is `maxNewGrowth` = 1.0 m and `minPrecipImpactPct` =
 40%, under uniform priors of 0.2 to 2.0 m and 0 to 100%. The pseudo-observed
 data are a survey of 8 fixed cells, each measured with error, reduced to the
-mean and the CV of the measured heights. Each statistic is divided by its
-standard deviation across the prior simulations:
+mean and the CV of the measured heights. Each statistic is compared as a
+z-score, using its mean and standard deviation across the prior simulations:
 
 ```{python}
 pd.DataFrame(
     {
         "pseudo-observed": study.observed,
-        "prior SD (scale)": study.scale,
-        "pseudo-observed (prior SDs)": study.observed_scaled,
+        "prior mean (μ)": study.center,
+        "prior SD (σ)": study.scale,
+        "pseudo-observed z-score": study.zscore(study.observed),
     }
-).rename(index=case.LABELS).round(3)
+).loc[case.STATISTICS].rename(index=case.LABELS).round(3)
 ```
 
-`abc_target()` returns the summaries function and $S_\text{obs}$ already
-divided by these scales, so sbi's distances are in prior SDs.
+`study.search` gives sbi z-scored statistics, so sbi's distances and tolerances
+are in z-score units.
 
 ## The Likelihood Approximation
 
@@ -88,7 +92,7 @@ P\big(d(S_\text{sim}, S_\text{obs}) \le \varepsilon \mid \theta\big).
 $$
 
 This is an **indicator kernel**: each simulation counts as a match or not. The
-distance $d$ is sbi's `"l2"`, the Euclidean distance, here between scaled
+distance $d$ is sbi's `"l2"`, the Euclidean distance, here between z-scored
 statistics.
 
 - **$\varepsilon$ is the approximation error.** As $\varepsilon$ shrinks, the
@@ -118,7 +122,7 @@ survey_replicates = replicates[replicates["observation"] == "survey"]
 replicate_distance = study.distance(survey_replicates)
 print(
     f"replicate distances at the truth: median {replicate_distance.median():.2f}, "
-    f"largest {replicate_distance.max():.2f} prior SDs"
+    f"largest {replicate_distance.max():.2f} (z-score units)"
 )
 ```
 
@@ -139,12 +143,12 @@ SMC-ABC runs in generations [@toni2009; @beaumont2009]:
   the previous one. These are **carried over**, and their distances may
   exceed the final tolerance.
 
-The case study module runs sbi with joshpy as the simulator:
+joshpy's `KnownTruthStudy` runs sbi with joshpy as the simulator:
 
 ```{python}
 #| echo: false
 #| output: asis
-case.show_source(case.run_sbi)
+case.show_source(KnownTruthStudy.search)
 ```
 
 We start with a small budget: 60 initial draws, 30 particles and 600
@@ -152,9 +156,7 @@ simulations.
 
 ```{python}
 SMC = {"num_initial_pop": 60, "num_particles": 30, "epsilon_decay": 0.5, "num_simulations": 600}
-result, session_id = case.run_sbi(
-    registry, cli, summaries, observed, "smcabc", SMC, "forevertree_smcabc"
-)
+result, session_id = study.search(registry, cli, "smcabc", SMC, "forevertree_smcabc")
 
 evaluated = [job.run_hash for job, _ in result.job_results]
 reused = set(evaluated) & set(study.reference["run_hash"])
@@ -202,7 +204,7 @@ this share of draws from the prior:
 final = result.populations[-1]
 epsilon = final["epsilon"]
 within = study.distance(study.reference) <= epsilon
-print(f"final target ε {epsilon:.3f}, largest distance {max(final['distances']):.3f} prior SDs")
+print(f"final target ε {epsilon:.3f}, largest distance {max(final['distances']):.3f}")
 print(f"prior simulations within ε: {within.sum()} of {len(within)} ({within.mean():.1%})")
 print(
     f"replicate distances at the truth: median {replicate_distance.median():.2f}, "
@@ -212,18 +214,19 @@ print(
 
 Two things to read from this:
 
-- **The last generation is mostly carried over.** Generation 5 had only 21
-  simulations left and accepted one of them; the other 29 particles were
-  carried over from generation 4. So the final population effectively sits at
-  generation 4's tolerance, about 0.09 prior SDs: the largest distance in it.
-  Passing `use_last_pop_samples=False` in `method_kwargs` would end on the
-  last complete generation instead.
-- **The budget was enough.** Even 0.09 is below the median replicate distance
-  at the truth (0.12), so at this tolerance fewer than half of the replicates
-  of the true parameters would count as a match. The posterior's width now
-  reflects the survey's noise more than the tolerance. Shrinking the tolerance
-  further would change the posterior less and less, at a rising cost: the
-  acceptance rate fell from 50% in generation 0 to 17% in generation 4.
+- **The last generation ran out of budget.** Generation 4 had 80 simulations
+  left and accepted 11 of them; the other 19 particles were carried over from
+  generation 3. Their distances may exceed the target, which is why the largest
+  distance (0.108) is above it (0.075). Passing `use_last_pop_samples=False` in
+  `method_kwargs` would end on the last complete generation instead.
+- **The budget roughly suffices.** The target tolerance (0.075) is about the
+  median replicate distance at the truth (0.07), and the largest distance
+  (0.108) lies between that median and the largest replicate distance (0.22).
+  At this tolerance, most but not all replicates of the true parameters would
+  count as a match, so the posterior's width reflects the survey's noise and
+  the tolerance in comparable measure. Shrinking the tolerance further would
+  change the posterior less and less, at a rising cost: the acceptance rate fell
+  from 50% in generation 0 to 14% in generation 4.
 
 None of the 200 prior simulations lies this close to $S_\text{obs}$, so
 rejection sampling would need far more draws from the prior to get here.
@@ -235,68 +238,39 @@ accepted. If a budget falls short, raise it without starting over (see
 
 ```{python}
 #| label: fig-generations
-#| fig-cap: "Accepted parameter sets in each SMC-ABC generation, over the prior box, with the generation's target tolerance in prior SDs. Hollow points were carried over from the previous generation when the budget ran out. The cross marks the truth."
+#| fig-cap: "Accepted parameter sets in each SMC-ABC generation, over the prior box, with the generation's target tolerance in z-score units. Hollow points were carried over from the previous generation when the budget ran out. The cross marks the truth."
 case.plot_generations(result)
 ```
 
 The final population, with its importance weights, is the ABC posterior. For
-each parameter: the weighted posterior mean, the central 90% credible interval,
-its width as a share of the prior's 90% width, and whether it contains the
-truth.
+each parameter, `study.posterior` gives the weighted posterior mean, the central
+90% credible interval, its width as a share of the prior's 90% width, and
+whether it contains the truth.
 
 ```{python}
-def weighted_quantile(values, weights, q):
-    """The q-quantile of weighted values."""
-    order = np.argsort(values)
-    cumulative = np.cumsum(weights[order]) / weights.sum()
-    return float(values[order][np.searchsorted(cumulative, q)])
-
-
-def posterior_table(result):
-    """Weighted posterior mean and central 90% interval of each parameter."""
-    particles = result.to_dataframe()
-    weights = particles["weight"].to_numpy()
-    rows = {}
-    for name, spec in case.PRIOR.items():
-        values = particles[name].to_numpy()
-        low, high = (weighted_quantile(values, weights, q) for q in (0.05, 0.95))
-        prior_low, prior_high = spec["uniform"]
-        rows[name] = {
-            "truth": case.TRUTH[name],
-            "posterior mean": float(np.average(values, weights=weights)),
-            "5%": low,
-            "95%": high,
-            "width / prior width": (high - low) / (0.9 * (prior_high - prior_low)),
-            "truth inside": low <= case.TRUTH[name] <= high,
-        }
-    return pd.DataFrame.from_dict(rows, orient="index")
-
-
-def effective_sample_size(result):
-    """Kish's effective sample size of the final population's weights."""
-    weights = result.to_dataframe()["weight"].to_numpy()
-    return float(weights.sum() ** 2 / (weights**2).sum())
-
-
-posterior_table(result).round(3)
+study.posterior(result).round(3)
 ```
 
 ```{python}
-print(f"effective sample size: {effective_sample_size(result):.1f} of {len(result.run_hashes)} particles")
+weights = result.to_dataframe()["weight"]
+print(f"effective sample size: {effective_sample_size(weights):.1f} of {len(weights)} particles")
 ```
 
-Both intervals contain the truth, and each spans about 8% of the prior's 90%
-width. Three notes on reading this table:
+Both intervals contain the truth, and each spans about a tenth of the prior's
+90% width.
+
+Three notes on reading this table:
 
 - **The intervals are marginal.** Each describes one parameter on its own. The
   joint posterior can be much narrower in some directions than the two
   intervals suggest (see the next section).
 - **The endpoints are noisy.** With 30 weighted particles, and an effective
   sample size below that, each endpoint rests on one or two particles.
-- **"Truth inside" is necessary, not sufficient.** A posterior as wide as the
-  prior always contains the truth. The width matters too, and one known truth
-  is a single test; the [coverage check](#calibration-a-coverage-check) repeats
-  it over many.
+- **"Truth inside" is neither necessary nor sufficient.** A posterior as wide
+  as the prior always contains the truth, and a calibrated 90% interval misses
+  it one time in ten, so a single miss would be within expectations. The width
+  matters too, and one known truth is a single test; the
+  [coverage check](#calibration-a-coverage-check) repeats it over many.
 
 ## Testing Sufficiency: the Mean Alone
 
@@ -305,19 +279,18 @@ artificial data [@hartig2011]: run the same search with the mean alone and see
 what the CV contributed.
 
 ```{python}
-summaries_mean, observed_mean = study.abc_target(["mean_height"])
-result_mean, _ = case.run_sbi(
-    registry, cli, summaries_mean, observed_mean, "smcabc", SMC, "forevertree_smcabc_mean_only"
+result_mean, _ = study.search(
+    registry, cli, "smcabc", SMC, "forevertree_smcabc_mean_only", names=["mean_height"]
 )
 generation_table(result_mean).round(3)
 ```
 
 With one statistic instead of two, the same budget reaches a smaller
-tolerance (0.011 prior SDs, against 0.045): a simulation has only one
-dimension in which to land close.
+tolerance (0.011, against 0.075): a simulation has only one dimension in which
+to land close.
 
 ```{python}
-posterior_table(result_mean).round(3)
+study.posterior(result_mean).round(3)
 ```
 
 ```{python}
@@ -347,12 +320,14 @@ The mean alone cannot separate the parameters: faster growth with more drought
 sensitivity gives the same mean height as slower growth with less. The
 accepted parameter sets spread along that trade-off. Different parameter sets
 that reproduce the data equally well are **equifinal** [@beven2006]; the
-parameters are not identifiable from the mean. Neither marginal interval shows
-this on its own: both contain the truth, and the one for `maxNewGrowth` spans
-only 27% of the prior's width, yet a correlation of −0.98 means the joint
-posterior is a thin ridge. So check the correlations or the joint plot, not
-only the marginal intervals. Even with the CV, the two parameters remain
-somewhat correlated (−0.46).
+parameters are not identifiable from the mean. The marginal intervals only
+partly show this. Both contain the truth, and the one for `maxNewGrowth` spans
+only 24% of the prior's width, which looks informative. Yet a correlation of
+−0.99 means the joint posterior is a thin ridge, on which each value of one
+parameter fixes the other. So check the correlations or the joint plot, not
+only the marginal intervals. With the CV, the two parameters remain
+correlated (−0.63), but only along a short stretch of that ridge: both
+intervals are narrow.
 
 What do equifinal parameter sets look like? Here are the truth and, from each
 search, the final particle farthest from the truth (in units of the prior
@@ -371,9 +346,9 @@ case.plot_final_states(
 )
 ```
 
-The mean-only particle matches the observed mean (7.15 m, against 7.14 m)
-with `minPrecipImpactPct` at 81% instead of 40%, so drought barely slows its
-trees. Its landscape is much more uniform, with a CV of 0.15 instead of 0.39.
+The mean-only particle matches the observed mean (7.27 m, against 7.25 m)
+with `minPrecipImpactPct` at 95% instead of 40%, so drought barely slows its
+trees. Its landscape is much more uniform, with a CV of 0.14 instead of 0.36.
 The spread between wet and dry cells, which the CV measures, is where such
 parameter sets part ways.
 
@@ -415,7 +390,7 @@ continues from the first run that hadn't finished.
 ```{python}
 runs_before = registry.conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
 start = time.perf_counter()
-replay, _ = case.run_sbi(registry, cli, summaries, observed, "smcabc", SMC, "forevertree_smcabc")
+replay, _ = study.search(registry, cli, "smcabc", SMC, "forevertree_smcabc")
 seconds = time.perf_counter() - start
 runs_after = registry.conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
 
@@ -448,44 +423,28 @@ of the other $k$ with probability $(k - 1)/(k + 1) = 19/21 \approx 90\%$
 [@talts2018; @csillery2012]. With $\varepsilon > 0$, the ABC posterior is wider
 than the exact one, so we expect **over-coverage**.
 
+`study.leave_one_out` also reports each parameter's **width**: the mean range
+of the accepted values, over the width of the prior's central interval holding
+$(k - 1)/(k + 1)$ of its mass. For a uniform prior, that interval is the range
+20 draws from the prior span on average, so a width near 1 means the statistics
+say nothing about the parameter.
+
 ```{python}
 K = 20  # accepted per held-out simulation
-
-
-def leave_one_out(names):
-    """Coverage and accepted-range width of rejection ABC on the reference table."""
-    reference = study.reference
-    scaled = reference[names] / pd.Series(study.scale)[names]
-    spans = {name: spec["uniform"][1] - spec["uniform"][0] for name, spec in case.PRIOR.items()}
-    inside = {name: [] for name in case.PRIOR}
-    width = {name: [] for name in case.PRIOR}
-    for i in reference.index:
-        distance = np.sqrt(((scaled - scaled.loc[i]) ** 2).sum(axis=1)).drop(index=i)
-        accepted = reference.loc[distance.nsmallest(K).index]
-        for name in case.PRIOR:
-            low, high = accepted[name].min(), accepted[name].max()
-            inside[name].append(low < reference.at[i, name] < high)
-            width[name].append((high - low) / spans[name])
-    return {
-        **{f"{name} coverage": np.mean(inside[name]) for name in case.PRIOR},
-        **{f"{name} range / prior": np.mean(width[name]) for name in case.PRIOR},
-    }
-
-
 expected = (K - 1) / (K + 1)
 standard_error = np.sqrt(expected * (1 - expected) / len(study.reference))
 print(f"expected if calibrated: {expected:.3f} (± {standard_error:.3f} for 200 held-out simulations)")
-pd.DataFrame(
-    {"mean + CV": leave_one_out(case.STATISTICS), "mean only": leave_one_out(["mean_height"])}
-).T.round(3)
+pd.concat(
+    {"mean + CV": study.leave_one_out(k=K), "mean only": study.leave_one_out(["mean_height"], k=K)}
+).round(3)
 ```
 
 With mean and CV, both parameters over-cover (0.975 and 0.97, against
 0.905 ± 0.021), as expected with $\varepsilon > 0$. With the mean alone,
-`minPrecipImpactPct` covers close to the nominal rate (0.91), while its
-accepted range spans 82% of the prior, against 33% with the CV: calibrated,
-and honest about knowing less. The mean alone gives a slightly narrower range
-for `maxNewGrowth`: from 199 simulations, the 20 nearest in two statistics lie
+`minPrecipImpactPct` covers at the nominal rate (0.905), while its width is
+0.91, against 0.36 with the CV: calibrated, and honest about knowing almost
+nothing. The mean alone gives a slightly narrower range for `maxNewGrowth`
+(0.32, against 0.37): from 199 simulations, the 20 nearest in two statistics lie
 farther away than the 20 nearest in one, the cost of each added statistic.
 
 Coverage tests calibration, not sufficiency. The sufficiency test above is
@@ -517,8 +476,8 @@ with their own seeds (so the page is reproducible), and survey them.
 predictive = []
 for i, row in particles.iterrows():
     params = {name: float(row[name]) for name in case.PRIOR}
-    job = case.run_at(registry, cli, params, "forevertree_predictive", seed=1000 + i)
-    sites = case.survey(registry, job.run_hash)
+    job = spec.run_at(registry, cli, params, "forevertree_predictive", seed=1000 + i)
+    sites = case.observe(registry, job.run_hash)
     predictive.append(sites.assign(weight=row["weight"]))
 predictive = pd.concat(predictive, ignore_index=True)
 
@@ -531,7 +490,7 @@ def predictive_range(sites):
 
 
 check = predictive.groupby(["x", "y"]).apply(predictive_range, include_groups=False)
-check = study.truth_survey.set_index(["x", "y"])[["measured"]].join(check)
+check = study.truth_data.set_index(["x", "y"])[["measured"]].join(check)
 check["inside"] = (check["5%"] <= check["measured"]) & (check["measured"] <= check["95%"])
 check = check.sort_index(level="x")
 check.insert(0, "site", range(1, len(check) + 1))  # numbered west to east, as in the maps
@@ -555,8 +514,8 @@ consistently missed points to a part of the landscape the model gets wrong.
   replication, averages over the model's noise. Replicates belong to filters on
   model properties and to checks like the replicate study.
 - **Failures.** A failed run gets NaN summaries, which sbi never accepts, and
-  `result.failed` counts them. `run_sbi` passes `stop_on_failure=False` so one
-  failure doesn't end a search.
+  `result.failed` counts them. `study.search` passes `stop_on_failure=False` so
+  one failure doesn't end a search.
 - **The limits of rejection.** Acceptance falls quickly as statistics are
   added and the tolerance shrinks. SMC-ABC concentrates simulations where they
   matter, but beyond a handful of statistics, neural estimators scale better
@@ -567,9 +526,8 @@ consistently missed points to a part of the landscape the model gets wrong.
   simulated particles, so fit the adjustment on `result.samples` afterwards.
 - **The choices that matter most** are the tolerance (set by the budget; judge
   it against the replicate distances), the summary statistics (test their
-  sufficiency on artificial data), and the metric (here Euclidean on
-  statistics scaled by their prior SDs; the scaling decides how much each
-  statistic counts).
+  sufficiency on artificial data), and the metric (here Euclidean on z-scored
+  statistics; the scaling decides how much each statistic counts).
 
 ```{python}
 #| include: false
