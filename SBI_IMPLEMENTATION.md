@@ -1,6 +1,6 @@
 # SBI Implementation for joshpy
 
-Oct 20, 2026 · @nick · joshpy 0.0.9.33 · sbi 0.27.0 with CPU-only torch 2.14.1
+Oct 21, 2026 · @nick · joshpy 0.0.9.34 · sbi 0.27.0 with CPU-only torch 2.14.1
 
 How joshpy runs the filter-and-refine search in [SBI.md](SBI.md). The machinery is proved on
 the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to the grass–shrub and Joshua
@@ -130,7 +130,8 @@ These findings apply to every page and experiment.
     changes (tested). It silently ships the old frozen output, prose included. So a source edit
     without a fresh, committed render deploys a stale page, not a broken build.
   - Commit a render with `git add docs/_freeze/<page>`. A re-render renames figure files, and the
-    new PNGs are untracked, so `git commit -a` would miss them.
+    new PNGs are untracked, so `git commit -a` would miss them. Quarto doesn't delete the old
+    PNGs either: `git rm` any figure the new freeze no longer references.
   - reticulate needs the torch stderr-logging workaround (a hidden chunk).
   - Figure code must not leave matplotlib return values as expression statements; reticulate prints
     them.
@@ -138,7 +139,8 @@ These findings apply to every page and experiment.
     run-count deltas or wall-clock time.
   - Check every freeze for leaks before committing:
     `grep -c 'Text(\|Line2D\|BarContainer' docs/_freeze/inference/*/execute-results/html.json`
-    should print 0.
+    should print 0. The case study displays its module's source, so the module mustn't contain
+    those names either (build legends from labelled lines, not `Line2D` handles).
   - A render can crash once at the end of a page's knit with `corrupted double-linked list`
     (glibc), seen once on a warm re-render. No freeze is written, `set -e` stops the script, and
     `docs/inference/<page>_files/` is left behind. Delete that and rerun; the retry passed. It
@@ -155,50 +157,59 @@ These findings apply to every page and experiment.
 - Commits end with the `Co-Authored-By` trailer; PR descriptions end with the Claude Code line.
 - Docs PRs stay drafts until the user has reviewed the render.
 
-### Where things stand (Oct 20)
+### Where things stand (Oct 21)
+
+Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 ("SBI stack n/8").
 
 | PR | Branch | Status |
 |----|--------|--------|
 | #86, #87, #88 | `feat/adaptive-evaluate-batch`, `feat/batch-no-wait-resume`, `feat/sbi-strategy` | Open, awaiting merge |
 | #89 (PR 1) | `docs/sbi-tutorial` | Done. Inference tab and landing page, site-wide references, old tutorial retired |
-| #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. The user's review isn't finished yet |
-| #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Awaiting the user's review of the render |
+| #93 | `feat/inference-known-truth` | Open. Experimental `joshpy.inference`: `KnownTruthStudy` and `LoadedStudy`, extracted from the case study after the #90 review |
+| #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. Review addressed (below); awaiting the user's look at the render |
+| #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Re-rendered on #93 and the revised case study; awaiting the user's review |
 | #92 | `fix/sbi-summaries` | Open. Callables saved only as loadable paths; summaries errors stop the search (Behavior notes) |
+
+### #90 review (Oct 21)
+
+| # | Note | Change |
+|---|------|--------|
+| 1 | Why seed the measurement noise from `(run_hash, replicate)`? | The error is drawn in Josh: `forevertree.josh` exports `measuredHeight` (mean height plus normal error, SD 0.25 m) next to `meanHeight`, and `observe` keeps the surveyed cells. No Python RNG. The model edit changed every `run_hash`, so every run re-simulated |
+| 2 | Generalize the case study | Extracted into `joshpy.inference` (#93), after checking it against `docs/architecture.qmd`. The one tension (one registry per experiment) is now a note there: related experiments that share runs belong in one registry |
+| 3 | Dashed and dotted lines look alike; define the statistics | Orange dashed for S_obs, solid black for the truth, with a legend; a LaTeX table of definitions |
+| 4 | "Why the CV and not the variance?" reads as a defense | A general six-step process for choosing statistics, with CV vs variance as the example of one step, and pointers to automatic methods (Joyce & Marjoram 2008; Fearnhead & Prangle 2012; Blum et al. 2013) |
+| 5 | z-score instead of dividing by the SD | Statistics are z-scored with the prior simulations' mean and SD. Distances don't change, because the mean cancels |
+| 6 | The pipeline figure is confusing | Two figures: model output → survey → S_obs, then the prior simulations against S_obs in measured units and as z-scores |
+| 7 | The likelihood-approximation section | Kept, with prose placing it in Hartig et al.'s three steps and options (a) and (b) |
 
 ### PR 3: status
 
 `docs/inference/smc-abc.qmd` is written, registered (render script, render list, navbar, sidebar,
 references, roadmap) and rendered at the decided budget; the case study links to it. Both freezes
-are committed.
+are committed. It runs on `joshpy.inference`: `study.search`, `study.posterior` and
+`study.leave_one_out`. Its chunks were smoke-tested outside Quarto against a scratch registry at
+small budgets before the full render.
 
-**Opened as draft #91** (base `docs/inference-forevertree`, "SBI stack 6/6"); #86–#90 are
-renumbered to "/6". It stays a draft until the user has reviewed the render.
-
-**Verified on the way:**
-- The `observe()` refactor: `case.load()` on the warm registry simulated nothing (202 `job_runs`
-  before and after) and reproduced S_obs (7.141, 0.387) and the scale (4.468, 0.188). The case
-  study's freeze changed only in its displayed source; its survey display now includes `observe`.
-- The page's chunks, outside Quarto, against a copy of the warm registry at small budgets.
-- Figure fixes: `plot_final_states` puts θ on its own title line, and `plot_generations` wraps at 3
-  columns with ε to 2 significant figures.
-
-**Results at 600 simulations** (the first render ran 1,110 new simulations, about an hour; the
-registry now holds 1,312 runs):
-- **The budget was enough; no raise.** Final target ε 0.045, but generation 5 had 21 simulations
-  left and accepted 1, so 29 of 30 particles were carried over from generation 4. The effective
-  tolerance is 0.09 (largest distance 0.088), below the replicate median (0.12).
-- Mean + CV: both 90% intervals contain the truth, each about 8% of the prior's width; ESS 26.2 of 30.
-- Mean only: ε reaches 0.011 with the same budget. Both intervals contain the truth, but the
-  correlation is −0.98, against −0.46 with the CV: the ridge.
+**Results at 600 simulations** (re-rendered after the #90 review: 1,110 new simulations, about
+50 minutes; the registry holds 3,735 `job_runs`, and runs from earlier versions of the model stay
+in it unused):
+- **The budget roughly suffices.** Final target ε 0.075, about the median replicate distance at the
+  truth (0.07). Generation 4 had 80 simulations left and accepted 11, so 19 of 30 particles were
+  carried over from generation 3; the largest distance (0.108) lies between the replicate median
+  and the largest replicate distance (0.22).
+- Mean + CV: both 90% intervals contain the truth, each about 10% of the prior's 90% width; ESS 27.6
+  of 30; parameter correlation −0.63.
+- Mean only: ε reaches 0.011 with the same budget. Both intervals contain the truth (widths 24%
+  and 73% of the prior's), but the correlation is −0.99: the ridge.
 - Leave-one-out coverage (k = 20, expected 0.905 ± 0.021): mean + CV 0.975 and 0.97 (over-covers);
-  mean only 0.95 and 0.91, with the `minPrecipImpactPct` range at 82% of the prior against 33%.
+  mean only 0.92 and 0.905, with the `minPrecipImpactPct` width at 0.91 against 0.36.
 - Posterior predictive check (30 fresh seeded runs at the final particles): all 8 sites inside.
 - Replay of 600 evaluations: 36 s, 0 new simulations, identical population. A warm re-render of
   both pages takes about 3.5 min.
 
-**Working rules (unchanged, for PR 4 onward):**
-- **The shared registry `docs/inference/forevertree.duckdb`** is warm and now holds about two hours
-  of simulations. Don't delete it at the end of a page, and don't add it to `render-docs.sh`; only
+**Working rules (for PR 4 onward):**
+- **The shared registry `docs/inference/forevertree.duckdb`** is warm and holds over three hours of
+  simulations. Don't delete it at the end of a page, and don't add it to `render-docs.sh`; only
   `docs-clean` removes it.
 - **Run scripts through `pixi run`.** `render-inference.sh` needs `CONDA_PREFIX`.
 - **`render-inference.sh` renders every page in order**, so a module change re-renders (and
@@ -206,16 +217,18 @@ registry now holds 1,312 runs):
 - **Renders run under an ASCII locale.** Read any displayed file with `encoding="utf-8"`.
 - **Figure helpers draw and return `None`.** No other matplotlib call may be an expression statement
   in a chunk.
-- **Keep the example in the parked toolkit's shape**, and keep the noise-seed derivation unchanged.
+- **Build on `joshpy.inference`.** ForeverTree-specific code (model config, `observe`,
+  `statistics`, figures) stays in `forevertree_case.py`; generic workflow goes into the toolkit.
+  Any edit to `forevertree.josh`, including its measurement error, re-simulates every run.
 - **Smoke-test against a copy of the warm registry** (in a scratch directory) with small SMC
   settings: the prior runs replay, so only the searches simulate.
 
 ### PR 3 outline: SMC-ABC on the survey (Hartig Fig. 5a)
 
-- **Start from the middle:** `study = case.load(registry, cli)` and
-  `summaries, observed = study.abc_target()`, then a recap of the truth, S_obs and the scale.
+- **Start from the middle:** `study = case.known_truth_study().load(registry, cli)`, then a recap
+  of the truth, S_obs and the z-scores; `study.search(...)` runs each search.
 - **The likelihood approximation:**
-  - an indicator kernel, with sbi's `"l2"` on scaled summaries;
+  - an indicator kernel, with sbi's `"l2"` on z-scored summaries;
   - ε as the approximation error [@hartig2011, Box 2; @cranmer2020]; more statistics force a
     larger ε;
   - the survey is simulated, so ε carries only approximation error, with Wilkinson's alternative
@@ -279,8 +292,7 @@ registry now holds 1,312 runs):
   - survey cells by position;
   - last step and step windows; lagged gains;
   - per-replicate selection;
-  - run-seeded RNG for measurement error;
-  - scale divisors;
+  - z-scores (now `LoadedStudy.zscore`);
   - recording the statistics spec in session metadata.
 
   After PR 5, propose the smallest primitive set those uses justify.
@@ -289,36 +301,17 @@ registry now holds 1,312 runs):
   - No "last step" helper, so `FINAL_STEP = 10` is hard-coded from the model.
   - Per-cell values come from `DiagnosticQueries.get_all_variables_at_step`, which
     selects every variable; that is adequate.
-  - Survey selection by `(x, y)`, measurement noise and the statistics are pandas/numpy
-    helpers (`survey`, `measurement_rng`, `statistics`).
-  - The scaled-summaries closure (`CaseStudy.abc_target`) has no importable path.
-    `SbiStrategy.to_dict` now records only its name, so a strategy can't be rebuilt
+  - Survey selection by `(x, y)` and the statistics are pandas/numpy helpers
+    (`observe`, `statistics`). The measurement error is a Josh export.
+  - The z-scored summaries closure (`LoadedStudy.abc_target`) has no importable path.
+    `SbiStrategy.to_dict` records only its name (#92), so a strategy can't be rebuilt
     from saved config. Fixing that needs summaries given as a path plus arguments.
-- **A general known-truth toolkit (`joshpy.inference`).** It would turn the case-study
-  workflow into an API for testing whether statistics are sufficient before fitting
-  field data.
-  - **The user supplies functions:**
-    - `observe(registry, run_hash, replicate, rng)`, where `rng=None` means no
-      observation error;
-    - `statistics(data)`;
-    - which statistics to compare;
-    - a scale;
-    - a distance, given as an sbi name or a callable. sbi accepts both, so one object
-      serves both the diagnostics and the `SbiStrategy` search.
-  - **joshpy supplies the workflow:**
-    - seeding `rng` from `(run_hash, replicate)`, and naming the replicate explicitly;
-    - the truth run and the prior simulations, reused from the registry;
-    - the reference table, statistic × parameter correlations and distances;
-    - the replicate study;
-    - leave-one-out coverage.
-  - **Can be layered on later.** It is additive, and runs are keyed by model, config,
-    data and seed, not by how statistics are computed, so nothing needs re-simulating.
-  - **Meanwhile:**
-    - keep the example's functions in this shape: `observe` with that signature,
-      `statistics(data)` separate, one named distance function, and the scale as plain
-      data;
-    - keep the noise-seed derivation, `sha256("{run_hash}:{replicate}")`, unchanged.
-  - Extending `SbiStrategy.distance` to accept a callable is a small, separate change.
+- **Known-truth toolkit: follow-ups.** `joshpy.inference` (#93) is experimental. Not yet:
+  - a distance other than sbi's `"l2"` (extending `SbiStrategy.distance` to accept a callable is
+    a small, separate change);
+  - summaries as an importable path plus arguments (see above);
+  - generic figures (the docs' figures stay in the example module);
+  - exporting it from `joshpy/__init__.py`, once PR 4 and PR 5 have used it.
 - **A batch prior-sampling strategy** (random or Latin hypercube via `scipy.stats.qmc`). Revisit if
   the `mcabc` workaround gets in the way: placeholder `observed` for filters, or more parameters
   where a Latin hypercube matters.
