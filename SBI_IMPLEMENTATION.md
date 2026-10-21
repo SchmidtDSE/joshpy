@@ -1,6 +1,6 @@
 # SBI Implementation for joshpy
 
-Oct 17, 2026 · @nick · joshpy 0.0.9.32 · sbi 0.27.0 with CPU-only torch 2.14.1
+Oct 20, 2026 · @nick · joshpy 0.0.9.32 · sbi 0.27.0 with CPU-only torch 2.14.1
 
 How joshpy runs the filter-and-refine search in [SBI.md](SBI.md). The machinery is proved on
 the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to the grass–shrub and Joshua
@@ -130,81 +130,126 @@ These findings apply to every page and experiment.
 
 ## Plan: PR series, stacked after #88
 
-Each PR is self-contained and commits its own frozen pages. Rebase with `--update-refs` when a lower
-PR changes, and push with `--force-with-lease`.
+**Conventions:**
+- Each PR is self-contained and commits its own frozen pages.
+- Rebase with `--update-refs` when a lower PR changes, and push with `--force-with-lease`.
+- Commits end with the `Co-Authored-By` trailer; PR descriptions end with the Claude Code line.
+- Docs PRs stay drafts until the user has reviewed the render.
 
-**Current state of #89 (`docs/sbi-tutorial`):**
-- Pushed: the landscape SMC-ABC tutorial (`c73e532`).
-- Local only: commit `d885798`. It contains:
-  - `references.bib` and `references.qmd`, with the navbar, sidebar and bibliography wiring;
-  - the revised tutorial source.
-- Its committed freeze is still the old page's, so pushing it as-is would deploy the old page.
-- The render of the revised tutorial is uncommitted.
+### Where things stand (Oct 20)
 
-PR 1 drops the tutorial page, so neither render ships.
+| PR | Branch | Status |
+|----|--------|--------|
+| #86, #87, #88 | `feat/adaptive-evaluate-batch`, `feat/batch-no-wait-resume`, `feat/sbi-strategy` | Open, awaiting merge |
+| #89 (PR 1) | `docs/sbi-tutorial` | Done. Inference tab and landing page, site-wide references, old tutorial retired |
+| #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. The user's review isn't finished yet |
+| PR 3 | `docs/inference-smc-abc` (pushed, no PR yet) | **In progress. Start here** |
 
-### PR 1: #89, re-scoped. Inference section and site-wide references (no render)
+### Handoff: picking up PR 3
 
-- Already done in `d885798`: `docs/references.bib`, `docs/references.qmd` (one section per page),
-  the References tab, and the project-level bibliography.
-- An "Inference" navbar tab and sidebar.
-- `docs/inference/index.qmd`, with no executable code:
-  - joshpy vs sbi responsibilities;
-  - notation;
-  - Hartig's three steps, and the Fig. 5 options (a–d) mapped to pages;
-  - method families;
-  - a ForeverTree → Joshua tree mapping table.
-- `docs/inference/_sbi-setup.qmd`: a hidden partial with the torch workaround and pandas options.
-- Remove `docs/tutorials/sbi-abc.qmd` and its freeze.
-- Tutorials link to Inference; Adaptive Sweeps stays under Tutorials.
-- **Verify:** `pixi run docs-build` executes nothing; there are no dangling links.
+**Start on `docs/inference-smc-abc`.** It branches from `docs/inference-forevertree` and has one
+work-in-progress commit. That commit changes `examples/sbi_forevertree/forevertree_case.py`; the
+changes are **written but not verified**:
+- `observe(registry, run_hash, replicate, rng)` (`rng=None` means no measurement error), in the
+  parked toolkit's shape. `survey()` wraps it with the same seed derivation and draw order, so every
+  number should be unchanged.
+- `DISTANCE = "l2"`, passed to `SbiStrategy` by `run_sbi`. It is sbi's default, so session
+  fingerprints don't change.
+- New helpers `_draw_map` and `_numbered_sites`, now used by `plot_pipeline`.
+- SMC helpers: `particle_parameters`, `farthest_particle`, `carried_into`, `plot_generations`,
+  `plot_final_populations`, `plot_final_states`.
 
-### PR 2: ForeverTree case study (render about 20 min)
+**First steps:**
+1. **Verify the refactor.** Run `case.load()` against the warm registry
+   `docs/inference/forevertree.duckdb`:
+   - it must simulate nothing (count `job_runs` before and after);
+   - it must reproduce S_obs (mean 7.141, CV 0.387) and the scale (4.468, 0.188).
+2. **Re-render the case-study page** with `pixi run docs-inference` (about 1 min warm). No number
+   changes, but the page displays the module's source, so its freeze is stale. Commit the new freeze.
+3. **Write `docs/inference/smc-abc.qmd`** (outline below), and register it:
+   - `PAGES` in `scripts/render-inference.sh`;
+   - `docs/_quarto.yml`: the render list (after `forevertree.qmd`), the Inference navbar menu and
+     the sidebar;
+   - a section in `docs/references.qmd`;
+   - a link from the roadmap in `docs/inference/index.qmd`.
+4. **Smoke-test before the long render.**
+   - Run the page's Python chunks outside Quarto, against a scratch registry, with small budgets
+     (substitute `n_prior`, the replicate count and the SMC settings).
+   - Use `LANG=C MPLBACKEND=Agg`.
+   - Parse chunks line by line: a chunk ends only on a line of backticks, and the page contains
+     backticks inside strings.
+5. **Render and ship.**
+   - Run `pixi run docs-inference` (about an hour at 600 simulations).
+   - Check the freeze: numbers against prose, no leaked matplotlib reprs, the figures.
+   - Commit with `git add docs/_freeze/inference`, then push.
+   - Open a **draft** PR with base `docs/inference-forevertree`, titled "… (SBI stack 6/6)".
+     Renumber #86–#90 to "/6".
 
-- **`examples/sbi_forevertree/forevertree_case.py`**, an importable module with no import side
-  effects. Later pages import it to "start from the middle". It holds:
-  - constants: truth, prior, seeds, survey cells by position, measurement SD;
-  - `model_config` and `run_at`, which checks the registry before re-running;
-  - `run_sbi`;
-  - the survey observation and statistics;
-  - leak-free plot helpers;
-  - `load(registry, cli)`, which ensures the truth run and prior simulations exist (reused by
-    `run_hash`) and returns the observed values, scale and reference table.
-- `run_abc.py` reuses the module.
-- **`docs/inference/forevertree.qmd`:**
-  - the model and its stochasticity;
-  - pseudo-observed survey data (`seed=1`);
-  - a **pipeline figure**: all cells → surveyed cells with measurement error → statistics →
-    comparison with an ε-ball;
-  - 200 prior simulations (`mcabc`, `quantile=1.0`);
-  - a **candidate-statistics figure** (mean, SD, variance and CV against each parameter) with the CV
-    argument;
-  - scaling;
-  - a replicate study at the truth (`seed=2`, 50 replicates).
-- Measurement noise is seeded from `(run_hash, replicate)`, so replay reproduces it.
-- **Shared registry** `docs/inference/forevertree.duckdb`:
-  - Add it and its `.duckdb.wal` to `.gitignore`.
-  - Extend `docs-clean` in `pixi.toml` to remove both. Today it only clears
-    `docs/tutorials/*.duckdb*`.
-  - Don't delete it at the end of a page, and don't add it to `render-docs.sh`. Either would wipe the
-    cache between renders.
-  - Add a `pixi run docs-inference` task that renders the pages in order.
-- **Decision point:** the replicate study sets the measurement SD and PR 3's budget, so the final ε
-  can approach the replicate spread.
+**Budget (decided): start small and raise it on evidence.**
+- Begin with `num_initial_pop=60`, `num_particles=30`, `epsilon_decay=0.5` and
+  `num_simulations=600`.
+- **The real test:** compare the final target ε and the largest accepted distance with PR 2's
+  replicate distances at the truth (median 0.12, largest 0.26 prior SDs).
+- If the final ε is still well above about 0.26, raise the budget (e.g. 1,000) and re-render. With
+  the same seed the first 600 evaluations replay from the registry, so only the extra simulations
+  run.
+- Slow is fine: these pages render locally and ship frozen.
 
-### PR 3: SMC-ABC on the survey, Hartig Fig. 5a (render about 60–80 min)
+**Working rules:**
+- **The shared registry `docs/inference/forevertree.duckdb`** is warm and holds about an hour of
+  simulations. Don't delete it at the end of a page, and don't add it to `render-docs.sh`; only
+  `docs-clean` removes it.
+- **Run scripts through `pixi run`.** `render-inference.sh` needs `CONDA_PREFIX`.
+- **Renders run under an ASCII locale.** Read any displayed file with `encoding="utf-8"`.
+- **Figure helpers draw and return `None`.** No other matplotlib call may be an expression statement
+  in a chunk.
+- **Keep the example in the parked toolkit's shape**, and keep the noise-seed derivation unchanged.
 
-- `docs/inference/smc-abc.qmd` starts from `forevertree_case.load(...)`. It covers:
-  - the indicator kernel and ε, the simulated survey, and Wilkinson's alternative reading;
-  - the run and generation table (acceptance, carried over);
-  - contraction, ESS and credible intervals;
-  - a **sufficiency test**, with a **final-state figure**: the truth vs the farthest accepted
-    mean-only run vs the farthest accepted mean+CV run (survey maps and distributions);
-  - the registry, resume, calibration by leave-one-out re-filtering of the prior simulations, and
-    scaling up.
-- If joshpy friction appears, fix it first in a small code PR placed before this one. Two known
-  candidates: a batch whose summaries all error yields silent NaN; summary closures serialize as
-  unimportable paths.
+### PR 3 outline: SMC-ABC on the survey (Hartig Fig. 5a)
+
+- **Start from the middle:** `study = case.load(registry, cli)` and
+  `summaries, observed = study.abc_target()`, then a recap of the truth, S_obs and the scale.
+- **The likelihood approximation:**
+  - an indicator kernel, with sbi's `"l2"` on scaled summaries;
+  - ε as the approximation error [@hartig2011, Box 2; @cranmer2020]; more statistics force a
+    larger ε;
+  - the survey is simulated, so ε carries only approximation error, with Wilkinson's alternative
+    reading [@wilkinson2013];
+  - the budget sets the final ε.
+- **Run (600 simulations):**
+  - Report evaluations, with reuse taken from provenance. The first 60 draws are the first 60 prior
+    simulations (same seed), so `len(set(result_hashes) & set(study.reference.run_hash))` should
+    be 60.
+  - No wall-clock prints except in the replay section.
+- **Generation table:**
+  - target ε, largest accepted distance, simulations, accepted, acceptance rate, carried over;
+  - then compare with rejection sampling at the final ε (the share of prior simulations within
+    it), and with the replicate distances.
+- **Results:**
+  - `plot_generations`, with carried-over particles hollow;
+  - a posterior table: weighted mean, central 90% credible interval, its width as a share of the
+    prior's 90% width, and truth inside; plus the ESS;
+  - notes: the intervals are marginal; small-sample endpoints are noisy; "truth inside" is
+    necessary, not sufficient.
+- **Sufficiency test:**
+  - the same search on the mean alone; `plot_final_populations`; parameter correlations;
+  - a **final-state figure** via `plot_final_states`: the truth, and `farthest_particle` of the
+    mean+CV and of the mean-only searches;
+  - equifinality [@beven2006] (non-identifiability); marginal intervals can hide the ridge.
+- **Registry:** run attributes and session metadata.
+- **Resume:** replay the first search (0 new simulations, identical final population).
+- **Calibration:**
+  - leave-one-out rejection ABC on `study.reference`, keeping 20 of 199;
+  - score whether the held-out value falls strictly inside the accepted range, which happens
+    (k−1)/(k+1) ≈ 90% of the time if calibrated [@talts2018; @csillery2012];
+  - expect over-coverage from ε > 0.
+- **Closing sections:**
+  - a misspecification callout and a posterior predictive check;
+  - scaling up: clusters, replicates, failures, the limits of rejection ABC, regression adjustment
+    [@beaumont2002], and the choice of tolerance, summaries and metric.
+- **joshpy friction:** if it appears, fix it first in a small code PR placed before this one. Two
+  known candidates: a batch whose summaries all error yields silent NaN; summary closures serialize
+  as unimportable paths.
 
 ### PR 4: Rejection filter on a model property, Hartig Fig. 5d (render about 30–40 min)
 
