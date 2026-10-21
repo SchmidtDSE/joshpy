@@ -60,6 +60,21 @@ Contracts the stack implements; the tests named here pin them.
 - **Failures.** A failed run gets NaN summaries, which sbi never accepts
   (`test_failed_runs_are_never_accepted`). With `stop_on_failure=True`, `evaluate` raises only after
   the failing run's batch has finished and its successful runs are loaded.
+- **Summaries errors** (the fix PR after #91):
+  - NaN statistics reject a run (`test_nan_statistics_reject_runs`).
+  - An exception from `summaries` stops the search after its batch, chained to the original error,
+    and a rerun reuses the batch (`test_summaries_exception_stops_the_search`). Returning `None`
+    raises too.
+  - A run whose results can't be loaded gets NaN and is listed in `SbiResult.load_errors` and the
+    session metadata, with a warning even when quiet. It is not counted in `failed`.
+  - SMC-ABC raises if its initial population has fewer than `num_particles` usable runs; sbi
+    would otherwise keep runs without statistics and set ε to 1e8.
+  - A quantile MCABC whose accepted samples include unusable runs warns. It doesn't raise, because
+    the prior-simulation workaround (`quantile=1.0`) keeps every draw.
+- **Serialization.** `to_dict` saves a callable as `module:qualname` only when that path loads it
+  back, and never for `__main__`. Lambdas, closures, bound methods, partials and callable
+  instances are named under `summaries_not_importable` / `objective_not_importable`, for
+  provenance only.
 - **Config namespace.** The default differs by path: batch sweeps use `sweep_config`; adaptive
   sweeps use the template's stem. An explicit `JobConfig.config_name` wins on both.
 - **Parameter-less adaptive sweeps.** `SweepConfig` presence is checked with `is not None`, not
@@ -238,7 +253,7 @@ registry now holds 1,312 runs):
     [@beaumont2002], and the choice of tolerance, summaries and metric.
 - **joshpy friction:** if it appears, fix it first in a small code PR placed before this one. Two
   known candidates: a batch whose summaries all error yields silent NaN; summary closures serialize
-  as unimportable paths.
+  as unimportable paths. Both were fixed in the PR stacked after #91 (see Behavior notes).
 
 ### PR 4: Rejection filter on a model property, Hartig Fig. 5d (render about 30–40 min)
 
@@ -275,8 +290,9 @@ registry now holds 1,312 runs):
     selects every variable; that is adequate.
   - Survey selection by `(x, y)`, measurement noise and the statistics are pandas/numpy
     helpers (`survey`, `measurement_rng`, `statistics`).
-  - The scaled-summaries closure (`CaseStudy.abc_target`) would serialize as an
-    unimportable path in `SbiStrategy.to_dict`.
+  - The scaled-summaries closure (`CaseStudy.abc_target`) has no importable path.
+    `SbiStrategy.to_dict` now records only its name, so a strategy can't be rebuilt
+    from saved config. Fixing that needs summaries given as a path plus arguments.
 - **A general known-truth toolkit (`joshpy.inference`).** It would turn the case-study
   workflow into an API for testing whether statistics are sufficient before fitting
   field data.
