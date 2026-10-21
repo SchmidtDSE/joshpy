@@ -1,5 +1,6 @@
 """Unit tests for the strategies module."""
 
+import functools
 import unittest
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from joshpy.strategies import (
     OptunaStrategy,
     strategy_from_dict,
     sample_params_from_trial,
+    _callable_name,
+    _callable_path,
     _load_objective_from_path,
 )
 from joshpy.jobs import ConfigSweepParameter, FileSweepParameter
@@ -228,6 +231,72 @@ class TestLoadObjectiveFromPath(unittest.TestCase):
         """ImportError should propagate for non-existent module."""
         with self.assertRaises(ImportError):
             _load_objective_from_path("nonexistent_module_xyz:func")
+
+    def test_loads_attribute_of_a_class(self):
+        """A dotted name resolves through a module-level class."""
+        self.assertIs(_load_objective_from_path(f"{__name__}:_Objectives.static"), _Objectives.static)
+
+
+def _module_objective(registry, run_hash, job):
+    return 0.0
+
+
+class _Objectives:
+    @staticmethod
+    def static(registry, run_hash, job):
+        return 0.0
+
+    def method(self, registry, run_hash, job):
+        return 0.0
+
+
+class _CallableObjective:
+    def __call__(self, registry, run_hash, job):
+        return 0.0
+
+
+class TestCallablePath(unittest.TestCase):
+    """A callable is saved as a path only when that path loads it back."""
+
+    def test_importable_callables_round_trip(self):
+        for fn, path in [
+            (_module_objective, f"{__name__}:_module_objective"),
+            (_Objectives.static, f"{__name__}:_Objectives.static"),
+            (Path.cwd, "pathlib:Path.cwd"),  # a classmethod, rebound on each access
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(_callable_path(fn), path)
+                self.assertEqual(_load_objective_from_path(path), fn)
+
+    def test_unimportable_callables_have_no_path(self):
+        def _module_objective(registry, run_hash, job):  # shadows the module-level name
+            return 1.0
+
+        def in_main(registry, run_hash, job):
+            return 0.0
+
+        in_main.__module__ = "__main__"
+        for label, fn, name in [
+            ("lambda", lambda r, h, j: 0.0, "<lambda>"),
+            ("closure", _module_objective, "<locals>._module_objective"),
+            ("bound method", _Objectives().method, f"{__name__}:_Objectives.method"),
+            ("partial", functools.partial(_module_objective), "functools.partial("),
+            ("callable instance", _CallableObjective(), "_CallableObjective instance"),
+            ("defined in __main__", in_main, "__main__:"),
+        ]:
+            with self.subTest(label):
+                self.assertIsNone(_callable_path(fn))
+                self.assertIn(name, _callable_name(fn))
+
+    def test_optuna_names_an_unimportable_objective(self):
+        data = OptunaStrategy(objective=lambda r, h, j: 0.0).to_dict()
+        self.assertNotIn("objective", data)
+        self.assertIn("<lambda>", data["objective_not_importable"])
+        self.assertIsNone(OptunaStrategy.from_dict(data).objective)
+
+    def test_optuna_saves_an_importable_objective(self):
+        data = OptunaStrategy(objective=_module_objective).to_dict()
+        self.assertEqual(data["objective"], f"{__name__}:_module_objective")
 
 
 class TestYamlRoundTrip(unittest.TestCase):

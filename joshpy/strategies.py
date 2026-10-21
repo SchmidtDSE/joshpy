@@ -39,10 +39,12 @@ Example usage:
 
 from __future__ import annotations
 
+import functools
 import importlib
 import itertools
 import re
 import shutil
+import sys
 import tempfile
 import time
 from abc import ABC, abstractmethod
@@ -599,7 +601,8 @@ def _load_objective_from_path(path: str) -> ObjectiveFn:
     """Load function from 'module.submodule:function_name' format.
 
     Args:
-        path: Import path in "module:function" format.
+        path: Import path in "module:function" format, or "module:Class.attribute"
+            for a function on a module-level class (e.g. a staticmethod).
 
     Returns:
         The loaded callable.
@@ -616,11 +619,45 @@ def _load_objective_from_path(path: str) -> ObjectiveFn:
     if ":" not in path:
         raise ValueError(f"Invalid objective path '{path}'. Expected 'module:function' format.")
     module_path, func_name = path.rsplit(":", 1)
-    module = importlib.import_module(module_path)
-    fn = getattr(module, func_name)
+    fn: Any = importlib.import_module(module_path)
+    for attribute in func_name.split("."):
+        fn = getattr(fn, attribute)
     if not callable(fn):
         raise ValueError(f"{path} is not callable")
-    return fn  # type: ignore[return-value]
+    return fn  # type: ignore[no-any-return]
+
+
+def _callable_path(fn: Any) -> str | None:
+    """The "module:qualname" path that loads *fn* back, or None if there is none.
+
+    A path is returned only when importing it would give back *fn* itself: a
+    module-level function, or a function on a module-level class. Lambdas,
+    nested functions and closures, bound methods, partials and callable
+    instances have no such path, and neither does anything defined in
+    ``__main__`` (a script, notebook or docs page), which another process
+    cannot import.
+    """
+    module_name = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if not module_name or not qualname or module_name == "__main__" or "<" in qualname:
+        return None
+    target: Any = sys.modules.get(module_name)
+    try:
+        for attribute in qualname.split("."):
+            target = getattr(target, attribute)
+        same = target is fn or bool(target == fn)  # == matches classmethods, rebound each access
+    except Exception:
+        return None
+    return f"{module_name}:{qualname}" if same else None
+
+
+def _callable_name(fn: Any) -> str:
+    """A readable "module:qualname" name for *fn*, for provenance only."""
+    if isinstance(fn, functools.partial):
+        return f"functools.partial({_callable_name(fn.func)})"
+    module_name = getattr(fn, "__module__", None) or type(fn).__module__
+    qualname = getattr(fn, "__qualname__", None) or f"{type(fn).__qualname__} instance"
+    return f"{module_name}:{qualname}"
 
 
 @register_strategy("optuna")
@@ -793,7 +830,11 @@ class OptunaStrategy(SweepStrategy):
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization.
 
-        Note: Callable objectives cannot be serialized - only string paths.
+        A callable objective is saved as its "module:qualname" path when that
+        path loads it back. Otherwise (a lambda, closure, bound method, or a
+        function defined in ``__main__``) its name is kept under
+        ``objective_not_importable``, for provenance only, and ``from_dict``
+        leaves the objective to be provided at runtime.
         """
         result: dict[str, Any] = {
             "type": "optuna",
@@ -804,14 +845,14 @@ class OptunaStrategy(SweepStrategy):
         if self.seed is not None:
             result["seed"] = self.seed
 
-        # Only serialize objective if it's a string path
         if isinstance(self.objective, str):
             result["objective"] = self.objective
         elif self.objective is not None:
-            # Callable - try to get qualified name
-            if hasattr(self.objective, "__module__") and hasattr(self.objective, "__name__"):
-                result["objective"] = f"{self.objective.__module__}:{self.objective.__name__}"
-            # Otherwise skip - user will need to provide at runtime
+            path = _callable_path(self.objective)
+            if path is not None:
+                result["objective"] = path
+            else:
+                result["objective_not_importable"] = _callable_name(self.objective)
 
         return result
 
@@ -1281,15 +1322,14 @@ class SbiStrategy(SweepStrategy):
         return MultipleIndependent(dists)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dict for serialization (callables become "module:name")."""
+        """Convert to dict for serialization.
 
-        def ref(value: Any) -> Any:
-            if value is None or isinstance(value, (str, dict)):
-                return value
-            module = getattr(value, "__module__", None)
-            name = getattr(value, "__name__", None)
-            return f"{module}:{name}" if module and name else None
-
+        A callable ``summaries`` is saved as its "module:qualname" path when
+        that path loads it back. Otherwise (a lambda, closure, bound method,
+        or a function defined in ``__main__``) its name is kept under
+        ``summaries_not_importable``, for provenance only, and ``from_dict``
+        leaves ``summaries`` unset.
+        """
         result: dict[str, Any] = {
             "type": "sbi",
             "method": self.method,
@@ -1299,9 +1339,14 @@ class SbiStrategy(SweepStrategy):
         }
         if self.method_kwargs:
             result["method_kwargs"] = self.method_kwargs
-        summaries = ref(self.summaries)
-        if summaries is not None:
-            result["summaries"] = summaries
+        if isinstance(self.summaries, str):
+            result["summaries"] = self.summaries
+        elif self.summaries is not None:
+            path = _callable_path(self.summaries)
+            if path is not None:
+                result["summaries"] = path
+            else:
+                result["summaries_not_importable"] = _callable_name(self.summaries)
         if self.observed is not None:
             result["observed"] = self.observed
         return result
