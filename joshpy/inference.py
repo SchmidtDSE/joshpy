@@ -21,14 +21,16 @@ You supply what is specific to your model:
 
 joshpy supplies the workflow: the truth run and the prior simulations, the
 reference table, z-scored statistics and distances, correlations, replicates at
-the truth, sbi searches, posterior summaries and leave-one-out coverage.
+the truth, sbi searches, posterior summaries and leave-one-out coverage. A
+:class:`PropertyFilter` asks a different question of the same prior: which
+parameters produce a stated behaviour, with no observed data.
 
 Everything runs through :class:`~joshpy.sweep.SweepManager` and is stored in one
 :class:`~joshpy.registry.RunRegistry`, keyed by ``run_hash``. Runs already in
 the registry are reused, so :meth:`KnownTruthStudy.load` simulates only what is
 missing. A study is one experiment family: its runs are recorded under
 experiment names prefixed with ``name`` (``{name}_truth``, ``{name}_prior``,
-``{name}_replicates``), and searches reuse them.
+``{name}_replicates``, ``{name}_filter``), and searches reuse them.
 
 Example:
     from joshpy.inference import KnownTruthStudy
@@ -65,6 +67,7 @@ from joshpy.sweep import SweepManager
 
 Observe = Callable[[RunRegistry, str, int], Any]
 Summaries = Callable[[RunRegistry, str, Any], dict[str, float]]
+Measure = Callable[[RunRegistry, str, int], Mapping[str, float]]
 
 
 def prior_interval(spec: Mapping[str, Any], level: float) -> tuple[float, float]:
@@ -102,6 +105,91 @@ def effective_sample_size(weights: Any) -> float:
     """Kish's effective sample size of importance weights."""
     weights = np.asarray(weights, dtype=float)
     return float(weights.sum() ** 2 / (weights**2).sum())
+
+
+@dataclass
+class PropertyFilter:
+    """A rejection filter on a model property: which parameters produce a behaviour.
+
+    The filter states criteria the model's output must meet, with no observed
+    data [Hartig et al. 2011, option (d)]. Each criterion bounds one
+    measurement of a replicate. A parameter set passes a criterion when at
+    least ``min_share`` of its replicates meet it, and passes the filter when it
+    passes every criterion. Prior draws that pass make up the accepted region.
+    It is not a posterior, because no data entered it.
+
+    Attributes:
+        measure: ``measure(registry, run_hash, replicate)`` returns the
+            property's measurements of one replicate, as ``{name: value}``.
+        criteria: ``{criterion: (measurement, low, high)}``. A replicate meets
+            a criterion if ``low <= value <= high``; ``None`` leaves an end
+            open. A NaN measurement meets no criterion.
+        replicates: Replicates of each parameter set.
+        min_share: Share of replicates that must meet a criterion.
+
+    Example:
+        PropertyFilter(
+            measure=gain,
+            criteria={"fast": ("gain", 0.75, 0.87), "steady": ("gain_sd", None, 0.017)},
+        )
+    """
+
+    measure: Measure
+    criteria: dict[str, tuple[str, float | None, float | None]]
+    replicates: int = 10
+    min_share: float = 0.9
+
+    def __post_init__(self) -> None:
+        if not self.criteria:
+            raise ValueError("criteria must name at least one criterion")
+        for name, (_, low, high) in self.criteria.items():
+            if low is None and high is None:
+                raise ValueError(f"Criterion {name!r} needs a low or a high bound")
+            if low is not None and high is not None and low > high:
+                raise ValueError(f"Criterion {name!r} has low {low} above high {high}")
+        if self.replicates < 1:
+            raise ValueError("replicates must be at least 1")
+        if not 0 < self.min_share <= 1:
+            raise ValueError(f"min_share must be in (0, 1], got {self.min_share}")
+
+    def measurements(self, registry: RunRegistry, run_hashes: Any) -> pd.DataFrame:
+        """One row per run and replicate: ``run_hash``, ``replicate`` and every measurement."""
+        return pd.DataFrame(
+            [
+                {
+                    "run_hash": run_hash,
+                    "replicate": replicate,
+                    **self.measure(registry, run_hash, replicate),
+                }
+                for run_hash in run_hashes
+                for replicate in range(self.replicates)
+            ]
+        )
+
+    def meets(self, measurements: pd.DataFrame) -> pd.DataFrame:
+        """Whether each row of ``measurements`` meets each criterion (one column per criterion)."""
+        met = {}
+        for name, (measurement, low, high) in self.criteria.items():
+            values = measurements[measurement]
+            inside = values.notna()
+            if low is not None:
+                inside &= values >= low
+            if high is not None:
+                inside &= values <= high
+            met[name] = inside
+        return pd.DataFrame(met)
+
+    def evaluate(self, registry: RunRegistry, run_hashes: Any) -> pd.DataFrame:
+        """Which runs pass the filter; each must hold ``replicates`` loaded replicates.
+
+        Returns:
+            One row per run, indexed by ``run_hash``: the share of its
+            replicates meeting each criterion, and ``passes``.
+        """
+        measurements = self.measurements(registry, run_hashes)
+        shares = self.meets(measurements).groupby(measurements["run_hash"], sort=False).mean()
+        shares["passes"] = (shares[list(self.criteria)] >= self.min_share).all(axis=1)
+        return shares
 
 
 @dataclass
@@ -271,17 +359,14 @@ class KnownTruthStudy:
             values = self.summaries(registry, run_hash)
             return {name: values[name] for name in self.compare}
 
-        prior, _ = self.search(
+        prior = self._prior_draws(
             registry,
             cli,
+            n_prior,
             compared,
             {name: candidates[name] for name in self.compare},
-            "mcabc",
-            {"num_simulations": n_prior, "quantile": 1.0},
             f"{self.name}_prior",
         )
-        if prior.failed:
-            raise RuntimeError(f"{prior.failed} prior simulation(s) failed")
         reference = pd.DataFrame(
             [
                 {
@@ -293,6 +378,79 @@ class KnownTruthStudy:
             ]
         )
         return LoadedStudy(self, truth_job, truth_data, reference)
+
+    def filter_prior(
+        self,
+        registry: RunRegistry,
+        cli: JoshCLI,
+        property_filter: PropertyFilter,
+        n: int = 200,
+        experiment: str | None = None,
+    ) -> pd.DataFrame:
+        """Rejection sampling from the prior: which of n prior draws pass a filter.
+
+        The draws are :meth:`load`'s prior simulations (the same ``sbi_seed``),
+        so their runs are reused. Each runs with ``property_filter.replicates``
+        replicates: a run the registry holds with fewer is rerun, and the
+        replicates the registry already holds are kept, not replaced.
+
+        Args:
+            registry: Where runs are recorded and reused from.
+            cli: How the model runs.
+            property_filter: The criteria, and the replicates per draw.
+            n: Number of prior draws.
+            experiment: Experiment name of the session; defaults to ``{name}_filter``.
+
+        Returns:
+            One row per draw: ``run_hash``, the parameters, the share of
+            replicates meeting each criterion, and ``passes``.
+
+        Raises:
+            RuntimeError: If any simulation failed.
+        """
+
+        def no_data(registry: RunRegistry, run_hash: str, job: Any) -> dict[str, float]:
+            return {"none": 0.0}  # a filter compares no data; every draw is kept
+
+        study = replace(self, model=replace(self.model, replicates=property_filter.replicates))
+        draws = study._prior_draws(
+            registry, cli, n, no_data, {"none": 0.0}, experiment or f"{self.name}_filter"
+        )
+        jobs = [job for job, _ in draws.job_results]
+        parameters = pd.DataFrame([{"run_hash": job.run_hash, **job.parameters} for job in jobs])
+        return parameters.join(
+            property_filter.evaluate(registry, [job.run_hash for job in jobs]), on="run_hash"
+        )
+
+    def _prior_draws(
+        self,
+        registry: RunRegistry,
+        cli: JoshCLI,
+        n: int,
+        summaries: Summaries,
+        observed: Mapping[str, float],
+        experiment: str,
+    ) -> SbiResult:
+        """n prior draws: sbi's rejection ABC keeping every draw (``quantile=1.0``).
+
+        Every caller gets the same draws (the same ``sbi_seed``), so their runs
+        are shared.
+
+        Raises:
+            RuntimeError: If any simulation failed.
+        """
+        draws, _ = self.search(
+            registry,
+            cli,
+            summaries,
+            observed,
+            "mcabc",
+            {"num_simulations": n, "quantile": 1.0},
+            experiment,
+        )
+        if draws.failed:
+            raise RuntimeError(f"{draws.failed} prior simulation(s) failed")
+        return draws
 
     def replicates(
         self,
