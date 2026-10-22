@@ -11,8 +11,8 @@ Put this directory on ``sys.path`` and import it::
 joshpy's :class:`~joshpy.inference.KnownTruthStudy` runs the workflow: the
 pseudo-observed run, the prior simulations, z-scores and searches, reusing runs
 the registry already holds. This module holds what is specific to ForeverTree:
-the model, its prior and truth, the survey and the candidate statistics, and
-the docs' figures.
+the model, its prior and truth, the survey and the candidate statistics, the
+growth property the rejection filter measures, and the docs' figures.
 
 The pseudo-observed data are a **survey**: the final-year measured mean tree
 height of a fixed set of cells. The model draws the measurement error itself
@@ -30,6 +30,7 @@ After changing this module or the model, re-render the Inference pages in order
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -39,8 +40,8 @@ import pandas as pd
 
 from joshpy.cell_data import DiagnosticQueries
 from joshpy.cli import JoshCLI
-from joshpy.inference import KnownTruthStudy, LoadedStudy
-from joshpy.jobs import JobConfig
+from joshpy.inference import KnownTruthStudy, LoadedStudy, PropertyFilter
+from joshpy.jobs import ExpandedJob, JobConfig
 from joshpy.registry import RunRegistry
 
 HERE = Path(__file__).resolve().parent
@@ -157,6 +158,75 @@ def replicate_study(registry: RunRegistry, cli: JoshCLI, n: int = 50) -> pd.Data
     )
 
 
+# --- A model property: annual height gain in the final window -------------------------
+
+WINDOW = range(6, FINAL_STEP + 1)  # steps whose annual gains the filter measures: the last 5 years
+
+
+def landscape_heights(registry: RunRegistry, run_hash: str) -> pd.DataFrame:
+    """Mean tree height over all cells at each step, per replicate, and its annual gain.
+
+    Columns: replicate, step, height (H_t) and gain (g_t = H_t - H_(t-1), NaN at step 0).
+    """
+    series = registry.conn.execute(
+        "SELECT replicate, step, AVG(meanHeight) AS height FROM cell_data_current "
+        "WHERE run_hash = ? GROUP BY replicate, step ORDER BY replicate, step",
+        [run_hash],
+    ).df()
+    series["gain"] = series.groupby("replicate")["height"].diff()
+    return series
+
+
+def final_window_gain(registry: RunRegistry, run_hash: str, replicate: int = 0) -> dict[str, float]:
+    """The mean annual height gain over the final window, and its SD between years."""
+    rows = registry.conn.execute(
+        "SELECT step, AVG(meanHeight) FROM cell_data_current "
+        "WHERE run_hash = ? AND replicate = ? AND step BETWEEN ? AND ? "
+        "GROUP BY step ORDER BY step",
+        [run_hash, replicate, WINDOW[0] - 1, WINDOW[-1]],
+    ).fetchall()
+    if len(rows) != len(WINDOW) + 1:
+        raise ValueError(f"Run {run_hash}, replicate {replicate} lacks steps of the window")
+    gains = np.diff([height for _, height in rows])  # g_t for t in WINDOW
+    return {"gain": float(gains.mean()), "gain_sd": float(gains.std(ddof=1))}
+
+
+def gain_filter(g_star: float, s_star: float) -> PropertyFilter:
+    """Trees grow 20-40% faster than at the truth (F1), and vary no more between years (F2)."""
+    return PropertyFilter(
+        measure=final_window_gain,
+        criteria={
+            "F1": ("gain", 1.2 * g_star, 1.4 * g_star),
+            "F2": ("gain_sd", None, s_star),
+        },
+        replicates=10,
+        min_share=0.9,  # of the replicates, for each criterion
+    )
+
+
+def replicate_job(registry: RunRegistry, cli: JoshCLI, n: int = 50) -> ExpandedJob:
+    """The replicate study's job: n seeded replicates at the truth, as in replicate_study."""
+    study = known_truth_study()
+    return study.run_at(
+        registry, cli, TRUTH, f"{study.name}_replicates", seed=REPLICATE_SEED, replicates=n
+    )
+
+
+GROUPS = {  # outcome group -> what it means
+    "both": "accepted: passes F1 and F2",
+    "F1 only": "F1 only: in the band, too variable",
+    "F2 only": "F2 only: steady, outside the band",
+    "neither": "neither",
+}
+
+
+def outcome_groups(table: pd.DataFrame, property_filter: PropertyFilter) -> pd.Series:
+    """Each draw's outcome group (a key of GROUPS), from filter_prior's table."""
+    f1, f2 = (table[name] >= property_filter.min_share for name in ("F1", "F2"))
+    groups = np.select([f1 & f2, f1, f2], ["both", "F1 only", "F2 only"], "neither")
+    return pd.Series(groups, index=table.index, name="group")
+
+
 def show_source(*objects: Any) -> None:
     """Print objects' source as a fenced Python block (docs: use with output: asis)."""
     # A four-backtick fence, so source that contains ``` can't close it early.
@@ -173,7 +243,7 @@ SURFACE, INK, INK_2, MUTED, GRID, AXIS = (
     "#e1e0d9",
     "#c3c2b7",
 )
-BLUE, ORANGE = "#2a78d6", "#eb6834"
+BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
 HEIGHT_RAMP = [
     "#cde2fb", "#b7d3f6", "#9ec5f4", "#86b6ef", "#6da7ec", "#5598e7", "#3987e5",
     "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b",
@@ -627,4 +697,164 @@ def plot_final_states(registry: RunRegistry, runs: list[tuple[str, str]]) -> Non
         )  # fmt: skip
         _title(ax_survey, "Survey: measured heights (band: ±1 SD)")
     fig.tight_layout()
+    plt.show()
+
+
+# --- Rejection filter ---------------------------------------------------------------
+
+GROUP_STYLES = {  # outcome group -> scatter style; hue and marker both carry the group
+    "both": dict(color=BLUE, marker="o", s=44, edgecolor=SURFACE, linewidth=1.0, zorder=4),
+    "F1 only": dict(color=ORANGE, marker="^", s=44, edgecolor=SURFACE, linewidth=1.0, zorder=3),
+    "F2 only": dict(color=AQUA, marker="s", s=26, edgecolor=SURFACE, linewidth=0.8, zorder=2),
+    "neither": dict(facecolor="none", marker="o", s=22, edgecolor=MUTED, linewidth=0.8, zorder=1),
+}
+
+
+def _shade_window(ax: Any) -> None:
+    ax.axvspan(WINDOW[0] - 0.5, WINDOW[-1] + 0.5, color=GRID, alpha=0.6, zorder=0, linewidth=0)
+
+
+def _draw_band(ax: Any, property_filter: PropertyFilter) -> None:
+    """F1's band of mean gains, over the window."""
+    _, low, high = property_filter.criteria["F1"]
+    ax.fill_between(
+        [WINDOW[0] - 0.5, WINDOW[-1] + 0.5], low, high, color=BLUE, alpha=0.14, linewidth=0,
+        zorder=1, label="F1 band: 1.2 to 1.4 g*",
+    )  # fmt: skip
+
+
+def plot_gain_at_truth(
+    registry: RunRegistry, run_hash: str, property_filter: PropertyFilter, g_star: float
+) -> None:
+    """Landscape mean height and annual gain of every replicate at the truth, with F1's band."""
+    import matplotlib.pyplot as plt
+
+    series = landscape_heights(registry, run_hash)
+    fig, (ax_height, ax_gain) = _figure(
+        1, 2, figsize=(11, 3.9), gridspec_kw={"width_ratios": [1, 1.5]}
+    )
+    for ax in (ax_height, ax_gain):
+        _style(ax)
+        _shade_window(ax)
+        ax.set_xlabel("step (year of the run)", color=INK_2)
+    for _, replicate in series.groupby("replicate"):
+        ax_height.plot(
+            replicate["step"], replicate["height"], color=INK_2, linewidth=0.6, alpha=0.5
+        )
+        ax_gain.plot(replicate["step"], replicate["gain"], color=INK_2, linewidth=0.6, alpha=0.5)
+    ax_height.set_ylabel("mean height of all cells, $H_t$ (m)", color=INK_2)
+    _title(ax_height, f"Height: {series['replicate'].nunique()} replicates at the truth")
+
+    _draw_band(ax_gain, property_filter)
+    ax_gain.hlines(
+        g_star, WINDOW[0] - 0.5, WINDOW[-1] + 0.5, color=INK, linestyle="--", linewidth=1.4,
+        label=f"g* = {g_star:.3f} m/yr (truth)", zorder=3,
+    )  # fmt: skip
+    ax_gain.text(
+        WINDOW[0] - 0.35, 0.03, "final window", transform=ax_gain.get_xaxis_transform(),
+        fontsize=9, color=INK_2,
+    )  # fmt: skip
+    ax_gain.set_xticks(range(1, FINAL_STEP + 1))
+    ax_gain.set_ylabel("annual gain, $g_t = H_t - H_{t-1}$ (m/yr)", color=INK_2)
+    _legend(ax_gain, loc="upper left")
+    _title(ax_gain, "Annual gain, and the band F1 asks for")
+    fig.tight_layout()
+    plt.show()
+
+
+def plot_filter(
+    table: pd.DataFrame,
+    measured: pd.DataFrame,
+    property_filter: PropertyFilter,
+    truth: Mapping[str, float],
+) -> None:
+    """Prior draws by outcome group, in measurement space (left) and parameter space (right).
+
+    Args:
+        table: filter_prior's table.
+        measured: Each draw's measurements, averaged over replicates (indexed by run_hash).
+        property_filter: The filter, for its criteria.
+        truth: The truth's mean measurements, ``gain`` and ``gain_sd``.
+    """
+    import matplotlib.pyplot as plt
+
+    groups = outcome_groups(table, property_filter)
+    _, low, high = property_filter.criteria["F1"]
+    _, _, s_max = property_filter.criteria["F2"]
+    x, y = PRIOR
+    points = table.set_index("run_hash").join(measured)
+    fig, (ax_m, ax_p) = _figure(1, 2, figsize=(11.5, 4.9))
+    for ax in (ax_m, ax_p):
+        _style(ax)
+    ax_m.axvspan(low, high, color=BLUE, alpha=0.14, linewidth=0, zorder=0)
+    ax_m.axhline(s_max, color=INK, linestyle="--", linewidth=1.2, zorder=1)
+    ax_m.annotate(
+        "F2: SD at most s*", (0.01, s_max), xycoords=ax_m.get_yaxis_transform(), xytext=(0, 4),
+        textcoords="offset points", fontsize=9, color=INK_2,
+    )  # fmt: skip
+    for key, style in GROUP_STYLES.items():
+        subset = points[groups.to_numpy() == key]
+        count = f" ({len(subset)})"
+        ax_m.scatter(subset["gain"], subset["gain_sd"], label=GROUPS[key] + count, **style)
+        ax_p.scatter(subset[x], subset[y], **style)
+    ax_m.scatter(
+        [truth["gain"]], [truth["gain_sd"]], marker="x", s=90, color=INK, linewidth=2, zorder=5,
+        label="truth",
+    )  # fmt: skip
+    ax_m.annotate(
+        "F1 band", (low, 0.97), xycoords=ax_m.get_xaxis_transform(), xytext=(-4, 0),
+        textcoords="offset points", ha="right", va="top", fontsize=9, color=INK_2,
+    )  # fmt: skip
+    ax_m.set_xlabel("mean annual gain in the window (m/yr)", color=INK_2)
+    ax_m.set_ylabel("SD of the annual gain in the window (m/yr)", color=INK_2)
+    _title(ax_m, "What the filter measures")
+
+    ax_p.scatter([TRUTH[x]], [TRUTH[y]], marker="x", s=90, color=INK, linewidth=2, zorder=5)
+    ax_p.set_xlim(*PRIOR[x]["uniform"])
+    ax_p.set_ylim(*PRIOR[y]["uniform"])
+    ax_p.set_xlabel(f"{x} (m/yr)", color=INK_2)
+    ax_p.set_ylabel(f"{y} (%)", color=INK_2)
+    _title(ax_p, "The same draws over the prior box")
+    fig.legend(
+        *ax_m.get_legend_handles_labels(), loc="upper center", ncol=3, frameon=False, fontsize=9,
+        labelcolor=INK_2,
+    )  # fmt: skip
+    fig.tight_layout(rect=(0, 0, 1, 0.89))
+    plt.show()
+
+
+def plot_gains_by_group(
+    registry: RunRegistry,
+    table: pd.DataFrame,
+    property_filter: PropertyFilter,
+    truth_run: str,
+    groups: tuple[str, ...] = ("both", "F1 only"),
+) -> None:
+    """Annual gains of the draws in some outcome groups (replicate means), against the truth."""
+    import matplotlib.pyplot as plt
+
+    labels = outcome_groups(table, property_filter)
+    fig, ax = _figure(figsize=(7.5, 4.2))
+    _style(ax)
+    _shade_window(ax)
+    _draw_band(ax, property_filter)
+    colors = {"both": BLUE, "F1 only": ORANGE, "F2 only": AQUA, "neither": MUTED}
+    for key in groups:
+        for i, run_hash in enumerate(table.loc[labels == key, "run_hash"]):
+            gains = landscape_heights(registry, run_hash).groupby("step")["gain"].mean()
+            ax.plot(
+                gains.index, gains.to_numpy(), color=colors[key], linewidth=1.4, alpha=0.9,
+                label=GROUPS[key] if i == 0 else "_nolegend_",
+            )  # fmt: skip
+    truth = landscape_heights(registry, truth_run).groupby("step")["gain"].mean()
+    ax.plot(truth.index, truth.to_numpy(), color=INK, linewidth=2, label="truth")
+    ax.set_xticks(range(1, FINAL_STEP + 1))
+    ax.set_xlabel("step (year of the run)", color=INK_2)
+    ax.set_ylabel("annual gain (m/yr), mean of replicates", color=INK_2)
+    _title(ax, "Annual gains of the draws in F1's band")
+    fig.legend(
+        *ax.get_legend_handles_labels(), loc="upper center", ncol=2, frameon=False, fontsize=9,
+        labelcolor=INK_2,
+    )  # fmt: skip
+    fig.tight_layout(rect=(0, 0, 1, 0.88))
     plt.show()

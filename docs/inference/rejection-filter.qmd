@@ -1,0 +1,352 @@
+---
+title: "Rejection Filter on a Model Property"
+description: "Which ForeverTree parameters make trees grow faster, and as steadily? Rejection sampling from the prior with criteria on the model's behaviour, and no data"
+execute:
+  warning: false
+---
+
+{{< include _sbi-setup.qmd >}}
+
+## Introduction
+
+The [SMC-ABC page](smc-abc.qmd) asked which parameter values reproduce data.
+This page asks a different question, with no data at all: **which parameter
+values produce a stated behaviour?** For the Joshua tree model, the behaviour
+is replacement: recruitment keeping pace with adult mortality. For ForeverTree,
+it is faster, steady growth.
+
+The method is a **rejection filter**, option (d) of @hartig2011. State criteria
+the model's output must meet, simulate parameter sets drawn from the prior, and
+keep those that meet every criterion. Pattern-oriented modelling filters
+parameter sets the same way, with patterns observed in the field as its
+criteria [@grimm2005]. Here the criteria describe a behaviour we want to
+understand, not data.
+
+The parameter sets that pass make up the **accepted region**: what it would
+take for the model to behave this way. It is not a posterior. No data entered
+it, so it says what the model can do, not which parameter values the data
+support. A later page combines the two: how probable the behaviour is, given
+the survey.
+
+::: {.callout-note}
+## Runtime
+
+The first render reruns the case study's 200 prior draws with 10 replicates
+each, about 45 minutes on a laptop, one parameter set at a time. Each draw's
+first replicate is the case study's, kept from the shared registry
+`forevertree.duckdb`, and a later render replays them all.
+:::
+
+```{python}
+import sys
+
+sys.path.insert(0, "../../examples/sbi_forevertree")
+import forevertree_case as case
+import numpy as np
+import pandas as pd
+
+from joshpy.cli import JoshCLI
+from joshpy.inference import KnownTruthStudy
+from joshpy.jar import JarMode
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry("forevertree.duckdb")  # shared by the Inference pages
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+spec = case.known_truth_study()
+study = spec.load(registry, cli)  # the case study's truth run and prior simulations
+```
+
+## The Behaviour: Faster, Steady Growth
+
+The filter measures the whole landscape, not the survey. Let $H_t$ be the mean
+tree height over all 63 cells at step $t$, and $g_t = H_t - H_{t-1}$ the annual
+gain. Over the **final window**, the last five years of the run
+($t = 6, \dots, 10$), two measurements describe growth:
+
+$$
+\bar g = \frac{1}{5} \sum_{t=6}^{10} g_t,
+\qquad
+s_g = \sqrt{\frac{1}{4} \sum_{t=6}^{10} \left(g_t - \bar g\right)^2}.
+$$
+
+$\bar g$ is how fast trees grow by the end of the run, and $s_g$ is how much
+that varies from year to year with the climate. At the truth, averaged over the
+case study's 50 replicates, they are $g^*$ and $s^*$:
+
+```{python}
+truth_runs = case.replicate_job(registry, cli)  # the case study's 50 replicates at the truth
+at_truth = pd.DataFrame(
+    [
+        case.final_window_gain(registry, truth_runs.run_hash, replicate)
+        for replicate in range(truth_runs.replicates)
+    ]
+)
+g_star, s_star = at_truth["gain"].mean(), at_truth["gain_sd"].mean()
+print(f"g* = {g_star:.4f} m/yr, s* = {s_star:.4f} m/yr")
+print(f"SD between replicates: {at_truth['gain'].std():.4f} and {at_truth['gain_sd'].std():.4f} m/yr")
+```
+
+The question is **what it would take for trees to grow 20–40% faster than at
+the truth, without varying more from year to year**. Two criteria say so for one
+replicate:
+
+| Criterion | Asks for | Holds for a replicate if |
+|-----------|----------|--------------------------|
+| F1 | 20–40% faster growth | $1.2\,g^* \le \bar g \le 1.4\,g^*$ |
+| F2 | no less steady | $s_g \le s^*$ |
+
+A parameter set passes a criterion if at least 90% of its 10 replicates meet
+it, and passes the filter if it passes both.
+
+The truth fails F1 by construction: its gain is $g^*$. That is deliberate. The
+later page asks how probable passing is, given the survey, and with the truth
+outside the band, the answer should come out near zero. The Joshua tree
+analogue is a declining truth, for which the probability of replacement should
+come out low.
+
+```{python}
+#| label: fig-gain-truth
+#| fig-cap: "Mean height of all cells (left) and its annual gain (right) in each of the 50 replicates at the truth; the replicates nearly coincide. The shaded steps are the final window. F1 asks for a window mean gain inside the blue band, 20–40% above the truth's."
+case.plot_gain_at_truth(registry, truth_runs.run_hash, case.gain_filter(g_star, s_star), g_star)
+```
+
+The measurement and the filter, from the case study's module:
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.final_window_gain, case.gain_filter)
+```
+
+joshpy's `PropertyFilter` holds the criteria, and
+`KnownTruthStudy.filter_prior` runs them on draws from the prior:
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(KnownTruthStudy.filter_prior)
+```
+
+## Rejection Sampling from the Prior
+
+```{python}
+gain_filter = case.gain_filter(g_star, s_star)
+table = spec.filter_prior(registry, cli, gain_filter, n=case.N_PRIOR)
+table.head().round(3)
+```
+
+Each row is one prior draw: its parameters, the share of its replicates meeting
+each criterion, and whether it passes.
+
+The draws are the case study's prior simulations. `filter_prior` draws from
+the prior with the same sbi seed, so it proposes the same 200 parameter sets,
+and so the same runs (`run_hash`). The replicate count is not part of
+`run_hash`, so each run was rerun with 10 replicates. Josh simulated all 10,
+but the registry kept the replicate it already held, so the case study's data
+did not change. The registry records which session's run each replicate came
+from:
+
+```{python}
+hashes = list(table["run_hash"])
+reused = set(hashes) & set(study.reference["run_hash"])
+print(f"{len(reused)} of {len(hashes)} draws are the case study's prior simulations")
+registry.conn.execute(
+    """
+    SELECT CASE WHEN c.replicate = 0 THEN '0' ELSE '1-9' END AS replicates,
+           s.experiment_name AS "recorded by",
+           COUNT(DISTINCT c.run_hash) AS "parameter sets"
+    FROM cell_data c
+    JOIN job_runs r USING (run_id)
+    JOIN sweep_sessions s USING (session_id)
+    WHERE c.run_hash IN (SELECT unnest(?))
+    GROUP BY ALL
+    ORDER BY 1, 2
+    """,
+    [hashes],
+).df()
+```
+
+## Results
+
+How many draws pass each criterion, and both:
+
+```{python}
+criteria = list(gain_filter.criteria)
+passing = table[criteria] >= gain_filter.min_share
+counts = pd.Series(
+    {
+        "F1: 20–40% faster": passing["F1"].sum(),
+        "F2: no less steady": passing["F2"].sum(),
+        "both: accepted": table["passes"].sum(),
+    },
+    name="parameter sets",
+)
+pd.DataFrame({"parameter sets": counts, "share of draws": counts / len(table)}).round(3)
+```
+
+```{python}
+#| label: fig-filter
+#| fig-cap: "The 200 prior draws by outcome group. Left: each draw's mean gain and its year-to-year SD in the final window (means of 10 replicates), with F1's band (shaded) and F2's limit (dashed); the accepted draws are those in the band and below the limit. Right: the same draws over the prior box. The cross marks the truth."
+measurements = gain_filter.measurements(registry, hashes)
+measured = measurements.groupby("run_hash")[["gain", "gain_sd"]].mean()
+case.plot_filter(table, measured, gain_filter, {"gain": g_star, "gain_sd": s_star})
+```
+
+Read the right panel criterion by criterion:
+
+- **F1 alone keeps a band of parameter sets along a trade-off.** Faster
+  maximum growth with more drought sensitivity gives the same mean gain as
+  slower growth with less, the ridge the mean height left on the
+  [SMC-ABC page](smc-abc.qmd#testing-sufficiency-the-mean-alone).
+- **F2 cuts that band.** Only its drought-tolerant end, with
+  `minPrecipImpactPct` well above the truth's 40%, varies no more than the
+  truth from year to year.
+
+The draws that pass F1 but not F2 show why:
+
+```{python}
+#| label: fig-gains-by-group
+#| fig-cap: "Annual gains of the draws that pass F1, accepted (blue) or failing F2 (orange), each the mean of its 10 replicates, against the truth (black). The band is F1's, over the final window."
+case.plot_gains_by_group(registry, table, gain_filter, truth_runs.run_hash)
+```
+
+All of them average inside the band over the window, but the ones that fail F2
+swing more from year to year, above and below it. ForeverTree's growth is
+proportional to `maxNewGrowth`, so its year-to-year swings are too: at a fixed
+drought sensitivity, growing 20% faster means varying 20% more. Only less
+drought sensitivity steadies the gain.
+
+### The replicates
+
+How much do a draw's 10 replicates differ, and how often do they disagree on a
+criterion?
+
+```{python}
+spread = measurements.groupby("run_hash")[["gain", "gain_sd"]].agg(lambda v: v.std() / v.mean())
+print(
+    f"CV between replicates, median over draws: {spread['gain'].median():.2%} for the mean "
+    f"gain, {spread['gain_sd'].median():.1%} for its SD"
+)
+mixed = (table[criteria] > 0) & (table[criteria] < 1)
+print(
+    f"draws whose replicates disagree: {mixed['F1'].sum()} on F1, {mixed['F2'].sum()} on F2, "
+    f"of {len(table)}"
+)
+```
+
+ForeverTree's landscape averages 630 trees, so the mean gain barely differs
+between replicates, and they disagree on F1 only for the 2 draws that sit right
+on an edge of its band. An SD of five annual gains is noisier, so they disagree
+on F2 for the 12 draws within about 15% of its limit. How many draws would each
+rule accept?
+
+```{python}
+rules = {
+    "any replicate": table[criteria] > 0,
+    "90% of replicates (the filter)": table[criteria] >= gain_filter.min_share,
+    "all 10 replicates": table[criteria] == 1,
+}
+pd.Series({rule: int(met.all(axis=1).sum()) for rule, met in rules.items()}, name="accepted")
+```
+
+All three accept the same 5 draws: none of the draws whose replicates disagree
+passes the other criterion. So here the 90% rule changes nothing. It is written
+for models whose replicates differ more. In a Joshua tree stand, where a few
+recruitment pulses decide whether adults are replaced, replicates of the same
+parameter set can disagree anywhere in the box, and the rule says how often the
+behaviour must hold for a parameter set to count.
+
+## What Would It Take?
+
+The accepted draws, against the truth and the prior:
+
+```{python}
+names = list(case.PRIOR)
+accepted = table[table["passes"]]
+edges = pd.DataFrame(
+    {"truth": case.TRUTH, "accepted min": accepted[names].min(), "accepted max": accepted[names].max()}
+)
+edges[["prior low", "prior high"]] = [case.PRIOR[name]["uniform"] for name in edges.index]
+edges.round(3)
+```
+
+To grow 20–40% faster without varying more between years, trees must be
+**less sensitive to drought** than at the truth, with `maxNewGrowth` close to
+its true value.
+
+These are the edges of a small sample, not of the region. Five accepted draws
+mark the region only roughly, and the region extends between and beyond them. A general model needs more draws to sharpen the edges, ideally placed near
+the accepted ones (see [Scaling Up](#scaling-up)). ForeverTree's structure lets
+us read one edge from all 200 draws instead. Because growth is proportional to
+`maxNewGrowth`, the gain's year-to-year CV, $s_g / \bar g$, depends on
+`minPrecipImpactPct` alone. Passing both criteria needs
+$s_g \le s^*$ with $\bar g \ge 1.2\,g^*$, so a CV of at most
+$s^* / (1.2\,g^*)$, whatever `maxNewGrowth` is:
+
+```{python}
+by_draw = table.set_index("run_hash")[names].join(measured)
+by_draw["cv"] = by_draw["gain_sd"] / by_draw["gain"]
+largest_cv = s_star / (1.2 * g_star)
+steady_enough = by_draw["cv"] <= largest_cv
+precip = by_draw["minPrecipImpactPct"]
+print(f"draws with a CV of at most {largest_cv:.4f}: {steady_enough.sum()} of {len(by_draw)}")
+print(f"their minPrecipImpactPct: {precip[steady_enough].min():.1f}% and up")
+print(f"the other draws': up to {precip[~steady_enough].max():.1f}%")
+```
+
+The two ranges overlap slightly, because replicate noise in $s_g$ blurs the
+edge, so the region starts at a `minPrecipImpactPct` of about 47–48%, well below
+the smallest accepted draw's 56%. At the truth's 40%, no `maxNewGrowth` passes:
+trees would grow fast enough only by varying too much.
+
+## Not a Posterior
+
+The share of draws that pass estimates the **prior probability** of the
+behaviour: the chance that a parameter set drawn from the prior passes.
+
+```{python}
+p = table["passes"].mean()
+standard_error = np.sqrt(p * (1 - p) / len(table))
+print(f"P(passes) under the prior: {p:.3f} ± {standard_error:.3f} (Monte Carlo SE, {len(table)} draws)")
+```
+
+That number depends on the prior box as much as on the model. Widen the prior
+ranges and it changes, with the model unchanged. It says nothing about which
+parameter values are true: the survey never entered the filter. To bring the
+data in, weight each parameter set by the posterior instead of the prior. The
+probability of passing given the survey is the posterior-weighted share of
+passing particles, $\sum_i w_i \,\mathrm{pass}_i / \sum_i w_i$, over the
+[SMC-ABC posterior](smc-abc.qmd#results). That is the next page.
+
+## Scaling Up
+
+- **Rejection is expensive when the region is small.** This filter ran 2,000
+  replicate simulations to accept 5 parameter sets. The remedy is
+  the one SMC-ABC uses: draw new parameter sets near the accepted ones, in
+  waves, and weight them to correct for where the search looked. joshpy does
+  not yet do this for filters.
+- **Even coverage.** A Latin hypercube spreads draws through the box more
+  evenly than random draws, which helps when few pass. `filter_prior` uses
+  sbi's random draws so that it shares runs with the case study.
+- **Replicates are part of the criterion.** ABC uses one replicate per
+  proposal. A filter on a stochastic behaviour needs several, and the
+  replicate count and `min_share` belong to the criterion's definition, fixed
+  before the first draw.
+- **Failures.** `filter_prior` stops if a run fails. A model that can crash in
+  part of the box (for example, out of memory when a population explodes)
+  needs those draws recorded as missing, with where they fall, rather than
+  counted as passing or failing.
+- **More parameters.** With more parameters, plot the accepted sets as a pairs
+  plot, one panel per pair of parameters, and keep each set whole: trade-offs
+  show up as diagonal bands, like F1's here.
+
+```{python}
+#| include: false
+registry.close()  # the registry stays on disk for the other Inference pages
+```
+
+## References
+
+::: {#refs}
+:::
