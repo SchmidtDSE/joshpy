@@ -2103,6 +2103,11 @@ class AdaptiveContext:
             return "new", None
 
         if len(self.registry.loaded_replicates(job.run_hash)) < job.replicates:
+            # The replicate count isn't part of run_hash. A run with fewer
+            # replicates can't supply the rest, so rerun it without waiting for
+            # their files; loading keeps the replicates already loaded.
+            if metadata.get("replicates", job.replicates) < job.replicates:
+                return "new", None
             # Completed but never (fully) loaded, e.g. interrupted before loading.
             try:
                 self._load(job, latest.run_id, load_config, succeeded_before=0)
