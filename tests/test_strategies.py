@@ -959,6 +959,25 @@ class TestAdaptiveContextResume(_AdaptiveContextCase):
         self.assertEqual(self.cli.run.call_count, 1)
         self.assertEqual(second.values, [10])
 
+    def test_run_with_fewer_replicates_is_rerun_without_reloading_it(self):
+        load = self.loading_writes_cell_data()
+        first = self.make_context().evaluate([{"x": 1}])
+        old_run_id = first.run_ids[first.run_hashes[0]]
+
+        more = self.make_context(self.make_config(replicates=3)).evaluate([{"x": 1}])
+        self.assertEqual(more.run_hashes, first.run_hashes)  # replicates aren't hashed
+        self.assertEqual(more.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+        # The first run is loaded once, after it ran: no attempt to load the
+        # replicates it never wrote.
+        loaded_from = [call.kwargs["run_id"] for call in load.call_args_list]
+        self.assertEqual(loaded_from.count(old_run_id), 1)
+        self.assertEqual(self.registry.loaded_replicates(more.run_hashes[0]), {0, 1, 2})
+        kept = self.registry.conn.execute(
+            "SELECT run_id FROM cell_data WHERE replicate = 0"
+        ).fetchall()
+        self.assertEqual(kept, [(old_run_id,)])
+
     def test_failed_run_is_rerun(self):
         self.loading_writes_cell_data()
         self.cli.run.side_effect = [_cli_result(exit_code=1, stderr="boom"), _cli_result()]
