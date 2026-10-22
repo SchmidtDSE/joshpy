@@ -81,8 +81,8 @@ truth:
    survey, prior simulations, and choosing summary statistics.
 2. **[SMC-ABC on a simulated survey](smc-abc.qmd)**: option (a), with a
    sufficiency test and a coverage check.
-3. **Rejection filter on a model property**: option (d), asking which
-   parameters produce a target behaviour.
+3. **[Rejection filter on a model property](rejection-filter.qmd)**: option
+   (d), asking which parameters produce a target behaviour.
 4. **Posterior probability of a model property**: combining the two.
 
 | ForeverTree example | Joshua tree case |
