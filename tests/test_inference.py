@@ -18,6 +18,7 @@ import pandas as pd
 from joshpy.inference import (
     KnownTruthStudy,
     LoadedStudy,
+    PropertyFilter,
     effective_sample_size,
     prior_interval,
     weighted_quantile,
@@ -49,6 +50,12 @@ def registry_observe(registry, run_hash, replicate):
 
 def statistics(data):
     return dict(data)
+
+
+def measure(registry, run_hash, replicate):
+    """A property filter's measurements: the stand-in's height and spread."""
+    data = registry_observe(registry, run_hash, replicate)
+    return {"height": data["height"], "spread": data["spread"]}
 
 
 class _Model:
@@ -139,6 +146,67 @@ class TestStudyValidation(unittest.TestCase):
     def test_compare_is_required(self):
         with self.assertRaisesRegex(ValueError, "at least one statistic"):
             make_study(self.model, compare=[])
+
+
+class TestPropertyFilter(unittest.TestCase):
+    """Criteria, shares and passing, from measurements given directly (nothing runs)."""
+
+    VALUES = {  # run_hash -> height of replicates 0, 1, 2, 3
+        "inside": [1.1, 1.2, 1.3, 1.4],
+        "one_out": [1.1, 1.2, 1.3, 9.0],
+        "outside": [0.1, 0.2, 0.3, np.nan],
+    }
+
+    @classmethod
+    def measure(cls, registry, run_hash, replicate):
+        return {"height": cls.VALUES[run_hash][replicate], "spread": 0.5}
+
+    def make(self, **kwargs):
+        defaults = dict(measure=self.measure, criteria={"tall": ("height", 1.0, 1.5)}, replicates=4)
+        defaults.update(kwargs)
+        return PropertyFilter(**defaults)
+
+    def test_validation(self):
+        with self.assertRaisesRegex(ValueError, "at least one criterion"):
+            self.make(criteria={})
+        with self.assertRaisesRegex(ValueError, "needs a low or a high bound"):
+            self.make(criteria={"tall": ("height", None, None)})
+        with self.assertRaisesRegex(ValueError, "above high"):
+            self.make(criteria={"tall": ("height", 2.0, 1.0)})
+        with self.assertRaisesRegex(ValueError, "replicates"):
+            self.make(replicates=0)
+        with self.assertRaisesRegex(ValueError, "min_share"):
+            self.make(min_share=0.0)
+
+    def test_open_bounds_and_nan(self):
+        table = pd.DataFrame({"height": [0.5, 1.0, 2.0, np.nan], "spread": [0.1, 0.9, 0.5, 0.5]})
+        criteria = {"tall": ("height", 1.0, None), "narrow": ("spread", None, 0.5)}
+        met = self.make(criteria=criteria).meets(table)
+        self.assertEqual(list(met.columns), ["tall", "narrow"])
+        self.assertEqual(list(met["tall"]), [False, True, True, False])
+        self.assertEqual(list(met["narrow"]), [True, False, True, True])
+
+    def test_measurements_cover_every_replicate(self):
+        table = self.make().measurements(None, ["inside", "outside"])
+        self.assertEqual(list(table.columns), ["run_hash", "replicate", "height", "spread"])
+        self.assertEqual(list(table["replicate"]), [0, 1, 2, 3] * 2)
+
+    def test_evaluate_shares_and_passes(self):
+        runs = ["inside", "one_out", "outside"]
+        table = self.make(min_share=0.75).evaluate(None, runs)
+        self.assertEqual(list(table.index), runs)
+        self.assertEqual(list(table.columns), ["tall", "passes"])
+        self.assertEqual(list(table["tall"]), [1.0, 0.75, 0.0])
+        self.assertEqual(list(table["passes"]), [True, True, False])
+        strict = self.make(min_share=1.0).evaluate(None, runs)
+        self.assertEqual(list(strict["passes"]), [True, False, False])
+
+    def test_a_set_passes_only_if_it_passes_every_criterion(self):
+        criteria = {"tall": ("height", 1.0, 1.5), "narrow": ("spread", None, 0.4)}
+        table = self.make(criteria=criteria, min_share=0.5).evaluate(None, ["inside"])
+        self.assertEqual(table.loc["inside", "tall"], 1.0)
+        self.assertEqual(table.loc["inside", "narrow"], 0.0)
+        self.assertFalse(table.loc["inside", "passes"])
 
 
 class TestLoadedStudy(unittest.TestCase):
@@ -306,6 +374,41 @@ class TestKnownTruthStudyRuns(unittest.TestCase):
         self.assertEqual(sbi["observed"], loaded.zscore(loaded.observed))
         table = loaded.posterior(result)
         self.assertEqual(list(table.index), ["growth", "precip"])
+
+    def test_filter_prior_tops_up_the_prior_simulations(self):
+        loaded = self.study.load(self.registry, self.cli, n_prior=20)
+        hashes = list(loaded.reference["run_hash"])
+        first = dict(
+            self.registry.conn.execute(
+                "SELECT run_hash, run_id FROM cell_data WHERE replicate = 0"
+            ).fetchall()
+        )
+        runs = self.cli.run.call_count
+        height = PropertyFilter(
+            measure=measure, criteria={"tall": ("height", 1.0, 1.5)}, replicates=3
+        )
+        table = self.study.filter_prior(self.registry, self.cli, height, n=20)
+
+        self.assertEqual(list(table["run_hash"]), hashes)  # the same draws
+        self.assertEqual(self.cli.run.call_count, runs + 20)  # each rerun with 3 replicates
+        for run_hash in hashes:
+            self.assertEqual(self.registry.loaded_replicates(run_hash), {0, 1, 2})
+        kept = dict(
+            self.registry.conn.execute(
+                "SELECT run_hash, run_id FROM cell_data WHERE replicate = 0"
+            ).fetchall()
+        )
+        self.assertEqual(kept, first)  # replicate 0 is the prior simulation's
+        self.assertEqual(list(table.columns), ["run_hash", "growth", "precip", "tall", "passes"])
+        for row in table.itertuples():
+            expected = stand_in({"growth": row.growth, "precip": row.precip})["height"]
+            heights = expected + 0.001 * np.arange(3)
+            self.assertAlmostEqual(row.tall, np.mean((heights >= 1.0) & (heights <= 1.5)))
+        self.assertIn("toy_filter", self.experiments())
+
+        again = self.study.filter_prior(self.registry, self.cli, height, n=20)
+        self.assertEqual(self.cli.run.call_count, runs + 20)
+        pd.testing.assert_frame_equal(again, table)
 
 
 if __name__ == "__main__":

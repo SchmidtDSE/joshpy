@@ -1133,12 +1133,20 @@ class SbiResult:
 
     def to_dataframe(self) -> Any:
         """Final population as a DataFrame: one column per parameter, plus
-        ``weight`` and ``run_hash``."""
+        ``weight`` and ``run_hash``.
+
+        Parameter values are those the runs were rendered with (each float32
+        draw's shortest decimal, as in ``job.parameters``), so running a
+        particle's parameters again reproduces its ``run_hash``.
+        """
         import pandas as pd
 
         if self.samples is None:
             return pd.DataFrame(columns=[*self.param_names, "weight", "run_hash"])
-        df = pd.DataFrame(self.samples.tolist(), columns=self.param_names)
+        df = pd.DataFrame(
+            [[_sbi_param_value(v) for v in row] for row in self.samples.tolist()],
+            columns=self.param_names,
+        )
         df["weight"] = self.weights.tolist()
         df["run_hash"] = self.run_hashes
         return df
@@ -2103,6 +2111,11 @@ class AdaptiveContext:
             return "new", None
 
         if len(self.registry.loaded_replicates(job.run_hash)) < job.replicates:
+            # The replicate count isn't part of run_hash. A run with fewer
+            # replicates can't supply the rest, so rerun it without waiting for
+            # their files; loading keeps the replicates already loaded.
+            if metadata.get("replicates", job.replicates) < job.replicates:
+                return "new", None
             # Completed but never (fully) loaded, e.g. interrupted before loading.
             try:
                 self._load(job, latest.run_id, load_config, succeeded_before=0)
