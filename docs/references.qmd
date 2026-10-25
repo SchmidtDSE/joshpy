@@ -31,6 +31,25 @@ adds the entry to the page's own reference list.
 - @wood2010: synthetic likelihood, a parametric likelihood approximation.
 - @wilkinson2013: the tolerance read as an explicit model-error term.
 
+## Inference: ForeverTree case study
+
+[Page](inference/forevertree.qmd)
+
+- @hartig2011: aggregation into summary statistics, sufficiency, and scaling;
+  why a stochastic simulator's likelihood has to be approximated, and how the
+  approximation works at a single parameter value.
+- @zurell2010: the virtual ecologist approach, simulating the observer (here, the
+  survey's measurement error) along with the system.
+- @wilkinson2013: the alternative to simulating the survey, a tolerance sized to
+  the observation error.
+- @csillery2012: the reference table of parameters and statistics.
+- @grimm2005: pattern-oriented modelling, whose patterns are summary statistics.
+- @joyce2008, @fearnhead2012 and @blum2013: choosing or constructing summary
+  statistics automatically.
+- @beaumont2002: scaling each statistic by its spread across simulations.
+- @wood2010: synthetic likelihood, the parametric alternative to ABC's match
+  counting.
+
 ## Adaptive Parameter Optimization
 
 [Tutorial](tutorials/adaptive-sweep.qmd)

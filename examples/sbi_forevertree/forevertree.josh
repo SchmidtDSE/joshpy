@@ -30,6 +30,12 @@ start patch Default
   export.nTrees.step = count(ForeverTree)
   export.meanHeight.step = mean(ForeverTree.height)
 
+  # What a survey of this cell would record: the mean height plus measurement
+  # error (normal, SD 0.25 m). The case study keeps only the surveyed cells.
+  export.measuredHeight.step =
+    mean(ForeverTree.height)
+    + sample normal with mean of 0 m std of 0.25 m
+
 end patch
 
 start organism ForeverTree

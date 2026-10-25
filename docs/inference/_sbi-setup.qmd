@@ -1,0 +1,46 @@
+```{r}
+#| label: setup
+#| include: false
+library(reticulate)
+library(ggplot2)
+
+# Draw ρ, ε and arrows in figure text even when the render runs under an ASCII locale.
+invisible(Sys.setlocale("LC_CTYPE", "C.UTF-8"))
+
+# Figures on the Inference pages: a light theme and a few named colours.
+theme_set(theme_minimal(base_size = 11) + theme(panel.grid.minor = element_blank()))
+blue <- "#2a78d6"
+orange <- "#eb6834"
+aqua <- "#1baf7a"
+ink <- "#0b0b0b"
+muted <- "#898781"
+shade <- "#e1e0d9"
+```
+
+```{python}
+#| include: false
+# Docs-build only. Load scipy's C++ runtime before torch (some environments
+# otherwise pick up an older system libstdc++), set table display options, and
+# work around reticulate redirecting every logging handler's `stream` while it
+# captures output: torch's stderr handler has a read-only `stream` that already
+# follows sys.stderr, so make the redirect a no-op. One function call, so torch
+# is imported and patched within a single captured statement.
+import scipy.spatial  # noqa: F401
+import pandas as pd
+
+pd.set_option("display.width", 120)
+pd.set_option("display.max_columns", None)
+
+
+def _follow_stderr_quietly():
+    import sys
+
+    import torch._logging._internal as torch_logging
+
+    torch_logging._StderrHandler.stream = property(
+        lambda self: sys.stderr, lambda self, value: None
+    )
+
+
+_follow_stderr_quietly()
+```

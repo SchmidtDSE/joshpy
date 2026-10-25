@@ -30,6 +30,7 @@ project:
     - tutorials/remote-execution.qmd     # Josh Cloud execution
     - tutorials/low-level-components.qmd # Advanced: manual component usage
     - inference/index.qmd                # Inference landing page (no code)
+    - inference/forevertree.qmd          # Case study; creates forevertree.duckdb (needs sbi; frozen)
     - templating.qmd
     - architecture.qmd
     - best-practices.qmd
@@ -100,6 +101,8 @@ website:
         menu:
           - text: "Overview"
             href: inference/index.qmd
+          - text: "ForeverTree Case Study"
+            href: inference/forevertree.qmd
       - text: "Templating"
         href: templating.qmd
       - text: "Architecture"
@@ -161,6 +164,7 @@ website:
     - title: "Inference"
       contents:
         - inference/index.qmd
+        - inference/forevertree.qmd
 
     - title: "Templating"
       contents:
