@@ -65,12 +65,13 @@ Sweep expansion strategies for parameter optimization
 
 ## Inference Module (experimental)
 
-Known-truth studies for testing an inference setup on simulated data
+Known-truth studies for testing an inference setup on simulated data, and rejection filters on a model property
 
 | | |
 | --- | --- |
 | [inference.KnownTruthStudy](inference.KnownTruthStudy.qmd#joshpy.inference.KnownTruthStudy) | The definition of a known-truth study: what to simulate and how to observe it. |
 | [inference.LoadedStudy](inference.LoadedStudy.qmd#joshpy.inference.LoadedStudy) | A known-truth study with its truth run and prior simulations: what a method starts from. |
+| [inference.PropertyFilter](inference.PropertyFilter.qmd#joshpy.inference.PropertyFilter) | A rejection filter on a model property: which parameters produce a behaviour. |
 | [inference.prior_interval](inference.prior_interval.qmd#joshpy.inference.prior_interval) | Central interval of a prior that holds ``level`` of its mass. |
 | [inference.weighted_quantile](inference.weighted_quantile.qmd#joshpy.inference.weighted_quantile) | The q-quantile of weighted values (the smallest value with cumulative weight >= q). |
 | [inference.effective_sample_size](inference.effective_sample_size.qmd#joshpy.inference.effective_sample_size) | Kish's effective sample size of importance weights. |

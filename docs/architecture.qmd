@@ -438,11 +438,20 @@ leave-one-out coverage, each as a DataFrame or an `SbiResult`. Nothing is stored
 outside the `RunRegistry`. A rerun reuses every run by `run_hash`, so the
 `LoadedStudy` can be rebuilt at any time without simulating.
 
+`study.filter_prior(registry, cli, property_filter)` asks a different question
+of the same prior draws: which parameters produce a stated behaviour, with no
+observed data. A `PropertyFilter`'s criteria bound measurements of each
+replicate (`measure(registry, run_hash, replicate)`), and a parameter set passes
+when enough of its replicates meet every criterion. The draws are the prior
+simulations' (the same sbi seed), rerun with the filter's replicates; the
+registry keeps the replicates it already holds.
+
 A study is one experiment family in one registry. Its runs are recorded under
 experiment names prefixed with the study's `name` (`{name}_truth`,
-`{name}_prior`, `{name}_replicates`), and each search gets its own experiment
-name.
+`{name}_prior`, `{name}_replicates`, `{name}_filter`), and each search gets its
+own experiment name.
 
 API: [KnownTruthStudy](reference/inference.KnownTruthStudy.qmd),
-[LoadedStudy](reference/inference.LoadedStudy.qmd)
+[LoadedStudy](reference/inference.LoadedStudy.qmd),
+[PropertyFilter](reference/inference.PropertyFilter.qmd)
 | Section: [Inference](inference/index.qmd)

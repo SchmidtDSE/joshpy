@@ -239,6 +239,15 @@ class TestSbiStrategyRuns(unittest.TestCase):
         epsilons = [p["epsilon"] for p in result.populations]
         self.assertEqual(epsilons, sorted(epsilons, reverse=True))
 
+    def test_particles_carry_the_values_their_runs_were_rendered_with(self):
+        registry = self.registry()
+        result, _ = self.run_sbi(registry)
+        rendered = {job.run_hash: job.parameters for job, _ in result.job_results}
+        for particle in result.to_dataframe().to_dict("records"):
+            self.assertEqual(
+                {name: particle[name] for name in PRIOR}, rendered[particle["run_hash"]]
+            )
+
     def test_every_simulation_is_registered_and_recorded(self):
         registry = self.registry()
         result, session_id = self.run_sbi(registry)
