@@ -63,6 +63,7 @@ adds the entry to the page's own reference list.
 - @wilkinson2013: the tolerance read as an unsimulated observation error.
 - @beven2006: equifinality, parameter sets that reproduce the data equally
   well.
+- @grimm2005: the posterior predictive check as a held-out pattern.
 - @talts2018 and @csillery2012: the coverage check over held-out simulations.
 - @beaumont2002: regression adjustment of accepted parameters.
 

@@ -50,14 +50,16 @@ registry = RunRegistry("forevertree.duckdb")  # shared by the Inference pages
 cli = JoshCLI(josh_jar=JarMode.DEV)
 ```
 
-## Starting from the Middle
+## Picking Up from the Case Study
 
-One call loads the case study: the pseudo-observed survey, the 200 prior
-simulations and the z-score of each statistic. It reuses the case study's runs
-from the registry and simulates only what is missing.
+This page assumes the [ForeverTree case study](forevertree.qmd) and doesn't
+repeat it: the same model, prior and truth, the same pseudo-observed survey of 8
+sites, its two summary statistics (mean and CV) with their z-scores, and the 200
+prior simulations. The page defines the same study and reloads all of that from
+the shared registry, simulating only what is missing:
 
 ```{python}
-spec = case.known_truth_study()  # the KnownTruthStudy definition
+spec = KnownTruthStudy(**case.STUDY)  # the case study's definition
 study = spec.load(registry, cli)  # pseudo-observed survey, prior simulations, z-scores
 ```
 
@@ -75,7 +77,7 @@ pd.DataFrame(
         "prior SD (σ)": study.scale,
         "pseudo-observed z-score": study.zscore(study.observed),
     }
-).loc[case.STATISTICS].rename(index=case.LABELS).round(3)
+).loc[case.STATISTICS].round(3)
 ```
 
 `study.search` gives sbi z-scored statistics, so sbi's distances and tolerances
@@ -117,8 +119,7 @@ distances accepts every replicate, so the posterior's width then reflects the
 tolerance rather than the survey's noise.
 
 ```{python}
-replicates = case.replicate_study(registry, cli, n=50)  # reused from the case study
-survey_replicates = replicates[replicates["observation"] == "survey"]
+survey_replicates = spec.replicates(registry, cli, 50, case.REPLICATE_SEED)  # the case study's
 replicate_distance = study.distance(survey_replicates)
 print(
     f"replicate distances at the truth: median {replicate_distance.median():.2f}, "
@@ -237,9 +238,54 @@ accepted. If a budget falls short, raise it without starting over (see
 ## Results
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+def population_points(result, search):
+    """Each generation's particles, flagged if carried over from the previous generation."""
+    parameters = {job.run_hash: job.parameters for job, _ in result.job_results}
+    rows, previous = [], set()
+    for population in result.populations:
+        for run_hash in population["run_hashes"]:
+            rows.append(
+                {
+                    **parameters[run_hash],
+                    "search": search,
+                    "generation": population["generation"],
+                    "epsilon": population["epsilon"],
+                    "carried": run_hash in previous,
+                }
+            )
+        previous = set(population["run_hashes"])
+    return pd.DataFrame(rows)
+
+
+generations = population_points(result, "Mean + CV")
+truth = pd.DataFrame([case.TRUTH])
+```
+
+```{r}
 #| label: fig-generations
 #| fig-cap: "Accepted parameter sets in each SMC-ABC generation, over the prior box, with the generation's target tolerance in z-score units. Hollow points were carried over from the previous generation when the budget ran out. The cross marks the truth."
-case.plot_generations(result)
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 9
+#| fig-height: 6.4
+prior_box <- list(
+  geom_point(colour = blue, size = 1.8, stroke = 0.9),
+  geom_point(data = py$truth, shape = 4, size = 3, stroke = 1.4, colour = ink, inherit.aes = FALSE,
+             aes(maxNewGrowth, minPrecipImpactPct)),
+  scale_x_continuous("maxNewGrowth (m/yr)", limits = c(0.2, 2)),
+  scale_y_continuous("minPrecipImpactPct (%)", limits = c(0, 100)),
+  scale_shape_manual(
+    NULL, values = c(`FALSE` = 16, `TRUE` = 1),
+    labels = c(`FALSE` = "accepted in this generation", `TRUE` = "carried over")
+  ),
+  theme(legend.position = "top")
+)
+generations <- transform(py$generations, panel = sprintf("Generation %d   ε = %.2g", generation, epsilon))
+ggplot(generations, aes(maxNewGrowth, minPrecipImpactPct, shape = carried)) +
+  prior_box +
+  facet_wrap(~panel, ncol = 3)
 ```
 
 The final population, with its importance weights, is the ABC posterior. For
@@ -294,9 +340,26 @@ study.posterior(result_mean).round(3)
 ```
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+final_populations = pd.concat(
+    [
+        points[points["generation"] == points["generation"].max()]
+        for points in [generations, population_points(result_mean, "Mean only")]
+    ]
+)
+```
+
+```{r}
 #| label: fig-final-populations
 #| fig-cap: "Final SMC-ABC populations with mean and CV (left) and with the mean alone (right), from the same budget. Hollow points were carried over. The cross marks the truth."
-case.plot_final_populations([("Mean + CV", result), ("Mean only", result_mean)])
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 7
+#| fig-height: 4
+ggplot(py$final_populations, aes(maxNewGrowth, minPrecipImpactPct, shape = carried)) +
+  prior_box +
+  facet_wrap(~search)
 ```
 
 The weighted correlation between the two parameters, in each final
@@ -334,16 +397,78 @@ search, the final particle farthest from the truth (in units of the prior
 ranges):
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+def farthest_particle(result):
+    """run_hash of the final particle farthest from the truth, in units of the prior ranges."""
+    particles = result.to_dataframe()
+    offset = sum(
+        ((particles[name] - case.TRUTH[name]) / (prior["uniform"][1] - prior["uniform"][0])) ** 2
+        for name, prior in case.PRIOR.items()
+    )
+    return particles.loc[offset.idxmax(), "run_hash"]
+
+
+states = {
+    "Truth": study.truth_job.run_hash,
+    "Mean + CV, farthest": farthest_particle(result),
+    "Mean only, farthest": farthest_particle(result_mean),
+}
+state_cells, state_sites, state_stats = [], [], []
+for name, run_hash in states.items():
+    theta = registry.get_config_by_hash(run_hash).parameters
+    run = f"{name}: " + ", ".join(f"{p} {float(theta[p]):.3g}" for p in case.PRIOR)
+    sites = case.observe(registry, run_hash).sort_values("x", ignore_index=True)
+    state_cells.append(case.final_heights(registry, run_hash).assign(name=name))
+    state_sites.append(sites.assign(name=name, run=run, site=np.arange(1, len(sites) + 1)))
+    state_stats.append({"name": name, "run": run, **case.statistics(sites)})
+state_cells, state_sites = pd.concat(state_cells), pd.concat(state_sites)
+state_stats = pd.DataFrame(state_stats)
+```
+
+```{r}
 #| label: fig-final-states
-#| fig-cap: "Final-year height maps (one colour scale) and measured surveys of the pseudo-observed run (top), and of the final particle farthest from the truth in the mean + CV search (middle) and in the mean-only search (bottom). The band in each survey panel spans ±1 SD around the mean."
-case.plot_final_states(
-    registry,
-    [
-        ("Truth", study.truth_job.run_hash),
-        ("Mean + CV, farthest", case.farthest_particle(result)),
-        ("Mean only, farthest", case.farthest_particle(result_mean)),
-    ],
-)
+#| fig-cap: "The pseudo-observed run (top), and the final particle farthest from the truth in the mean + CV search (middle) and in the mean-only search (bottom)."
+#| fig-subcap:
+#|   - "Final-year heights, on one colour scale. Outlined cells are surveyed."
+#|   - "Their measured surveys, numbered west to east. The line is the mean, and the band spans ±1 SD."
+#| layout-ncol: 2
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 4.6
+#| fig-height: 8
+in_order <- function(df) {
+  df$name <- factor(df$name, py$state_stats$name)
+  if ("run" %in% names(df)) df$run <- factor(df$run, py$state_stats$run)
+  df
+}
+stats <- in_order(py$state_stats)
+
+ggplot(in_order(py$state_cells), aes(x, y)) +
+  geom_tile(aes(fill = height)) +
+  geom_tile(data = in_order(py$state_sites), fill = NA, colour = ink, linewidth = 0.7) +
+  scale_fill_gradient("true height (m)", low = "#cde2fb", high = "#0d366b") +
+  scale_y_reverse() +
+  coord_equal() +
+  facet_wrap(~name, ncol = 1) +
+  labs(x = "west → east", y = "north → south") +
+  theme(axis.text = element_blank(), panel.grid = element_blank(), legend.position = "bottom")
+
+ggplot(in_order(py$state_sites), aes(measured, 0)) +
+  geom_rect(
+    aes(xmin = mean_height - height_sd, xmax = mean_height + height_sd, ymin = -Inf, ymax = Inf),
+    stats, fill = shade, inherit.aes = FALSE
+  ) +
+  geom_vline(aes(xintercept = mean_height), stats) +
+  geom_point(colour = orange, size = 2.5) +
+  geom_text(aes(label = site), vjust = -1.3, size = 3, colour = muted) +
+  geom_text(
+    aes(-Inf, Inf, label = sprintf("mean %.2f m, CV %.3f", mean_height, height_cv)), stats,
+    hjust = -0.05, vjust = 1.5, size = 3, inherit.aes = FALSE
+  ) +
+  scale_y_continuous(NULL, breaks = NULL, limits = c(-1, 1)) +
+  facet_wrap(~run, ncol = 1) +
+  labs(x = "measured height (m)")
 ```
 
 The mean-only particle matches the observed mean (7.27 m, against 7.25 m)
@@ -467,9 +592,11 @@ nothing in the search warns about it. Two symptoms to watch for:
 
 A **posterior predictive check** tests the second: simulate new data at
 parameter sets drawn from the posterior, and compare them with the observed
-data on something the fit did not use. The summaries used only the mean and
-the CV of the survey, not where each height was measured, so we compare each
-survey site. We run each final particle's parameters once more, as new runs
+data on something the fit did not use. In the terms of pattern-oriented
+modelling [@grimm2005], that is a held-out pattern: one that could have been a
+fitting criterion but was kept back, so that reproducing it tests the model
+rather than the search. The summaries used only the mean and the CV of the
+survey, not where each height was measured, so we compare each survey site. We run each final particle's parameters once more, as new runs
 with their own seeds (so the page is reproducible), and survey them.
 
 ```{python}
