@@ -17,9 +17,9 @@ data.
 This page builds the case study and covers the first of the three steps in
 @hartig2011: **aggregation**, the choice of summary statistics. It ends with
 everything a method page needs: the pseudo-observed data, 200 simulations from
-the prior, and the z-score of each statistic. Method pages start from the
-middle with one call, `case.known_truth_study().load(...)`, which reuses the
-runs this page made.
+the prior, and the z-score of each statistic. Each method page picks up from
+here: it defines the same study and reloads this page's runs from the registry
+with one call, `KnownTruthStudy(**case.STUDY).load(...)`.
 
 The workflow is the same for any model, so joshpy runs it:
 `KnownTruthStudy` (experimental, in `joshpy.inference`). The case study
@@ -35,18 +35,21 @@ registry `forevertree.duckdb`, so later pages reuse them instead of
 re-simulating.
 :::
 
-The case study's code lives in one module,
+What is specific to ForeverTree lives in one module,
 `examples/sbi_forevertree/forevertree_case.py`. The docs pages and the
 command-line example `run_abc.py` both import it:
 
 ```{python}
 import sys
+from functools import partial
 
 sys.path.insert(0, "../../examples/sbi_forevertree")
 import forevertree_case as case
+import numpy as np
 import pandas as pd
 
 from joshpy.cli import JoshCLI
+from joshpy.inference import KnownTruthStudy
 from joshpy.jar import JarMode
 from joshpy.registry import RunRegistry
 
@@ -171,12 +174,13 @@ Everything after the survey is the same for any model. `KnownTruthStudy` takes
 the model, the prior, the truth and the two functions specific to ForeverTree,
 `observe` above and `statistics` below. It runs the truth and the prior
 simulations, and the comparisons that follow, reusing every run the registry
-already holds. This is the whole ForeverTree definition:
+already holds. This is the whole ForeverTree definition, the arguments to
+`KnownTruthStudy`:
 
 ```{python}
 #| echo: false
 #| output: asis
-case.show_source(case.known_truth_study)
+case.show_source("STUDY")
 ```
 
 For another model, write its `observe` and `statistics`, and the rest of this
@@ -184,7 +188,8 @@ page applies unchanged. The [Architecture](../architecture.qmd#knowntruthstudy)
 page shows how the study fits with the rest of joshpy.
 
 ```{python}
-study = case.known_truth_study().load(registry, cli)
+spec = KnownTruthStudy(**case.STUDY)
+study = spec.load(registry, cli)
 study.truth_data.round(2)
 ```
 
@@ -238,13 +243,53 @@ Plotting each candidate against each parameter, over the prior simulations,
 shows what each one can tell us. ρ is the Spearman rank correlation.
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+parameters, candidates = list(case.PRIOR), list(study.candidates)
+candidate_points = study.reference.melt(
+    id_vars=candidates, value_vars=parameters, var_name="parameter", value_name="parameter_value"
+).melt(id_vars=["parameter", "parameter_value"], var_name="statistic")
+observed_values = pd.DataFrame({"statistic": candidates, "value": study.candidates.values()})
+true_values = pd.DataFrame({"parameter": parameters, "value": [case.TRUTH[p] for p in parameters]})
+rho = study.correlations().stack().rename_axis(["statistic", "parameter"]).reset_index(name="rho")
+```
+
+```{r}
 #| label: fig-candidates
 #| fig-cap: "Candidate statistics of the survey against each parameter, over 200 prior simulations. The orange dashed line is the statistic's pseudo-observed value; the black line is the parameter's true value. The mean moves with both parameters; the CV moves with drought sensitivity (minPrecipImpactPct) and hardly at all with growth."
-case.plot_candidates(study)
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 7
+#| fig-height: 8
+statistic_labels <- c(
+  mean_height = "mean (m)", height_sd = "SD (m)", height_var = "variance (m²)", height_cv = "CV"
+)
+in_order <- function(df) transform(df, statistic = factor(statistic, names(statistic_labels)))
+
+ggplot(in_order(py$candidate_points), aes(parameter_value, value)) +
+  geom_point(colour = blue, size = 0.9) +
+  geom_hline(
+    aes(yintercept = value, linetype = "pseudo-observed value"), in_order(py$observed_values),
+    colour = orange, linewidth = 0.8
+  ) +
+  geom_vline(aes(xintercept = value, linetype = "true parameter value"), py$true_values) +
+  geom_text(
+    aes(-Inf, Inf, label = sprintf("ρ = %+.2f", rho)), in_order(py$rho),
+    hjust = -0.15, vjust = 1.5, size = 3.2
+  ) +
+  facet_grid(
+    statistic ~ parameter,
+    scales = "free", switch = "both", labeller = labeller(statistic = statistic_labels)
+  ) +
+  scale_linetype_manual(
+    NULL, values = c("pseudo-observed value" = "dashed", "true parameter value" = "solid")
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme(legend.position = "top", strip.placement = "outside")
 ```
 
 ```{python}
-study.correlations().rename(index=case.LABELS).round(2)
+study.correlations().round(2)
 ```
 
 ### Choosing among them
@@ -330,7 +375,7 @@ pd.DataFrame(
         "prior SD (σ)": study.scale,
         "pseudo-observed z-score": study.zscore(study.observed),
     }
-).loc[case.STATISTICS].rename(index=case.LABELS).round(3)
+).loc[case.STATISTICS].round(3)
 ```
 
 ## From Model Output to a Comparison
@@ -339,9 +384,59 @@ Here is the whole aggregation step for the truth run, and the comparison an ABC
 method makes with it. First, the model's output reduces to $S_\text{obs}$:
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+cells = case.final_heights(registry, study.truth_job.run_hash)
+sites = study.truth_data.sort_values("x", ignore_index=True)
+sites["site"] = np.arange(1, len(sites) + 1)  # numbered west to east
+site_heights = pd.concat(
+    [
+        sites[["site", "height"]].assign(kind="true"),
+        sites[["site", "measured"]].rename(columns={"measured": "height"}).assign(kind="measured"),
+    ]
+)
+s_obs = study.candidates
+```
+
+```{r}
 #| label: fig-observation
-#| fig-cap: "From model output to S_obs, for the pseudo-observed run. (1) Final-year height of all 63 cells; outlined cells are surveyed. (2) The survey records each site's height with the measurement error the model drew. (3) The eight measured heights reduce to a mean and a CV, which together are S_obs."
-case.plot_observation(study, registry)
+#| fig-cap: "From model output to S_obs, for the pseudo-observed run."
+#| fig-subcap:
+#|   - "Final-year height of all 63 cells. Outlined cells are surveyed, numbered west to east."
+#|   - "The survey records each site's height with the measurement error the model drew (SD 0.25 m). The measured heights reduce to a mean (line) and a CV; the band spans ±1 SD."
+#| layout-ncol: 2
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 5
+#| fig-height: 4
+ggplot(py$cells, aes(x, y)) +
+  geom_tile(aes(fill = height)) +
+  geom_tile(data = py$sites, fill = NA, colour = ink, linewidth = 0.8) +
+  geom_label(aes(label = site), py$sites, size = 3, linewidth = 0, label.padding = unit(0.1, "lines")) +
+  scale_fill_gradient("true height (m)", low = "#cde2fb", high = "#0d366b") +
+  scale_y_reverse() +
+  coord_equal() +
+  labs(x = "west → east", y = "north → south") +
+  theme(axis.text = element_blank(), panel.grid = element_blank())
+
+s_obs <- py$s_obs
+ggplot(py$site_heights, aes(site, height)) +
+  annotate(
+    "rect", xmin = -Inf, xmax = Inf, fill = shade,
+    ymin = s_obs$mean_height - s_obs$height_sd, ymax = s_obs$mean_height + s_obs$height_sd
+  ) +
+  geom_hline(yintercept = s_obs$mean_height, colour = ink) +
+  geom_line(aes(group = site), colour = muted) +
+  geom_point(aes(colour = kind, shape = kind), size = 2.5, stroke = 1) +
+  annotate(
+    "label", x = -Inf, y = -Inf, hjust = -0.05, vjust = -0.2, size = 3.2, linewidth = 0,
+    label = sprintf("S_obs: mean %.2f m, CV %.3f", s_obs$mean_height, s_obs$height_cv)
+  ) +
+  scale_colour_manual(NULL, values = c(true = ink, measured = orange)) +
+  scale_shape_manual(NULL, values = c(true = 1, measured = 16)) +
+  scale_x_continuous(breaks = 1:8) +
+  labs(x = "survey site (west → east)", y = "height (m)") +
+  theme(legend.position = "top")
 ```
 
 Every prior simulation goes through the same three steps and becomes one point
@@ -356,9 +451,78 @@ print(f"ε = {epsilon:.3f} (z-score units)")
 ```
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+distance = study.distance(study.reference)
+comparison = (
+    study.reference[case.STATISTICS]
+    .join(study.zscore(study.reference).add_prefix("z_"))
+    .assign(distance=distance, accepted=distance <= epsilon)
+)
+observed = pd.DataFrame(
+    [{**study.observed, **{f"z_{k}": v for k, v in study.zscore(study.observed).items()}}]
+)
+rejected = comparison[~comparison["accepted"]]
+example = rejected.loc[[(rejected["distance"] - 3 * epsilon).abs().idxmin()]]  # one rejected point
+sigma = study.scale
+```
+
+```{r}
 #| label: fig-comparison
-#| fig-cap: "Comparing the prior simulations with S_obs. (4) Each prior simulation's mean and CV, in measured units; blue points are within ε of S_obs and accepted. The region within ε is an ellipse because each statistic's difference is divided by its own prior SD. (5) The same points as z-scores, where that region is a circle of radius ε. The line shows one rejected simulation's distance from S_obs."
-case.plot_comparison(study, epsilon)
+#| fig-cap: "Comparing the prior simulations with S_obs (cross). Blue points are within ε of S_obs, and accepted."
+#| fig-subcap:
+#|   - "Each prior simulation's mean and CV, in measured units. The region within ε (dashed) is an ellipse, because each statistic's difference is divided by its own prior SD."
+#|   - "The same points as z-scores, where that region is a circle of radius ε. The line shows one rejected simulation's distance from S_obs."
+#| layout-ncol: 2
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 5
+#| fig-height: 4.2
+eps <- py$epsilon
+obs <- py$observed
+sigma <- py$sigma
+angle <- seq(0, 2 * pi, length.out = 200)
+points <- list(
+  geom_point(aes(colour = accepted, shape = accepted), size = 1.6),
+  scale_colour_manual(NULL, values = c(`TRUE` = blue, `FALSE` = muted), labels = c(`TRUE` = "within ε (accepted)", `FALSE` = "rejected")),
+  scale_shape_manual(NULL, values = c(`TRUE` = 16, `FALSE` = 1), labels = c(`TRUE` = "within ε (accepted)", `FALSE` = "rejected")),
+  theme(legend.position = "top")
+)
+s_obs_mark <- function(x, y) {
+  geom_point(aes({{ x }}, {{ y }}), obs, shape = 4, size = 4, stroke = 1.6, colour = orange)
+}
+
+ggplot(py$comparison, aes(mean_height, height_cv)) +
+  points +
+  geom_path(
+    aes(x, y),
+    data.frame(
+      x = obs$mean_height + eps * sigma$mean_height * cos(angle),
+      y = obs$height_cv + eps * sigma$height_cv * sin(angle)
+    ),
+    linetype = "dashed"
+  ) +
+  s_obs_mark(mean_height, height_cv) +
+  labs(x = "mean height (m)", y = "CV of height")
+
+ggplot(py$comparison, aes(z_mean_height, z_height_cv)) +
+  points +
+  geom_path(
+    aes(x, y),
+    data.frame(x = obs$z_mean_height + eps * cos(angle), y = obs$z_height_cv + eps * sin(angle)),
+    linetype = "dashed"
+  ) +
+  geom_segment(
+    aes(x = obs$z_mean_height, y = obs$z_height_cv, xend = z_mean_height, yend = z_height_cv),
+    py$example, colour = ink
+  ) +
+  geom_label(
+    aes(label = sprintf("distance %.2f > ε: rejected", distance)), py$example,
+    hjust = 1.08, size = 3, linewidth = 0
+  ) +
+  s_obs_mark(z_mean_height, z_height_cv) +
+  coord_equal() +
+  labs(x = "mean height, z-score", y = "CV of height, z-score")
 ```
 
 Both panels show the same 200 simulations and the same acceptances; only the
@@ -387,18 +551,23 @@ seed (`seed=2`). Each replicate is surveyed twice: without measurement error
 measured heights).
 
 ```{python}
-#| echo: false
-#| output: asis
-case.show_source(case.replicate_study)
-```
-
-```{python}
-replicates = case.replicate_study(registry, cli, n=50)
+replicates = pd.concat(
+    [
+        spec.replicates(
+            registry, cli, 50, case.REPLICATE_SEED, observe=partial(case.observe, error=False)
+        ).assign(observation="model only"),
+        spec.replicates(registry, cli, 50, case.REPLICATE_SEED).assign(observation="survey"),
+    ],
+    ignore_index=True,
+)
 replicates["distance"] = study.distance(replicates)
 
 spread = replicates.groupby("observation")[case.STATISTICS].std() / pd.Series(study.scale)[case.STATISTICS]
-spread.rename(columns=case.LABELS).round(4)
+spread.round(4)
 ```
+
+Both tables read the same 50 runs: `spec.replicates` runs them once, and the
+second call reuses them.
 
 ```{python}
 replicates.groupby("observation")["distance"].describe()[["50%", "max"]].round(4)
@@ -408,9 +577,45 @@ The first table gives each statistic's spread between replicates, in prior SDs
 (z-score units); the second, how far the replicates land from $S_\text{obs}$.
 
 ```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+offsets = (
+    (study.zscore(replicates) - pd.Series(study.zscore(study.observed)))
+    .assign(observation=replicates["observation"])
+    .melt(id_vars="observation", var_name="statistic", value_name="offset")
+)
+```
+
+```{r}
 #| label: fig-replicates
-#| fig-cap: "Fifty replicate simulations at the true parameters, surveyed without (model only) and with measurement error, in z-score units. Left and centre: offsets from the pseudo-observed statistics (dashed), which are themselves one draw with measurement error. Right: the fraction of replicates within ε of the pseudo-observed statistics, the nonparametric estimate of the ABC likelihood at the truth, against ε; the dashed line marks the 10% rejection tolerance."
-case.plot_replicates(study, replicates, epsilon)
+#| fig-cap: "Fifty replicate simulations at the true parameters, surveyed without (model only) and with measurement error, in z-score units."
+#| fig-subcap:
+#|   - "Offsets from the pseudo-observed statistics (dashed), which are themselves one draw with measurement error."
+#|   - "The fraction of replicates within ε of the pseudo-observed statistics, the nonparametric estimate of the ABC likelihood at the truth, against ε. The dashed line marks the 10% rejection tolerance."
+#| layout: [[60, 40]]
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 6
+#| fig-height: 3.6
+observation_colours <- scale_colour_manual(NULL, values = c("model only" = blue, survey = orange))
+
+offsets <- transform(py$offsets, statistic = factor(statistic, c("mean_height", "height_cv")))
+ggplot(offsets, aes(offset, colour = observation)) +
+  geom_freqpoly(bins = 14, linewidth = 0.9) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  facet_wrap(~statistic, scales = "free", labeller = as_labeller(c(mean_height = "mean", height_cv = "CV"))) +
+  scale_x_continuous(n.breaks = 4) +
+  observation_colours +
+  labs(x = expression(S[sim] - S[obs] ~ "(z-score units)"), y = "replicates") +
+  theme(legend.position = "top")
+
+ggplot(py$replicates, aes(distance, colour = observation)) +
+  stat_ecdf(linewidth = 0.9) +
+  geom_vline(xintercept = py$epsilon, linetype = "dashed") +
+  scale_x_log10() +
+  observation_colours +
+  labs(x = "tolerance ε (z-score units, log scale)", y = "fraction within ε") +
+  theme(legend.position = "top")
 ```
 
 The fraction of replicates within $\varepsilon$ estimates the ABC likelihood at
@@ -433,16 +638,18 @@ Two things follow from the figure:
   the replicate distances, which is what the SMC-ABC page's simulation budget
   has to buy.
 
-## Starting a Method Page
+## Picking Up on a Method Page
 
-Everything above is stored in the registry. A method page starts from the
-middle with one call, which reuses these runs instead of re-simulating:
+Everything above is stored in the registry. A method page defines the same
+study and reloads it with one call, which reuses these runs instead of
+re-simulating:
 
 ```{python}
 #| eval: false
 import forevertree_case as case
+from joshpy.inference import KnownTruthStudy
 
-study = case.known_truth_study().load(registry, cli)  # survey, prior simulations, z-scores
+study = KnownTruthStudy(**case.STUDY).load(registry, cli)  # survey, prior simulations, z-scores
 result, session_id = study.search(registry, cli, "smcabc", settings, "forevertree_smcabc")
 study.posterior(result)  # posterior mean and 90% interval, against the truth
 ```

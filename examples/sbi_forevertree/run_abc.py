@@ -8,11 +8,11 @@
    proposal is rendered, run, registered, loaded and surveyed the same way.
 4. Report whether the truth falls inside the final population's central 90%.
 
-The case study lives in ``forevertree_case.py``, built on
-``joshpy.inference.KnownTruthStudy``; the Inference docs use it too. The mean
-alone cannot separate the two parameters (faster growth with more drought
-sensitivity gives the same mean height); ``--mean-only`` runs that version to
-show the resulting ridge.
+The case study's ForeverTree-specific parts live in ``forevertree_case.py``
+(``case.STUDY`` holds the arguments of ``joshpy.inference.KnownTruthStudy``);
+the Inference docs use it too. The mean alone cannot separate the two
+parameters (faster growth with more drought sensitivity gives the same mean
+height); ``--mean-only`` runs that version to show the resulting ridge.
 
 Usage (from the repository root):
 
@@ -29,7 +29,7 @@ import argparse
 import forevertree_case as case
 
 from joshpy.cli import JoshCLI
-from joshpy.inference import effective_sample_size
+from joshpy.inference import KnownTruthStudy, effective_sample_size
 from joshpy.jar import JarMode
 from joshpy.registry import RunRegistry
 
@@ -45,7 +45,7 @@ def main() -> None:
     cli = JoshCLI(josh_jar=JarMode.DEV)
     registry = RunRegistry(args.registry)
     try:
-        study = case.known_truth_study().load(registry, cli)
+        study = KnownTruthStudy(**case.STUDY).load(registry, cli)
         print(f"Pseudo-observed survey at {case.TRUTH}: {study.observed}")
 
         result, _ = study.search(

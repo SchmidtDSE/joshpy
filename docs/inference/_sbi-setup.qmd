@@ -2,6 +2,19 @@
 #| label: setup
 #| include: false
 library(reticulate)
+library(ggplot2)
+
+# Draw ρ, ε and arrows in figure text even when the render runs under an ASCII locale.
+invisible(Sys.setlocale("LC_CTYPE", "C.UTF-8"))
+
+# Figures on the Inference pages: a light theme and a few named colours.
+theme_set(theme_minimal(base_size = 11) + theme(panel.grid.minor = element_blank()))
+blue <- "#2a78d6"
+orange <- "#eb6834"
+aqua <- "#1baf7a"
+ink <- "#0b0b0b"
+muted <- "#898781"
+shade <- "#e1e0d9"
 ```
 
 ```{python}
