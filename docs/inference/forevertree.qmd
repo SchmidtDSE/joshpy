@@ -322,7 +322,7 @@ No recipe guarantees sufficient statistics, but a process helps:
    sufficiency is desirable but not required [@hartig2011]. The figure shows that
    mean and CV are *informative*, which is weaker, and the survey discards most
    cells and every year before the last. Sufficiency usually has to be tested on
-   artificial data [@hartig2011]; the SMC-ABC page does that by dropping the CV.
+   artificial data [@hartig2011]; the [SMC-ABC page](smc-abc.qmd) does that by dropping the CV.
 
 There are automatic, model-agnostic alternatives: add statistics one at a time
 and keep those that change the posterior [@joyce2008], or construct one
@@ -635,7 +635,7 @@ Two things follow from the figure:
   a match, the likelihood at the truth is close to 1, and the posterior's width
   reflects the tolerance rather than the data's noise. The width starts to
   reflect the survey's noise only once a search tightens $\varepsilon$ toward
-  the replicate distances, which is what the SMC-ABC page's simulation budget
+  the replicate distances, which is what the [SMC-ABC page](smc-abc.qmd)'s simulation budget
   has to buy.
 
 ## Picking Up on a Method Page

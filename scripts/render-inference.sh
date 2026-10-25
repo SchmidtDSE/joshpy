@@ -13,6 +13,7 @@ export RETICULATE_PYTHON=$CONDA_PREFIX/bin/python
 
 PAGES=(
   docs/inference/forevertree.qmd
+  docs/inference/smc-abc.qmd
 )
 
 for page in "${PAGES[@]}"; do
