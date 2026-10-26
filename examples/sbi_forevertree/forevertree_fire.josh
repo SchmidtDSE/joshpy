@@ -121,6 +121,7 @@ start patch Default
   export.precipitation.step = precipitation
   export.nTrees.step = count(ForeverTree)
   export.nAdults.step = nAdults
+  export.nJuveniles.step = nTrees - nAdults
   export.meanHeight.step = mean(ForeverTree.height) if count(ForeverTree) > 0 count else 0 m
   export.heightSd.step = std(ForeverTree.height) if count(ForeverTree) > 1 count else 0 m
   export.fuel.step = fuel

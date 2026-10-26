@@ -234,6 +234,20 @@ All three pages were re-rendered on their own branches with no new simulations; 
 are unchanged apart from tables now showing the statistics' own names (`mean_height`,
 `height_cv`) and the replay timing.
 
+### Review of the PR 4 and PR 5 pages (Oct 26)
+
+| # | Note | Change |
+|---|------|--------|
+| 1 | The docs are a generic guide; keep anything about the Joshua tree test out of them | Removed from the rejection-filter page, the posterior-property page, and the Inference index's roadmap sentence and mapping table. The removed text is kept in `JOTR_NOTES.md` in the repo root, a scratch file outside git. This plan keeps the Joshua tree design |
+| 2 | F1, F2, R1, R2 read as opaque; put them in biological terms | `faster` (the stand gains 0.75–0.87 m of height a year, 20–40% more than at the truth), `steady` (its gain swings no more between years), and the positive control's `same_rate` and `same_swings`. ḡ and s_g are named the stand's growth rate and growth variability |
+| 3 | Read the results as a manager would: bound the biological parameters, then state how likely the posterior is to meet a hypothesis about the landscape | The posterior page opens with that two-step workflow, shows the trait intervals, and ends with "Reading the Results". The rejection-filter page reads its accepted region as a planting choice (more drought-tolerant trees, not faster-growing ones) |
+| 4 | Why estimate the prior probability of a band we don't expect to be realistic? | The band is a negative control, which the pages now say. The rejection filter's result is the accepted region (what it would take), not its prior share. On the posterior page the prior column is labelled a baseline, and the realistic statement is the posterior one |
+
+Also added to the posterior page: the probability read two ways, by the 90% rule (a stand that
+reliably behaves so) and by pooling replicates (one realization of the landscape). For growing as
+at the truth, 0.93 against 0.99. Both pages were re-rendered with no new simulations; every number
+is unchanged.
+
 ### Joshua tree design (Oct 25)
 
 **Two separate tests, never one combined search.**
@@ -392,8 +406,8 @@ precipitation from 300 mm (d = 1) to 500 mm (d = 0), clamped):
   - *Scheduled:* every [`fireInterval`] years from step [`firstFire`] (0 turns it off). These are the
     same steps in every run and every patch.
   - *Stochastic:* a chance of [`fireChance`] × last year's fuel (0% turns it off).
-- **Exports:** year, observedYear, precipitation, nTrees, nAdults, meanHeight, heightSd, fuel,
-  burned, deaths, recruits.
+- **Exports:** year, observedYear, precipitation, nTrees, nAdults, nJuveniles, meanHeight,
+  heightSd, fuel, burned, deaths, recruits.
 
 **Behaviour at the defaults** (200-year spin-up, 2 replicates per mode; about 10 s a replicate
 locally):
@@ -419,7 +433,7 @@ locally):
   matured from earlier recruits.
 
 **What it enables:**
-- Test (2) gets a population growth rate, once the window or the statistic is settled (open item 3).
+- Test (2) gets its statistic: the juvenile:adult ratio over the observed years (decided Oct 26).
 - Patterns at more scales: occupancy, density, juveniles against adults, within-site height SD
   (informative now that ages differ), and recruitment pulses.
 - Direct and inverse parameters in one model.
@@ -431,11 +445,16 @@ locally):
    `recruitment`, `juvenileMortality`, `droughtMortality`, `adultFireMortality`, and `fireChance`
    in the stochastic mode. Direct: `spinupYears`, `observedPrecipChange`, `initialTrees`,
    `maxTrees`, `maturityHeight`, `fuelGrowth`, `adultMortality`, `fireInterval` and `firstFire`.
-2. **Statistics:** occupancy of the surveyed cells, density where occupied, the juvenile:adult ratio
-   (the Joshua tree statistic), mean height and within-site height SD.
-3. **Test (2)'s target and window.** The 11 observed years are too short for adults to show a
-   drying, so either the scenario starts earlier (a change year within the spin-up), or the
-   statistic responds faster (recruits per adult, the juvenile:adult ratio).
+2. **Statistics for test (1):** occupancy of the surveyed cells, density where occupied, the
+   juvenile:adult ratio, mean height and within-site height SD.
+3. **Test (2)'s statistic: decided Oct 26, the juvenile:adult ratio**, keeping the 11-year
+   window (the Joshua tree test statistic most likely). The 11 years are too short for adults to
+   show a drying, but the ratio responds. Landscape ratio over steps 200–210, 2 replicates:
+   - stochastic fire: 0.27–0.33 at 0%; at −20% it falls from 0.26 to 0.19–0.21 within 5–10 years;
+   - scheduled fire: the 20-year cycle dominates. The window sits between fires at steps 190 and
+     210, so the ratio falls from 0.27 to 0.19 as the post-fire cohort matures, with or without
+     drying; −20% lowers it by a further 0.02–0.05. Open: whether test (2) uses the stochastic
+     mode, or aligns the window with the fire cycle.
 4. **Seed rain:** a small yearly chance of one recruit from outside would make occupancy
    stationary. That is one direct parameter more.
 5. **Stochastic fire reads fuel only**; climate enters through fuel growth. A dry-year multiplier
@@ -606,16 +625,17 @@ re-render takes about 2.5 minutes and runs nothing.
 - P = Σ wᵢ·passᵢ / Σ wᵢ, Monte Carlo SE sqrt(p(1 − p) / ESS), and the rule of three (3/ESS) as a
   95% bound when no particle passes, or 1 − 3/ESS when all do [Hanley & Lippman-Hand 1983].
 
-**Results (ESS 27.6 of 30):**
+**Results (ESS 27.6 of 30; criteria renamed Oct 26: F1 → `faster`, F2 → `steady`, R1 → `same_rate`,
+R2 → `same_swings`):**
 
 | Filter | Prior P (200 draws) | Posterior P |
 |--------|---------------------|-------------|
-| F1: 1.2–1.4 g\* | 0.095 | 0 (bound 0.11) |
-| F2: s_g ≤ s\* | 0.695 | 0.495 ± 0.095 |
-| F1 and F2 | 0.025 | 0 (bound 0.11) |
-| R1: 0.9–1.1 g\* | 0.115 | 1 (bound 0.89) |
-| R2: 0.8–1.2 s\* | 0.115 | 0.929 ± 0.049 |
-| R1 and R2 ("grows like the truth") | 0.010 | 0.929 ± 0.049 |
+| `faster`: 1.2–1.4 g\* | 0.095 | 0 (bound 0.11) |
+| `steady`: s_g ≤ s\* | 0.695 | 0.495 ± 0.095 |
+| both | 0.025 | 0 (bound 0.11) |
+| `same_rate`: 0.9–1.1 g\* | 0.115 | 1 (bound 0.89) |
+| `same_swings`: 0.8–1.2 s\* | 0.115 | 0.929 ± 0.049 |
+| both ("grows as at the truth"; 0.986 pooled) | 0.010 | 0.929 ± 0.049 |
 
 - None of the particles' 300 replicates reaches F1's band; the fastest particle (0.669 m/yr) is 11%
   below its lower edge (0.748).
