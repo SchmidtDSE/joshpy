@@ -5,18 +5,30 @@
 # wet years, up to a patch's capacity. Fuel is a cover % that grows in wet years
 # and burns. Each patch is simulated on its own: fire does not spread.
 #
-# The run is a spin-up on resampled climate (each year draws one of the 11
-# years of the climate data, the same year for every patch), then the 11
-# observed years in order. All parameters come from forevertreeFire.jshc,
-# which also selects the fire mode: scheduled (fireInterval > 0), stochastic
-# (fireChance > 0), both, or none. fire_modes/ holds a config for each mode.
+# The run has three parts, on the synthetic climate in climate/ (see
+# preprocess_climate.py):
+#   - a spin-up on resampled historical climate: each year draws one of the
+#     historicalYears years, the same year for every patch;
+#   - the present: the last presentYears historical years, in order. A survey
+#     records the final one (yearsFromSurvey = 0);
+#   - a projection: projectionYears years of one future (normal, hot_dry or
+#     cool_wet), chosen by which files are mapped to futureTemperature and
+#     futurePrecipitation. Fit runs set projectionYears = 0 and need no future.
+# All parameters come from forevertreeFire.jshc, which also selects the fire
+# mode: scheduled (fireInterval > 0), stochastic (fireChance > 0), both, or
+# none. fire_modes/ holds a config for each mode.
 #
-# From the repository root:
+# Outputs go to MinIO, so runs work the same locally (with MinIO keys in the
+# environment) and on a batch target; exportPrefix is a custom tag.
+#
+# From the repository root, with the hot_dry future:
 #   java -jar jar/joshsim-fat-dev.jar run examples/sbi_forevertree/forevertree_fire.josh Main \
-#     --data temperature.jshd=examples/demo/temperature.jshd \
-#     --data precipitation.jshd=examples/demo/precipitation.jshd \
-#     --data forevertreeFire.jshc=examples/sbi_forevertree/fire_modes/scheduled/forevertreeFire.jshc \
-#     --custom-tag run_hash=scheduled
+#     --data historicalTemperature.jshd=examples/sbi_forevertree/climate/historical_temperature.jshd \
+#     --data historicalPrecipitation.jshd=examples/sbi_forevertree/climate/historical_precipitation.jshd \
+#     --data futureTemperature.jshd=examples/sbi_forevertree/climate/hot_dry_temperature.jshd \
+#     --data futurePrecipitation.jshd=examples/sbi_forevertree/climate/hot_dry_precipitation.jshd \
+#     --data forevertreeFire.jshc=examples/sbi_forevertree/fire_modes/stochastic/forevertreeFire.jshc \
+#     --custom-tag run_hash=hot_dry --custom-tag exportPrefix=forevertree-fire
 
 start simulation Main
 
@@ -29,24 +41,30 @@ start simulation Main
     -117.98 degrees longitude
   grid.patch = "Default"
 
-  # Spin-up, then the observed years 0 to 10.
+  # Spin-up, present, projection.
   steps.low = 0 count
-  steps.high = config forevertreeFire.spinupYears + 10 count
+  steps.high =
+    config forevertreeFire.spinupYears
+    + config forevertreeFire.presentYears
+    + config forevertreeFire.projectionYears
+    - 1 count
 
   spinupYears.init = config forevertreeFire.spinupYears
+  presentYears.init = config forevertreeFire.presentYears
+  historicalYears.init = config forevertreeFire.historicalYears
+  lastHistoricalYear.init = historicalYears - 1 count
   state.init = "spinup"
-  state.step:if(meta.stepCount == spinupYears) = "observed"
-  observedYear.step = meta.stepCount - spinupYears  # negative during the spin-up
+  state.step
+    :if(meta.stepCount == spinupYears) = "present"
+    :elif(meta.stepCount == spinupYears + presentYears) = "projection"
+  yearsFromSurvey.step = meta.stepCount - spinupYears - presentYears + 1 count
 
-  # The climate year each step reads, and a change in precipitation over the
-  # observed years (a scenario: 0% keeps the data's climate).
+  # The year of the climate file each step reads: a random historical year,
+  # the last presentYears historical years in order, then the future's years.
   year.step
-    :if(current.state == "spinup") = sample discrete uniform from 0 count to 10 count
-    :else = observedYear
-  observedPrecipChange.init = config forevertreeFire.observedPrecipChange
-  precipChange.step
-    :if(current.state == "observed") = observedPrecipChange
-    :else = 0%
+    :if(current.state == "spinup") = sample discrete uniform from 0 count to lastHistoricalYear
+    :elif(current.state == "present") = lastHistoricalYear + yearsFromSurvey
+    :else = yearsFromSurvey - 1 count
 
   # Growth
   maxNewGrowth.init = config forevertreeFire.maxNewGrowth
@@ -68,7 +86,7 @@ start simulation Main
   fireChance.init = config forevertreeFire.fireChance
   adultFireMortality.init = config forevertreeFire.adultFireMortality
 
-  exportFiles.patch = "file:///tmp/forevertree_fire_{run_hash}_{replicate}.csv"
+  exportFiles.patch = "minio://josh-batch-storage/{exportPrefix}/forevertree_fire_{run_hash}_{replicate}.csv"
 
 end simulation
 
@@ -76,9 +94,13 @@ start patch Default
 
   ForeverTree.init = create meta.initialTrees of ForeverTree
 
-  # Climate of this patch in this step's climate year.
-  temperature.step = external temperature at meta.year
-  precipitation.step = (external precipitation at meta.year) as mm * (100% + meta.precipChange)
+  # Climate of this patch in this step's climate year: historical, or the future.
+  temperature.step
+    :if(meta.state == "projection") = external futureTemperature at meta.year
+    :else = external historicalTemperature at meta.year
+  precipitation.step
+    :if(meta.state == "projection") = (external futurePrecipitation at meta.year) as mm
+    :else = (external historicalPrecipitation at meta.year) as mm
   dryness.step = limit (
     map precipitation from [300 mm, 500 mm] to [100%, 0%] linear
   ) to [0%, 100%]
@@ -117,7 +139,7 @@ start patch Default
   ForeverTree.end = prior.ForeverTree | create recruits of ForeverTree
 
   export.year.step = meta.year
-  export.observedYear.step = meta.observedYear
+  export.yearsFromSurvey.step = meta.yearsFromSurvey
   export.precipitation.step = precipitation
   export.nTrees.step = count(ForeverTree)
   export.nAdults.step = nAdults
@@ -178,12 +200,6 @@ start organism ForeverTree
     or (sample uniform from 0% to 100%) < fireDeathChance
 
 end organism
-
-start unit kgm2s
-
-  mm = current * 31536000
-
-end unit
 
 start unit mm
 

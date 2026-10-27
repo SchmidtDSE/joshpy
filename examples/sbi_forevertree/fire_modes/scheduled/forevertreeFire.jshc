@@ -2,10 +2,15 @@
 # Every variable must be present. Rates are yearly.
 
 # --- The run ---
-# Years of spin-up on resampled climate, before the 11 observed years.
+# Years of spin-up on resampled historical climate.
 spinupYears = 200 count
-# Change in precipitation over the observed years (a scenario; 0 % keeps the data's).
-observedPrecipChange = 0 %
+# Years of the present: the last historical years, in order. A survey records the final one.
+presentYears = 10 count
+# Years of the projection under the future mapped as futureTemperature and futurePrecipitation
+# (0: stop at the survey, as fit runs do; at most the future file's 40 years).
+projectionYears = 40 count
+# Years in the historical climate files.
+historicalYears = 30 count
 
 # --- Growth, as in forevertree.josh ---
 # How much can a ForeverTree grow in one year?
