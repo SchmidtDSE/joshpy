@@ -1,6 +1,6 @@
 # SBI Implementation for joshpy
 
-Oct 26, 2026 · @nick · joshpy 0.0.9.35 · sbi 0.27.0 with CPU-only torch 2.14.1
+Oct 27, 2026 · @nick · joshpy 0.0.9.35 · sbi 0.27.0 with CPU-only torch 2.14.1
 
 How joshpy runs the filter-and-refine search in [SBI.md](SBI.md). The machinery is proved on
 the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to a second ForeverTree model
@@ -175,7 +175,7 @@ These findings apply to every page and experiment.
 - Commits end with the `Co-Authored-By` trailer; PR descriptions end with the Claude Code line.
 - Docs PRs stay drafts until the user has reviewed the render.
 
-### Where things stand (Oct 26)
+### Where things stand (Oct 27)
 
 Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94 → #95 → #96 ("SBI stack n/11").
 
@@ -188,24 +188,139 @@ Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94
 | #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Oct 25 review addressed; re-rendered; awaiting the user's review |
 | #92 | `fix/sbi-summaries` | Open. Callables saved only as loadable paths; summaries errors stop the search (Behavior notes) |
 | #94 | `feat/inference-property-filter` | Open. `PropertyFilter` and `KnownTruthStudy.filter_prior`; a replicate top-up no longer waits for files the earlier run never wrote; `to_dataframe()` gives the rendered parameter values |
-| #95 (PR 4) | `docs/inference-rejection-filter` | Done, **draft**. The rejection-filter page; Oct 25 review addressed; re-rendered; awaiting the user's review |
-| #96 (PR 5) | `docs/inference-posterior-property` | Done, **draft**. The posterior-probability page; awaiting the user's review |
+| #95 (PR 4) | `docs/inference-rejection-filter` | **Draft, to be rebuilt** on the fire model (Oct 27, "Rebuild of PR 4 and PR 5") |
+| #96 (PR 5) | `docs/inference-posterior-property` | **Draft, to be rebuilt** on the fire model (Oct 27) |
+| — | `feat/forevertree-fire-model` | Pushed, no PR. The second ForeverTree model and this plan; moves below #95 in the rebuild |
 
-### Next phase: readiness (Oct 26)
+### Next phase: readiness (Oct 27)
 
 | Work | Ready? | Notes |
 |------|--------|-------|
-| PR 5: posterior probability of the property | **Done** (#96, draft) | Rendered; awaiting review |
+| Rebuild of PR 4 and PR 5 on the fire model | **Waits on the synthetic climate** | Decided Oct 27 (next section); the data are generated outside this repo |
 | `csv_precision` passthrough; `use_float64` in `run_hash` | **Ready** | Small code PR ("Josh CSV export bug") |
 | SMC-ABC batch policy | **Ready** | Design settled ("SMC-ABC batch policy"); names are the open choice |
-| Second ForeverTree model | **Drafted**, awaiting review | `forevertree_fire.josh` and a config per fire mode; open items in "Second ForeverTree model" |
+| Second ForeverTree model | **Drafted**; timeline and climate to revise | Spin-up → survey → projection on the synthetic climate (Oct 27) |
 | Parameter declarations (direct vs inverse) | Direction agreed | API to draft; the second model is its first user |
 | Field data (a study without a truth run) | Ready, small | Needed for Joshua tree, not for ForeverTree |
-| Test (2) as SMC-ABC on a stability target | Waits | Needs the second model's population growth rate |
+| Test (2) as SMC-ABC on a stability target | Waits | The rebuilt #95 is its rejection version; the target is the projected ratio |
 | Pilot on the cluster | Blocked | A Josh CSV fix for Kubernetes, the batch policy, and a long-run model |
 | Cleanup (Optuna, spin-up) | Parked | Wholesale, once SBI is stable |
 
 Nothing in the stack has merged yet, so new code PRs stack on #96 unless the lower PRs merge first.
+The rebuild is the exception: its code PR and new page go below #95 (next section).
+
+### Rebuild of PR 4 and PR 5 on the fire model (Oct 27)
+
+The growth-band pages (#95, #96) are rebuilt on the second ForeverTree model, around replacement.
+`faster`, `steady` and the growth window go: they were invented because the first model's trees
+never die, and they read as artificial. The first model's pages (#90, #91) stay as they are, since
+they teach the ABC mechanics.
+
+**Decided (Oct 27):**
+- **Fit the present, test the future.** SMC-ABC fits the survey's juvenile:adult ratios (the
+  present); the hypothesis is about a projection (the future). That is the Joshua tree test (1) as
+  planned ("Joshua tree design"). The ratio is in the fit, so a hypothesis about the ratio in the
+  survey years would only restate the data; one about the projected ratio does not.
+- **Hypothesis: the projected ratio stays above a target**, a fixed number of juveniles per adult
+  set before the analysis, as a management target would be. It is not relative to the stand's own
+  ratio, and it is not adult λ.
+- **Inverse parameters: `recruitment` and `droughtMortality`.** Everything else is direct, at the
+  defaults. Two parameters keep the first model's 2-D figures.
+- **Fire: stochastic** (`fireChance` 10%, scheduled fire off).
+- **Climate: three synthetic futures, `normal`, `hot_dry` and `cool_wet`,** generated outside this
+  repo and copied in (spec below). `observedPrecipChange` leaves the model.
+
+**The three futures are the controls.** One survey, one fit, three projections. With the target
+fixed, P(ratio above the target | survey) should come out high under `cool_wet` and low under
+`hot_dry`, with `normal` wherever the truth's own projection puts it. They replace the growth
+bands as positive and negative controls, in terms a manager uses.
+
+**Synthetic climate: what this repo needs** (generated elsewhere; the repo has no generator, but
+writes NetCDF with `scipy.io.netcdf_file` and preprocesses it with `NetcdfPreprocessConfig` or
+`GridSpec.preprocess_netcdf`, as in the timestep-interventions tutorial and
+`tests/test_jshdz_integration.py`):
+- **Extent:** the ForeverTree grid, top-left 36.73° N, −119.52° E, bottom-right 35.80° N,
+  −117.98° E, in 16 km patches (63 of them). Any lat/lon grid covering it at the demo data's
+  resolution (10 × 8 cells over the extent) or finer; preprocessing interpolates onto the patches.
+- **Variables, yearly:** `temperature` (annual mean, K) and `precipitation` (annual total, mm).
+  Precipitation in mm drops the model's kg m⁻² s⁻¹ conversion.
+- **Files** (NetCDF, dimensions `(time, lat, lon)`, `time` counted in years):
+  - `historical`: a stationary present, proposed 30 years. The spin-up resamples these years, and
+    the last 11 are the survey window, read in order.
+  - `normal`, `hot_dry`, `cool_wet`: one file per future, proposed 40 years each, starting the year
+    after the survey.
+- **Spatial structure:** a precipitation gradient across the model's response range, so that about
+  half the patches can hold trees. Dryness is linear from 300 mm (1) to 500 mm (0), and recruitment
+  and juvenile drought deaths read it; the demo data's cell means span 240–550 mm. Temperature near
+  the growth optimum (300 K; the growth map is quadratic over 270–330 K), with a mild gradient.
+- **Year-to-year variation:** a regional component shared by every patch (wet and dry years for
+  the whole landscape, which make recruitment pulses), plus a smaller local one. For scale: in the
+  demo data, each cell's SD between years is about 39 mm (10%), uncorrelated between cells.
+- **Futures:** `normal` continues the historical statistics; `hot_dry` and `cool_wet` ramp away from
+  them. Proposed: linear ramps to −30% precipitation and +2 K by year 40 (`hot_dry`), and to +20%
+  and −1 K (`cool_wet`).
+- **Seeded and documented**, so the tutorial can say how the data were made.
+
+**Model changes, once the data are in:**
+- Timeline: spin-up → survey → projection, as states on the simulation. `steps.high` is the sum of
+  the three lengths; the projection length is a direct parameter, so fit runs can stop at the
+  survey (0 projection years).
+- Externals: `historicalTemperature` and `historicalPrecipitation` for the spin-up (resampled) and
+  the survey years (in order), and `futureTemperature` and `futurePrecipitation` for the
+  projection. The future is chosen by `file_mappings`: a direct file parameter, so one fit serves
+  three projections.
+- To verify first: that a fit run (no projection years) needs no future files mapped, since its
+  future lookups never evaluate.
+
+**Survey and statistics (proposed):** stage counts (juveniles, adults) at about 10 fixed sites
+spread along the rain gradient within the occupied range, in the last survey year. Statistics:
+the pooled log juvenile:adult ratio, adult density, and the slope of the log ratio along the rain
+gradient. The slope is what should identify `droughtMortality`, since drought deaths show as fewer
+juveniles at the dry sites.
+
+**Projection and hypothesis:**
+- Projections are separate runs at the final particles, 10 replicates each, under each future.
+  They share seeds across the three futures, so for each replicate the three futures branch from
+  the same simulated present. That present is a fresh realization of the particle's parameters,
+  not the search's replicate.
+- The landscape ratio (juveniles over adults, pooled over the occupied patches), averaged over the
+  last 10 projection years, must be at or above the target in 9 of 10 replicates. The page also
+  shows the pooled reading (as on the current #96).
+
+**Page plan:**
+1. **A model with births and deaths** (new): the fire model, the synthetic climate and its three
+   futures, the survey, the truth, prior simulations, the statistics, and the SMC-ABC fit.
+2. **What would it take?** (#95, rebuilt): rejection sampling from the prior under `hot_dry`. Which
+   `recruitment` and `droughtMortality` values keep the projected ratio above the target, and how
+   far are they from the posterior? This is the rejection version of the Joshua tree test (2).
+3. **Posterior probability of replacement** (#96, rebuilt): P(ratio above the target | survey)
+   under each future, with the projected ratio's posterior bands over the 40 years against the
+   target. The Oct 26 review's framing (biological names, a manager's reading, two readings of
+   the probability) carries over.
+
+**Stack:** `#94 → model and case-module code (new PR) → page 1 (new PR) → #95 → #96`. The model
+branch moves below #95, and #95 and #96 are force-pushed with their rebuilt content; both stay
+drafts. `final_window_gain` leaves `forevertree_case.py`.
+
+**Cost (rough, local, one run at a time):** about 10 s per run to the survey and 12 s with a
+40-year projection. That puts the first render at about 10 hours:
+- 200 prior draws: about 35 minutes;
+- a 600-simulation search: about 1.7 hours;
+- the filter's 200 draws at 10 replicates: about 5.5 hours;
+- the projections, 30 particles × 10 replicates × 3 futures: about 3 hours.
+
+A 100-year spin-up, fewer filter draws or a smaller grid would cut it.
+
+**Open (for the user):**
+1. **The target's value.** Proposed: fix it once the data exist and before the fit. Place it so the
+   truth's projected ratio sits above it under `normal` and below it under `hot_dry`, and state it
+   on the page as the management target.
+2. **Heat in the ratio.** In this model, temperature changes only growth. Heat slows growth, so
+   juveniles take longer to mature and the ratio rises even as drought kills more of them:
+   `hot_dry` pulls the ratio both ways. Either add heat to juvenile mortality (one more direct
+   parameter), or keep it and show the ratio as a misleading indicator.
+3. **The climate magnitudes and lengths** proposed above.
+4. **Detection error in the survey** (juveniles are easy to miss), or exact counts.
 
 ### #90 review (Oct 21)
 
@@ -255,7 +370,9 @@ is unchanged.
    statistics, at the scales where the model has processes)? SMC-ABC, as on the SMC-ABC page.
    Whether the fitted sets replace themselves is checked **post hoc**:
    P(replacing | I&M) = Σ wᵢ·passᵢ / Σ wᵢ over the final particles, each topped up to N replicates.
-   PR 5 does exactly this on ForeverTree.
+   Decided Oct 27: the fit uses the present (the surveys' juvenile:adult ratios, among other
+   patterns) and the check is a projection under future climates: whether the projected ratio
+   stays above a target. The rebuilt PR 5 does exactly this on the fire model.
 2. **Counterfactual: an idealized scenario of stability** (revised Oct 26). Also SMC-ABC: target
    statistics that describe stability (e.g. a population growth rate of 1 and a low year-to-year
    CV) take the place of observed patterns, and ε plays the band's role. It runs from the prior,
@@ -372,6 +489,10 @@ replicates each, exported at full precision) is stable at every setting:
 - fire feedback barely acts, because patches sit above the 30% fire threshold 75–97% of the time.
 
 A separate example would add little, so ForeverTree gains its role.
+
+**Revised Oct 27** ("Rebuild of PR 4 and PR 5"): the climate comes from synthetic files with three
+futures, the run becomes spin-up → survey → projection, and `observedPrecipChange` goes. The
+description below is the Oct 26 draft, which still has them.
 
 **Drafted for review (Oct 26):** `examples/sbi_forevertree/forevertree_fire.josh`, with one config
 per fire mode in `fire_modes/{scheduled,stochastic}/forevertreeFire.jshc` (the config name is
@@ -581,6 +702,9 @@ in it unused):
 
 ### PR 4: status (rejection filter on a model property, Hartig option (d))
 
+**Superseded Oct 27:** rebuilt on the fire model ("Rebuild of PR 4 and PR 5"). The record below is
+the first-model version.
+
 `docs/inference/rejection-filter.qmd` is written, registered (render script, render list, navbar,
 sidebar, references, roadmap) and rendered; the code is #94, the page #95. The first render took
 43 minutes (200 parameter sets topped up to 10 replicates; 3,935 `job_runs`); a warm re-render takes
@@ -610,6 +734,9 @@ about 80 s and runs nothing.
 - The page says plainly that this is not a posterior, and points to PR 5 for P(passes | S_obs).
 
 ### PR 5: status (posterior probability of a model property, test (1)'s post-hoc check)
+
+**Superseded Oct 27:** rebuilt on the fire model. The record below is the first-model version;
+its lessons (the rule of three, controls, the top-up, two readings of the probability) carry over.
 
 `docs/inference/posterior-property.qmd` is written, registered (render script, render list, navbar,
 sidebar, references, roadmap) and rendered; the rejection-filter page now links to it. The first

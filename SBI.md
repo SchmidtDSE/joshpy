@@ -4,6 +4,23 @@ Oct 13, 2026 · @nick
 
 We map which parameter sets let Joshua trees replace themselves, then check which of those also reproduce today's surveyed stands. Every run is scored on both checks and stored, so the result is four groups of parameter sets, not one best fit. The method is plain filter-and-refine sampling in joshpy, proved first on the grass–shrub model.
 
+> **Update, Oct 25, 2026:** the fit and the replacement question are now two separate tests, not one
+> search with two checks. (1) Fit the I&M patterns with SMC-ABC, and check replacement post hoc on
+> the fitted parameter sets. (2) Only if no fitted set replaces, ask what replacement would take.
+> See "Joshua tree design" in [SBI_IMPLEMENTATION.md](SBI_IMPLEMENTATION.md). The "One run, two
+> checks" and "The search: filter in waves" sections below describe the earlier design.
+>
+> **Update, Oct 26, 2026:** (2) is its own SMC-ABC fit to an idealized stability target, run from
+> the prior whether or not (1) fits. The grass–shrub pilot is dropped: the 1,000-step run
+> (workplan step 2) is stable at every damage setting, so a second ForeverTree model with births,
+> deaths, fuel and fire takes its place.
+>
+> **Update, Oct 27, 2026:** (1)'s post-hoc check is a projection. Fit the present (the surveys'
+> juvenile:adult ratios among the patterns), then project under future climates, and ask how
+> probable it is that the projected ratio stays above a target fixed beforehand. The ForeverTree
+> demonstration does this on the second model, with three synthetic futures (`normal`, `hot_dry`,
+> `cool_wet`); see "Rebuild of PR 4 and PR 5" in SBI_IMPLEMENTATION.md.
+
 ## At a glance
 
 &#91;embedded content: One wave · two checks, four outcome groups\]
