@@ -48,7 +48,7 @@ from typing import Any
 
 import pandas as pd
 
-from joshpy.cell_data import CellDataLoader, DiagnosticQueries
+from joshpy.cell_data import CellDataLoader, DiagnosticQueries, parse_output_steps
 from joshpy.cli import ExportPaths, InspectExportsConfig, JoshCLI, StageFromMinioConfig
 from joshpy.jobs import (
     ExpandedJob,
@@ -737,6 +737,7 @@ def load_job_results(
     if not path_template:
         return 0
     loader = CellDataLoader(registry)
+    steps = parse_output_steps(job.output_steps)
     total_rows = 0
     simulation = job.simulation
     # Skip replicate indices already loaded (idempotent re-ingest). Local JAR
@@ -779,6 +780,7 @@ def load_job_results(
                     csv_path=csv_path,
                     run_id=run_id,
                     run_hash=job.run_hash,
+                    steps=steps,
                 )
                 total_rows += rows
                 if not quiet:
@@ -834,6 +836,7 @@ def _load_job_results_minio(
         total_replicates=job.replicates,
         label=job.label,
         custom_tags=dict(job.custom_tags),
+        output_steps=job.output_steps,
     )
 
     candidate = list_output_replicates(
@@ -1017,6 +1020,7 @@ class _IngestMetadata:
     total_replicates: int
     label: str | None
     custom_tags: dict[str, str] | None = None
+    output_steps: str | None = None  # the steps to load; None loads every step
 
 
 def _resolve_ingest_metadata(
@@ -1052,10 +1056,11 @@ def _resolve_ingest_metadata(
         print(f"Ingesting results for {run_hash}{label_str}")
         print(f"  Simulation: {simulation}, Replicates: {total_replicates}")
 
-    # The custom tags the latest execution ran with: export paths may use them
-    # ({exportPrefix}), and they are not part of run_hash, so only the run knows.
+    # The custom tags and output steps the latest execution ran with: export
+    # paths may use the tags ({exportPrefix}), and on a batch target only the
+    # output steps are loaded. Neither is part of run_hash, so only the run knows.
     latest = registry.get_runs_for_hash(run_hash)
-    custom_tags = (latest[-1].metadata or {}).get("custom_tags") if latest else None
+    run_metadata = (latest[-1].metadata or {}) if latest else {}
 
     return _IngestMetadata(
         run_hash=run_hash,
@@ -1063,7 +1068,8 @@ def _resolve_ingest_metadata(
         simulation=simulation,
         total_replicates=total_replicates,
         label=config.label,
-        custom_tags=custom_tags,
+        custom_tags=run_metadata.get("custom_tags"),
+        output_steps=run_metadata.get("output_steps"),
     )
 
 
@@ -1173,9 +1179,12 @@ def _load_ingest_replicates(
     storage, e.g. from :func:`list_output_replicates`) when provided, else falls
     back to ``range(meta.total_replicates)``. Replicate indices already loaded
     for this run_hash are skipped, so re-ingesting is idempotent (the replicate
-    index is the dedup identity).
+    index is the dedup identity). Only ``meta.output_steps`` are loaded:
+    ``batchRemote`` takes no ``--output-steps``, so a batch target's CSVs hold
+    every step.
     """
     loader = CellDataLoader(registry)
+    steps = parse_output_steps(meta.output_steps)
     total_rows = 0
     loaded = 0
     skipped = 0
@@ -1230,6 +1239,7 @@ def _load_ingest_replicates(
                 run_id=run_id,
                 run_hash=meta.run_hash,
                 entity_type=export_type,
+                steps=steps,
             )
             total_rows += rows
             loaded += 1

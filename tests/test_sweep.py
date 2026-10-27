@@ -1356,6 +1356,42 @@ class TestIngestResults(unittest.TestCase):
         registry.close()
 
     @patch("joshpy.sweep.CellDataLoader")
+    def test_loads_only_the_runs_output_steps(self, mock_loader_cls):
+        """A batch target writes every step; ingest loads the run's output_steps."""
+        from joshpy.cli import ExportFileInfo, ExportPaths
+        from joshpy.sweep import ingest_results
+
+        registry, session_id, _ = self._make_registry_with_run(replicates=1)
+        latest = registry.start_run(
+            "abc123def456", session_id=session_id,
+            metadata={"replicates": 1, "output_steps": "209,240-241"},
+        )
+        registry.complete_run(latest, exit_code=0)
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 1
+        mock_loader_cls.return_value = mock_loader
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = f"{tmpdir}/out_{{run_hash}}_{{replicate}}.csv"
+            mock_cli = MagicMock()
+            mock_cli.inspect_exports.return_value = ExportPaths(
+                simulation="Main",
+                export_files={
+                    "patch": ExportFileInfo(
+                        raw=f"file://{template}", protocol="file", host="", path=template,
+                        file_type="csv",
+                    ),
+                },
+                debug_files={},
+            )
+            Path(f"{tmpdir}/out_abc123def456_0.csv").write_text("step,replicate\n0,0\n")
+
+            ingest_results(mock_cli, registry, "abc123def456", quiet=True)
+
+        self.assertEqual(mock_loader.load_csv.call_args.kwargs["steps"], [209, 240, 241])
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
     def test_missing_replicate_skipped(self, mock_loader_cls):
         """Missing CSVs should be skipped gracefully."""
         from joshpy.sweep import ingest_results
@@ -2034,6 +2070,26 @@ class TestLoadJobResultsMinioRouting(unittest.TestCase):
 
             self.assertEqual(rows, 99)
             mock_minio.assert_called_once()
+
+    @patch("joshpy.sweep._load_ingest_replicates", return_value=0)
+    @patch("joshpy.sweep.list_output_replicates", return_value={0, 1})
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    def test_minio_loader_loads_the_jobs_output_steps(self, _access, _listed, mock_load):
+        """batchRemote takes no --output-steps, so the per-job loader applies them."""
+        from dataclasses import replace
+
+        from joshpy.sweep import _load_job_results_minio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = replace(self._make_job(src), output_steps="209,240-249")
+            _load_job_results_minio(
+                MagicMock(), MagicMock(), job, MagicMock(), MagicMock(path="out_{replicate}.csv"),
+                "run-1", "patch", True,
+            )
+
+        self.assertEqual(mock_load.call_args.kwargs["meta"].output_steps, "209,240-249")
 
     @patch("joshpy.sweep._load_job_results_minio")
     def test_file_protocol_uses_local_path(self, mock_minio):

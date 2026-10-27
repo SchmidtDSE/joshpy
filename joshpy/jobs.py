@@ -54,6 +54,7 @@ import itertools
 import re
 import shutil
 import tempfile
+import warnings
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -817,8 +818,13 @@ class JobConfig:
             never for anything that changes the simulation. Keep the scheme
             (``file://``, ``minio://``) literal: Josh's ``inspect-exports``,
             which joshpy uses to find outputs, can't resolve a tag there.
-        output_steps: Step range to output (e.g., "0-10,50,100").
-        seed: Random seed for reproducibility.
+        output_steps: Step range to output (e.g., "0-10,50,100"). A local run
+            writes only these steps (``--output-steps``). ``batchRemote`` takes
+            no ``--output-steps``, so on a batch target Josh writes every step
+            and joshpy loads only these into the registry.
+        seed: Random seed for reproducibility. Part of ``run_hash``.
+            ``batchRemote`` takes no ``--seed``: on a batch target the run is
+            unseeded (``run_sweep`` warns), and only the registry reproduces it.
         crs: Coordinate reference system.
         use_float64: Use double precision instead of BigDecimal.
 
@@ -2339,6 +2345,15 @@ def run_sweep(
         _stage_prefix_root = f"sweeps/{session_id or 'adhoc'}/"
         assert target is not None  # validated above
         _stage_endpoint, _stage_bucket = _staging_location(target)
+        seeds = sorted({job.seed for job in job_set if job.seed is not None})
+        if seeds:
+            warnings.warn(
+                f"batchRemote takes no --seed: jobs seeded {seeds} run unseeded on target "
+                f"{target!r}. The seed is still part of their run_hash, so the registry, "
+                "not the seed, reproduces them.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _finish_job(
         i: int,

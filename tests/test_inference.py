@@ -375,6 +375,26 @@ class TestKnownTruthStudyRuns(unittest.TestCase):
         table = loaded.posterior(result)
         self.assertEqual(list(table.index), ["growth", "precip"])
 
+    def test_search_records_a_named_batch_policy(self):
+        """A target's search used "measured"; naming it replays that search locally."""
+        loaded = self.study.load(self.registry, self.cli, n_prior=20)
+        settings = {
+            "num_initial_pop": 20,
+            "num_particles": 10,
+            "num_simulations": 60,
+            "epsilon_decay": 0.5,
+        }
+        _, exact = loaded.search(self.registry, self.cli, "smcabc", settings, "toy_exact")
+        _, measured = loaded.search(
+            self.registry, self.cli, "smcabc", settings, "toy_measured", batch_policy="measured"
+        )
+        policies = {
+            session_id: self.registry.get_session(session_id).metadata["sbi"].get("batch_policy")
+            for session_id in (exact, measured)
+        }
+        self.assertIsNone(policies[exact])  # local default: "exact", not recorded
+        self.assertEqual(policies[measured]["policy"], "measured")
+
     def test_filter_prior_tops_up_the_prior_simulations(self):
         loaded = self.study.load(self.registry, self.cli, n_prior=20)
         hashes = list(loaded.reference["run_hash"])

@@ -363,6 +363,7 @@ class KnownTruthStudy:
         method: str,
         method_kwargs: Mapping[str, Any],
         experiment: str,
+        batch_policy: str | None = None,
     ) -> tuple[SbiResult, str]:
         """Run sbi with joshpy as the simulator; returns ``(SbiResult, session_id)``.
 
@@ -379,6 +380,11 @@ class KnownTruthStudy:
             method: ``"smcabc"`` or ``"mcabc"``.
             method_kwargs: Passed through to sbi.
             experiment: Experiment name of the session.
+            batch_policy: SMC-ABC's batch policy
+                (:class:`~joshpy.strategies.SbiStrategy`). ``None`` chooses by
+                dispatch: ``"measured"`` on the study's ``target``, ``"exact"``
+                locally. The policy changes what is proposed, so name it to
+                replay a target's search locally.
         """
         strategy = SbiStrategy(
             prior=self.prior,
@@ -388,6 +394,7 @@ class KnownTruthStudy:
             method_kwargs=dict(method_kwargs),
             distance="l2",
             seed=self.sbi_seed,
+            batch_policy=batch_policy,
         )
         manager = self._manager(
             replace(self.model, sweep=SweepConfig(strategy=strategy)), registry, cli, experiment
@@ -647,6 +654,7 @@ class LoadedStudy:
         method_kwargs: Mapping[str, Any],
         experiment: str,
         names: list[str] | None = None,
+        batch_policy: str | None = None,
     ) -> tuple[SbiResult, str]:
         """Search for the truth with sbi on z-scored statistics; returns ``(SbiResult, session_id)``.
 
@@ -654,7 +662,7 @@ class LoadedStudy:
         """
         summaries, observed = self.abc_target(names)
         return self.study.search(
-            registry, cli, summaries, observed, method, method_kwargs, experiment
+            registry, cli, summaries, observed, method, method_kwargs, experiment, batch_policy
         )
 
     def posterior(self, result: SbiResult, level: float = 0.9) -> pd.DataFrame:

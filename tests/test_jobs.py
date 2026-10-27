@@ -2715,6 +2715,38 @@ class TestRunSweepBatchRemote(unittest.TestCase):
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
 
+    def test_seeded_jobs_warn_that_batch_remote_takes_no_seed(self):
+        """batchRemote has no --seed, so a seeded job runs unseeded on the target."""
+        import warnings
+        from dataclasses import replace
+
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+        mock_cli.batch_remote.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+
+        def dispatch(job):
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            run_sweep(
+                mock_cli, job_set, batch_remote=True, target="gke-test", session_id="s1",
+                quiet=True,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            job = self._make_real_job(Path(tmp_str))
+            with self.assertWarnsRegex(UserWarning, r"no --seed: jobs seeded \[3\]"):
+                dispatch(replace(job, seed=3))
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                dispatch(job)  # unseeded: nothing to warn about
+
+        self.assertNotIn("--seed", " ".join(map(str, mock_cli.batch_remote.call_args.args)))
+
     def _stage_config_for(self, target: str, targets_dir: Path, env: dict[str, str]):
         """Run one blocking batch job against *target* and return its StageToMinioConfig."""
         import os
