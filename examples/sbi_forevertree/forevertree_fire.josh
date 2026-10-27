@@ -1,8 +1,10 @@
 # ForeverTree with births, deaths, fuel and fire: the second ForeverTree model.
 #
 # Trees grow as in forevertree.josh. They also die (a yearly chance, higher for
-# juveniles in dry years, and in fires), and mature trees recruit new ones in
-# wet years, up to a patch's capacity. Fuel is a cover % that grows in wet years
+# juveniles in dry years, and in fires), and adults recruit new trees in wet
+# years, up to a patch's capacity. A tree is an adult from maturityAge years of
+# age, whatever its height, so the juvenile:adult ratio tracks recruitment and
+# survival rather than how fast trees grow. Fuel is a cover % that grows in wet years
 # and burns. Each patch is simulated on its own: fire does not spread.
 #
 # The run has three parts, on the synthetic climate in climate/ (see
@@ -73,7 +75,7 @@ start simulation Main
   # Demography
   initialTrees.init = config forevertreeFire.initialTrees
   maxTrees.init = config forevertreeFire.maxTrees
-  maturityHeight.init = config forevertreeFire.maturityHeight
+  maturityAge.init = config forevertreeFire.maturityAge
   recruitment.init = config forevertreeFire.recruitment
   adultMortality.init = config forevertreeFire.adultMortality
   juvenileMortality.init = config forevertreeFire.juvenileMortality
@@ -108,7 +110,7 @@ start patch Default
   # Deaths: remove last year's dead trees first.
   ForeverTree.start = prior.ForeverTree[prior.ForeverTree.dead == false]
   nTrees.start = count(ForeverTree)
-  nAdults.start = count(ForeverTree[ForeverTree.height >= meta.maturityHeight])
+  nAdults.start = count(ForeverTree[ForeverTree.age >= meta.maturityAge])
 
   # Fire: scheduled every fireInterval years from step firstFire, or with a
   # yearly chance proportional to last year's fuel (fireChance at full cover).
@@ -156,6 +158,8 @@ end patch
 start organism ForeverTree
 
   dead.init = false
+  age.init = 0 year
+  age.step = prior.age + 1 year
 
   height.init = 0 m  # the run starts from seedlings
 
@@ -186,10 +190,10 @@ start organism ForeverTree
 
   height.step = prior.height + newGrowth
 
-  # Death. Juveniles (below maturityHeight) die more often, and more in dry
+  # Death. Juveniles (younger than maturityAge) die more often, and more in dry
   # years. In a fire, juveniles die with a chance equal to the fire's
   # intensity (the fuel that burned), adults with adultFireMortality of it.
-  isJuvenile.step = height < meta.maturityHeight
+  isJuvenile.step = age < meta.maturityAge
   deathChance.step =
     meta.juvenileMortality + here.dryness * meta.droughtMortality / 100%
     if isJuvenile else meta.adultMortality
@@ -213,5 +217,11 @@ start unit K
 
   alias Kelvin
   alias Kelvins
+
+end unit
+
+start unit year
+
+  alias years
 
 end unit

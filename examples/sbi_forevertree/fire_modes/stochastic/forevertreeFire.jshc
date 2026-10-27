@@ -23,8 +23,8 @@ minPrecipImpactPct = 40 %
 initialTrees = 10 count
 # Most trees a patch holds; recruitment falls to zero as a patch fills.
 maxTrees = 40 count
-# Height at which a tree is an adult: it recruits, and survives better.
-maturityHeight = 5 m
+# Age at which a tree is an adult, whatever its height: it recruits, and survives better.
+maturityAge = 8 years
 # Chance that an adult recruits one tree, in a wet year (500 mm or more) in an empty patch.
 recruitment = 50 %
 # Chance that an adult dies.

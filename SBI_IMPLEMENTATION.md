@@ -316,15 +316,50 @@ drafts. `final_window_gain` leaves `forevertree_case.py`.
 
 A 100-year spin-up, fewer filter draws or a smaller grid would cut it.
 
+**The synthetic climate landed (Oct 27)** in `examples/sbi_forevertree/climate/`, generated outside
+this repo (`data/generate_fire_climate.py`; each NetCDF records its seed). It matches the spec:
+- **Historical (30 years):**
+  - rain falls 546 → 234 mm west to east, and 60% of cells sit in the 300–500 mm response range;
+  - year-to-year CV is about 10%, 59% of it shared across the landscape;
+  - temperature is 294–306 K by cell.
+- **Futures (40 years each):** by the last decade, `hot_dry` has −26% rain and +1.8 K, and
+  `cool_wet` +16% rain and −0.9 K; `normal` stays within ±5%.
+
+`preprocess_climate.py` writes the committed `.jshd` files. The model's timeline is in place:
+spin-up, present, projection. A fit run (`projectionYears = 0`) needs no future files. A run takes
+about 16 s locally; 3 futures × 10 replicates took one cluster round of about 215 s.
+
+**Decided Oct 27: maturity is by age (`maturityAge`, default 8 years), as in the JOTR model.**
+Projecting the truth with height-based maturity (adult from 5 m), 10 replicates per future:
+
+| Future | Ratio, last 10 projected years | Adult λ per year |
+|---|---|---|
+| `cool_wet` | 0.244 ± 0.022 | 1.003 |
+| `normal` | 0.257 ± 0.015 | 0.998 |
+| `hot_dry` | 0.215 ± 0.016 | 0.990 |
+
+The ratio put `cool_wet` below `normal` though its adults grew. Wet years speed growth, so juveniles
+reach adult height sooner, emptying the juvenile class as recruitment rises. A height-based stage
+ratio mixes recruitment with growth speed. With maturity by age, on `gke-test`:
+
+| Future | Ratio at the survey | Ratio, last 10 projected years | Adult λ per year |
+|---|---|---|---|
+| `cool_wet` | 0.47 ± 0.05 | 0.458 ± 0.049 (0.39–0.54) | 1.004 |
+| `normal` | 0.48 ± 0.06 | 0.393 ± 0.031 (0.35–0.44) | 1.000 |
+| `hot_dry` | 0.45 ± 0.06 | 0.200 ± 0.025 (0.16–0.23) | 0.994 |
+
+The ratio ranks the futures as the adult trend does. Heat (open item 2 below) no longer touches the
+ratio: temperature only changes growth, and growth no longer sets maturity.
+
 **Open (for the user):**
-1. **The target's value.** Proposed: fix it once the data exist and before the fit. Place it so the
-   truth's projected ratio sits above it under `normal` and below it under `hot_dry`, and state it
-   on the page as the management target.
-2. **Heat in the ratio.** In this model, temperature changes only growth. Heat slows growth, so
-   juveniles take longer to mature and the ratio rises even as drought kills more of them:
-   `hot_dry` pulls the ratio both ways. Either add heat to juvenile mortality (one more direct
-   parameter), or keep it and show the ratio as a misleading indicator.
-3. **The climate magnitudes and lengths** proposed above.
+1. **The target's value.**
+   - Proposed: **0.30 juveniles per adult**, averaged over the last 10 projected years.
+   - It sits midway between `hot_dry`'s highest replicate (0.231) and `normal`'s lowest (0.352).
+   - Any target from 0.24 to 0.35 passes all 10 of the truth's replicates under `normal` and
+     `cool_wet`, and none under `hot_dry`.
+   - Fix it before the fit, and state it on the page as the management target.
+2. ~~Heat in the ratio~~: moot with maturity by age.
+3. ~~The climate magnitudes and lengths~~: set by the data.
 4. **Detection error in the survey** (juveniles are easy to miss), or exact counts.
 
 ### #90 review (Oct 21)
@@ -525,6 +560,7 @@ precipitation from 300 mm (d = 1) to 500 mm (d = 0), clamped):
   [`maturityHeight`]) dies with chance [`juvenileMortality`] + d × [`droughtMortality`], an adult
   with [`adultMortality`]. In a fire, a juvenile dies with chance equal to the fuel cover that
   burned, and an adult with [`adultFireMortality`] × that cover.
+- **Maturity (Oct 27): by age**, adult from [`maturityAge`] years (was height, [`maturityHeight`]).
 - **Births:** recruits ~ Binomial(adults, [`recruitment`] × (1 − d) × (1 − trees / [`maxTrees`])),
   created at 0 m in `.end`. The run starts from [`initialTrees`] seedlings per patch.
 - **Fuel**, a cover fraction: fuel ← fuel + [`fuelGrowth`] × (1 − d) × (1 − fuel); 0 after a fire.
