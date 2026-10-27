@@ -177,7 +177,8 @@ These findings apply to every page and experiment.
 
 ### Where things stand (Oct 27)
 
-Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94 → #95 → #96 ("SBI stack n/11").
+Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94 → #97 → #95 → #96 ("SBI stack
+n/12"). #95 and #96 still sit on #94 until their rebuild moves them onto #97.
 
 | PR | Branch | Status |
 |----|--------|--------|
@@ -190,6 +191,7 @@ Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94
 | #94 | `feat/inference-property-filter` | Open. `PropertyFilter` and `KnownTruthStudy.filter_prior`; a replicate top-up no longer waits for files the earlier run never wrote; `to_dataframe()` gives the rendered parameter values |
 | #95 (PR 4) | `docs/inference-rejection-filter` | **Draft, to be rebuilt** on the fire model (Oct 27, "Rebuild of PR 4 and PR 5") |
 | #96 (PR 5) | `docs/inference-posterior-property` | **Draft, to be rebuilt** on the fire model (Oct 27) |
+| #97 | `feat/inference-batch-remote` | Open. Known-truth studies on a batch target, `run_at_each`, `ParameterSetsStrategy`, `JobConfig.custom_tags`, the SMC-ABC batch policy, and two batch fixes (staging bucket; no-wait job id). Tested on `gke-test` |
 | — | `feat/forevertree-fire-model` | Pushed, no PR. The second ForeverTree model and this plan; moves below #95 in the rebuild |
 
 ### Next phase: readiness (Oct 27)
@@ -198,12 +200,12 @@ Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94
 |------|--------|-------|
 | Rebuild of PR 4 and PR 5 on the fire model | **Waits on the synthetic climate** | Decided Oct 27 (next section); the data are generated outside this repo |
 | `csv_precision` passthrough; `use_float64` in `run_hash` | **Ready** | Small code PR ("Josh CSV export bug") |
-| SMC-ABC batch policy | **Ready** | Design settled ("SMC-ABC batch policy"); names are the open choice |
+| SMC-ABC batch policy | **Done** (#97) | `SbiStrategy(batch_policy="exact" \| "measured")`, defaulting by dispatch mode |
 | Second ForeverTree model | **Drafted**; timeline and climate to revise | Spin-up → survey → projection on the synthetic climate (Oct 27) |
 | Parameter declarations (direct vs inverse) | Direction agreed | API to draft; the second model is its first user |
 | Field data (a study without a truth run) | Ready, small | Needed for Joshua tree, not for ForeverTree |
 | Test (2) as SMC-ABC on a stability target | Waits | The rebuilt #95 is its rejection version; the target is the projected ratio |
-| Pilot on the cluster | **Cluster reachable** (Oct 27 smoke test) | Runs the rebuild; needs the toolkit PR below and the batch policy. The CSV bug doesn't touch the fire model's counts |
+| Pilot on the cluster | **Toolkit ready** (#97, tested on `gke-test`) | The rebuild is the pilot. Open: the credentials Secret each dispatch leaves behind. The CSV bug doesn't touch the fire model's counts |
 | Cleanup (Optuna, spin-up) | Parked | Wholesale, once SBI is stable |
 
 Nothing in the stack has merged yet, so new code PRs stack on #96 unless the lower PRs merge first.
@@ -271,6 +273,8 @@ writes NetCDF with `scipy.io.netcdf_file` and preprocesses it with `NetcdfPrepro
   three projections.
 - To verify first: that a fit run (no projection years) needs no future files mapped, since its
   future lookups never evaluate.
+- Exports go to `minio://josh-batch-storage/{exportPrefix}/…_{run_hash}_{replicate}.csv`, with
+  the prefix in `JobConfig.custom_tags` (the scheme must be literal; "Execution on Kubernetes").
 
 **Survey and statistics (proposed):** stage counts (juveniles, adults) at about 10 fixed sites
 spread along the rain gradient within the occupied range, in the last survey year. Statistics:
@@ -298,7 +302,8 @@ juveniles at the dry sites.
    target. The Oct 26 review's framing (biological names, a manager's reading, two readings of
    the probability) carries over.
 
-**Stack:** `#94 → model and case-module code (new PR) → page 1 (new PR) → #95 → #96`. The model
+**Stack:** `#94 → #97 (toolkit) → model and case-module code (new PR) → page 1 (new PR) → #95 →
+#96`. The model
 branch moves below #95, and #95 and #96 are force-pushed with their rebuilt content; both stay
 drafts. `final_window_gain` leaves `forevertree_case.py`.
 
@@ -904,23 +909,40 @@ tree posterior needs it; it would also serve the posterior predictive check on t
     `MINIO_BUCKET` from the profile instead.
   - **Josh: the per-job credentials Secret is left behind.** The service account can create and
     delete Secrets in `joshsim` but not get or list them. Josh's cleanup reads the Secret first, is
-    refused (a warning in stderr), and leaves `josh-creds-<id>` holding the MinIO keys. A
-    server-side dry-run delete shows it still exists after the Job completed. Unknown: whether an
-    owner reference removes it when the Job's TTL (1 hour) does. Fix in Josh (delete without the
-    read) or in RBAC (grant `get`).
-  - **Exports must be `minio://` on the cluster, and `file://` locally.** A custom tag can hold the
-    root (`exportFiles.patch = "{exportRoot}/…_{run_hash}_{replicate}.csv"`; checked locally with
-    `file:///tmp`). Custom tags aren't in `run_hash`, so a run made on the cluster replays locally
-    from the registry.
+    refused, and says so in stderr: "The Secret holds object-store credentials and will not be
+    garbage collected — delete it manually." Every dispatch leaves one `josh-creds-<job id>` holding
+    the MinIO keys (about 40 from the Oct 27 tests). Fix in RBAC (grant `get` on Secrets) or in
+    Josh (delete without the read).
+  - **Exports must be `minio://` on the cluster.** A custom tag can't switch the scheme: Josh's
+    `inspect-exports`, which joshpy uses to find outputs, rejects
+    `"{exportRoot}/…"` ("Unsupported target scheme: null"), and it takes no tags. A tag after the
+    scheme works (`minio://josh-batch-storage/{exportPrefix}/…`; checked locally with `file://`), and
+    isn't in `run_hash`. So the fire model exports to `minio://` everywhere, and local runs write
+    there too (they need the MinIO keys, which `.env` has).
 - **Implication for SMC-ABC:** at about 2 minutes of overhead per round, sbi's own loop (about 70
   rounds for PR 3's search) would take over 2 hours of round trips. The `measured` batch policy
   (about 10 rounds) is what makes the cluster worth it. Warm nodes with the image cached may start
   faster; the pilot should measure.
 
-**For the rebuild, the toolkit PR needs:** the staging fix; a dispatch target through
-`KnownTruthStudy` (`load`, `search`, `filter_prior`, `run_at`); a batched `run_at` (many
-parameter sets, one session, one dispatch) for the projections; the export root as a custom tag;
-and the batch policy.
+**The toolkit for the rebuild is #97 (Oct 27):**
+- **Contents:**
+  - `KnownTruthStudy(target=...)`, so every session dispatches its batches together;
+  - `run_at_each`, the batched `run_at`, topping up with `pool`;
+  - `ParameterSetsStrategy`;
+  - `JobConfig.custom_tags`;
+  - the batch policy;
+  - the staging fix.
+- **Found while testing it: every real no-wait dispatch was recorded as completed.**
+  - `batchRemote --no-wait` prints progress lines before its JSON. `run_sweep` parsed all of stdout
+    as JSON, failed, and fell through as a success, hidden under `quiet`. The fake CLI in the unit
+    tests printed pure JSON.
+  - Now: the last JSON line, read only after a real dispatch; without a job id, a failure.
+- **On `gke-test`** (the first model, `minio://` export):
+  - `load` took 158 s (truth, then 12 prior draws as one batch);
+  - the search took 199 s ("measured"; generation 1 in 2 rounds);
+  - the top-up of 6 particles to 3 replicates took 74 s, each Job 2 completions (`pool`);
+  - a local replay of `load` and the top-up ran nothing.
+  - About 75 s a round, mostly pod start-up.
 
 
 - **Current mapping:** one parameter set → one `batchRemote` → one indexed Job, with completions
