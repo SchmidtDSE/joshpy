@@ -2,7 +2,9 @@
 
 This module defines the strategy pattern for parameter sweep expansion:
 - `CartesianStrategy`: Full cartesian product of all parameters (default)
+- `ParameterSetsStrategy`: Exactly the parameter sets listed, as one batch
 - `OptunaStrategy`: Bayesian optimization using Optuna (requires [adaptive] extra)
+- `SbiStrategy`: Approximate Bayesian computation with sbi (requires [sbi] extra)
 
 The strategy pattern enables different approaches to parameter space exploration
 without changing the SweepConfig interface.
@@ -658,6 +660,66 @@ def _callable_name(fn: Any) -> str:
     module_name = getattr(fn, "__module__", None) or type(fn).__module__
     qualname = getattr(fn, "__qualname__", None) or f"{type(fn).__qualname__} instance"
     return f"{module_name}:{qualname}"
+
+
+@register_strategy("parameter_sets")
+@dataclass
+class ParameterSetsStrategy(SweepStrategy):
+    """Run exactly the parameter sets listed, as one batch.
+
+    A sweep crosses its parameters' values; this runs the sets given, as
+    :meth:`AdaptiveContext.evaluate` runs one batch. Runs the registry already
+    holds with every replicate are reused, the rest run together (on a batch
+    target with ``batch_no_wait=True``: dispatched together, then polled), and
+    every run is loaded. Each run's parameters are recorded as given, so a set
+    taken from an earlier search reproduces that search's ``run_hash``.
+
+    Attributes:
+        sets: One ``{parameter: value}`` dict per run.
+
+    Example:
+        SweepConfig(strategy=ParameterSetsStrategy(sets=[{"a": 1.0, "b": 2.0}, {"a": 1.5, "b": 2.0}]))
+    """
+
+    sets: list[dict[str, Any]]
+
+    def __post_init__(self) -> None:
+        if not self.sets:
+            raise ValueError("sets must list at least one parameter set")
+
+    @property
+    def is_adaptive(self) -> bool:
+        return True  # runs through AdaptiveContext.evaluate, which reuses and batches runs
+
+    def expand(
+        self,
+        config_params: list[ConfigSweepParameter],
+        file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        raise NotImplementedError(
+            "ParameterSetsStrategy runs as one batch through SweepManager.run()"
+        )
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> Any:
+        """Evaluate every set as one batch."""
+        from joshpy.jobs import AdaptiveSweepResult
+
+        ctx.evaluate(self.sets)
+        return AdaptiveSweepResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": "parameter_sets", "sets": [dict(row) for row in self.sets]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ParameterSetsStrategy:
+        return cls(sets=[dict(row) for row in data["sets"]])
 
 
 @register_strategy("optuna")

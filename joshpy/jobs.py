@@ -774,6 +774,11 @@ class SweepConfig:
         )
 
 
+# Tag names joshpy sets on every job (run_hash, label) or Josh resolves itself in
+# export paths ({replicate}, {step}, {timestamp}, {variable}).
+_RESERVED_CUSTOM_TAGS = frozenset({"run_hash", "label", "replicate", "step", "timestamp", "variable"})
+
+
 @dataclass
 class JobConfig:
     """Configuration for a job (may be template for expansion).
@@ -805,6 +810,10 @@ class JobConfig:
         upload_source_path: Template for uploading source files.
         upload_config_path: Template for uploading config files.
         upload_data_path: Template for uploading data files.
+        custom_tags: Static ``--custom-tag name=value`` pairs for every job,
+            for export path templates such as ``{exportRoot}``. They are not
+            part of ``run_hash``: use them for where outputs go, never for
+            anything that changes the simulation.
         output_steps: Step range to output (e.g., "0-10,50,100").
         seed: Random seed for reproducibility.
         crs: Coordinate reference system.
@@ -867,6 +876,9 @@ class JobConfig:
     # bad if it fails or if you later mark it bad. See REGISTRY_PROVENANCE.md.
     attributes: dict[str, Any] = field(default_factory=dict)
 
+    # Static custom tags (see the docstring). Not part of run_hash.
+    custom_tags: dict[str, str] = field(default_factory=dict)
+
     # Additional CLI options
     output_steps: str | None = None
     seed: int | None = None
@@ -891,6 +903,12 @@ class JobConfig:
         if self.import_files and self.source_path is None and self.source_template_path is None:
             raise ValueError(
                 "import_files requires an entry model (source_path or source_template_path)"
+            )
+
+        reserved = sorted(set(self.custom_tags) & _RESERVED_CUSTOM_TAGS)
+        if reserved:
+            raise ValueError(
+                f"custom_tags may not set {reserved}: joshpy or Josh sets these itself"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -939,6 +957,8 @@ class JobConfig:
             result["use_float64"] = self.use_float64
         if self.attributes:
             result["attributes"] = self.attributes
+        if self.custom_tags:
+            result["custom_tags"] = dict(self.custom_tags)
 
         return result
 
@@ -987,6 +1007,8 @@ class JobConfig:
             kwargs["use_float64"] = data["use_float64"]
         if "attributes" in data:
             kwargs["attributes"] = data["attributes"]
+        if "custom_tags" in data:
+            kwargs["custom_tags"] = dict(data["custom_tags"])
 
         return cls(**kwargs)
 
@@ -1457,6 +1479,14 @@ class JobExpander:
             for k, v in config_params.items():
                 if str(k) not in custom_tags:  # don't overwrite file param tags
                     custom_tags[str(k)] = str(v)
+
+            # Static tags, such as where outputs go. Not part of run_hash.
+            clashing = sorted(set(config.custom_tags) & set(custom_tags))
+            if clashing:
+                raise ValueError(
+                    f"custom_tags {clashing} clash with sweep parameters of the same name"
+                )
+            custom_tags.update({str(k): str(v) for k, v in config.custom_tags.items()})
 
             # Compute run_hash (includes josh + config + file_mappings + seed)
             run_hash = _compute_run_hash(
@@ -2067,6 +2097,26 @@ def poll_batch_jobs(
             time.sleep(poll_interval)
 
 
+def _staging_location(target: str) -> tuple[str | None, str | None]:
+    """The MinIO endpoint and bucket to stage a batch job's inputs to, for *target*.
+
+    ``batchRemote`` reads the target profile itself, but ``stageToMinio`` takes
+    no target: given no endpoint or bucket, Josh falls back to the
+    ``MINIO_ENDPOINT`` and ``MINIO_BUCKET`` environment variables alone. So
+    stage where the profile says (profile field, then environment variable, as
+    :func:`~joshpy.targets.resolve_minio_creds` resolves them). The keys stay
+    in the environment, off the command line.
+    """
+    from joshpy.targets import load_target, resolve_minio_creds
+
+    try:
+        profile = load_target(target)
+    except FileNotFoundError:  # Josh reports a missing profile when it dispatches
+        profile = None
+    creds = resolve_minio_creds(profile)
+    return creds.endpoint, creds.bucket
+
+
 def run_sweep(
     cli: JoshCLI,
     job_set: JobSet,
@@ -2256,6 +2306,8 @@ def run_sweep(
     # subdir per ExpandedJob. Cleaned up in the finally below.
     sweep_workdir: Path | None = None
     _stage_prefix_root: str | None = None
+    _stage_endpoint: str | None = None
+    _stage_bucket: str | None = None
     if batch_remote:
         import tempfile
 
@@ -2263,6 +2315,8 @@ def run_sweep(
             tempfile.mkdtemp(prefix=f"joshpy-sweep-{session_id or 'adhoc'}-")
         )
         _stage_prefix_root = f"sweeps/{session_id or 'adhoc'}/"
+        assert target is not None  # validated above
+        _stage_endpoint, _stage_bucket = _staging_location(target)
 
     def _finish_job(
         i: int,
@@ -2493,7 +2547,12 @@ def run_sweep(
 
                 job_dir = assemble_batch_workdir(job, sweep_workdir)
                 stage_result = cli.stage_to_minio(
-                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
+                    StageToMinioConfig(
+                        input_dir=job_dir,
+                        prefix=per_job_prefix,
+                        minio_endpoint=_stage_endpoint,
+                        minio_bucket=_stage_bucket,
+                    ),
                 )
                 if not stage_result.success:
                     result = stage_result

@@ -410,6 +410,83 @@ class TestKnownTruthStudyRuns(unittest.TestCase):
         self.assertEqual(self.cli.run.call_count, runs + 20)
         pd.testing.assert_frame_equal(again, table)
 
+    def sessions(self, experiment):
+        return self.registry.conn.execute(
+            "SELECT COUNT(*) FROM sweep_sessions WHERE experiment_name = ?", [experiment]
+        ).fetchone()[0]
+
+    def test_run_at_each_runs_the_sets_as_one_batch(self):
+        sets = [
+            {"growth": 1.0, "precip": 40.0},
+            {"precip": 20.0, "growth": 1.5},  # key order doesn't matter
+            {"growth": 1.0, "precip": 40.0},
+        ]
+        jobs = self.study.run_at_each(self.registry, self.cli, sets, "toy_batch", replicates=2)
+
+        self.assertEqual(
+            [job.parameters for job in jobs],
+            [{"growth": 1.0, "precip": 40.0}, {"growth": 1.5, "precip": 20.0}] + [jobs[0].parameters],
+        )
+        self.assertIs(jobs[0], jobs[2])  # identical sets share one run
+        self.assertEqual(self.cli.run.call_count, 2)
+        self.assertEqual(self.sessions("toy_batch"), 1)
+        for job in jobs:
+            self.assertEqual(self.registry.loaded_replicates(job.run_hash), {0, 1})
+
+        again = self.study.run_at_each(self.registry, self.cli, sets, "toy_batch", replicates=2)
+        self.assertEqual([job.run_hash for job in again], [job.run_hash for job in jobs])
+        self.assertEqual(self.cli.run.call_count, 2)
+
+    def test_run_at_each_reproduces_a_searchs_runs(self):
+        loaded = self.study.load(self.registry, self.cli, n_prior=20)
+        smc = {"num_initial_pop": 20, "num_particles": 10, "num_simulations": 60, "epsilon_decay": 0.5}
+        result, _ = loaded.search(self.registry, self.cli, "smcabc", smc, "toy_smcabc")
+        particles = result.to_dataframe()
+        runs = self.cli.run.call_count
+
+        jobs = self.study.run_at_each(
+            self.registry, self.cli, particles[["growth", "precip"]].to_dict("records"), "toy_again"
+        )
+        self.assertEqual([job.run_hash for job in jobs], list(particles["run_hash"]))
+        self.assertEqual(self.cli.run.call_count, runs)  # every particle is a completed run
+
+    def test_run_at_each_needs_every_parameter(self):
+        with self.assertRaisesRegex(ValueError, "must name exactly"):
+            self.study.run_at_each(self.registry, self.cli, [{"growth": 1.0}], "toy_batch")
+
+    def test_a_target_dispatches_each_batch_together_and_replays_locally(self):
+        import json
+
+        from joshpy.cli import CLIResult
+
+        events = []
+
+        def dispatch(config, **kwargs):
+            events.append("dispatch")
+            self.assertTrue(config.no_wait)
+            return CLIResult(0, json.dumps({"jobId": f"job-{len(events)}"}), "", [])
+
+        def poll(config, **kwargs):
+            events.append("poll")
+            return CLIResult(0, "", "", [])
+
+        self.cli.stage_to_minio.return_value = CLIResult(0, "", "", [])
+        self.cli.batch_remote.side_effect = dispatch
+        self.cli.poll_batch.side_effect = poll
+        on_target = make_study(self.model, target="cluster")
+        sets = [{"growth": g, "precip": 40.0} for g in (0.5, 1.0, 1.5)]
+
+        jobs = on_target.run_at_each(self.registry, self.cli, sets, "toy_remote", replicates=2)
+
+        self.cli.run.assert_not_called()
+        self.assertEqual(events, ["dispatch"] * 3 + ["poll"] * 3)  # all dispatched, then polled
+        for job in jobs:
+            self.assertEqual(self.registry.loaded_replicates(job.run_hash), {0, 1})
+
+        local = self.study.run_at_each(self.registry, self.cli, sets, "toy_local", replicates=2)
+        self.assertEqual([job.run_hash for job in local], [job.run_hash for job in jobs])
+        self.cli.run.assert_not_called()  # the target's runs replay from the registry
+
 
 if __name__ == "__main__":
     unittest.main()

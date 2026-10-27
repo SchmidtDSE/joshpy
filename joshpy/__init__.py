@@ -127,6 +127,7 @@ try:
     from joshpy.strategies import (
         SweepStrategy,
         CartesianStrategy,
+        ParameterSetsStrategy,
         OptunaStrategy,
         ObjectiveFn,
         strategy_from_dict,
@@ -305,6 +306,7 @@ __all__ = [
     # Strategies (optional, part of jobs)
     "SweepStrategy",
     "CartesianStrategy",
+    "ParameterSetsStrategy",
     "OptunaStrategy",
     "ObjectiveFn",
     "strategy_from_dict",

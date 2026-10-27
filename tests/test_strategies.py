@@ -8,6 +8,7 @@ from joshpy.strategies import (
     SweepStrategy,
     CartesianStrategy,
     OptunaStrategy,
+    ParameterSetsStrategy,
     strategy_from_dict,
     sample_params_from_trial,
     _callable_name,
@@ -185,6 +186,26 @@ class TestOptunaStrategy(unittest.TestCase):
         self.assertEqual(strategy.n_trials, 50)
         self.assertEqual(strategy.direction, "maximize")
         self.assertEqual(strategy.sampler, "random")
+
+
+class TestParameterSetsStrategy(unittest.TestCase):
+    """ParameterSetsStrategy runs given sets as one batch (end to end in test_inference.py)."""
+
+    def test_is_adaptive_and_does_not_expand(self):
+        strategy = ParameterSetsStrategy(sets=[{"x": 1.0}])
+        self.assertTrue(strategy.is_adaptive)
+        with self.assertRaises(NotImplementedError):
+            list(strategy.expand([], []))
+
+    def test_needs_a_set(self):
+        with self.assertRaises(ValueError):
+            ParameterSetsStrategy(sets=[])
+
+    def test_round_trip(self):
+        strategy = ParameterSetsStrategy(sets=[{"x": 1.0, "y": 2}, {"x": 1.5, "y": 2}])
+        restored = strategy_from_dict(strategy.to_dict())
+        self.assertIsInstance(restored, ParameterSetsStrategy)
+        self.assertEqual(restored.sets, strategy.sets)
 
 
 class TestStrategyFromDict(unittest.TestCase):

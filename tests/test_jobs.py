@@ -611,6 +611,63 @@ class TestJobExpander(unittest.TestCase):
 
         job_set.cleanup()
 
+    def test_expand_static_custom_tags(self):
+        """JobConfig.custom_tags reach every job and leave run_hash unchanged."""
+        sweep = SweepConfig(config_parameters=[ConfigSweepParameter(name="a", values=[1, 2])])
+        plain = JobExpander().expand(JobConfig(template_string="a={{ a }}", sweep=sweep))
+        tagged = JobExpander().expand(
+            JobConfig(
+                template_string="a={{ a }}",
+                sweep=sweep,
+                custom_tags={"exportRoot": "minio://bucket/prefix"},
+            )
+        )
+        try:
+            for plain_job, tagged_job in zip(plain.jobs, tagged.jobs, strict=True):
+                self.assertEqual(tagged_job.custom_tags["exportRoot"], "minio://bucket/prefix")
+                self.assertEqual(tagged_job.custom_tags["a"], plain_job.custom_tags["a"])
+                self.assertEqual(tagged_job.run_hash, plain_job.run_hash)
+                self.assertNotIn("exportRoot", tagged_job.parameters)
+        finally:
+            plain.cleanup()
+            tagged.cleanup()
+
+    def test_static_custom_tags_must_not_clash_with_parameters(self):
+        config = JobConfig(
+            template_string="a={{ a }}",
+            sweep=SweepConfig(config_parameters=[ConfigSweepParameter(name="a", values=[1])]),
+            custom_tags={"a": "2"},
+        )
+        with self.assertRaisesRegex(ValueError, "clash with sweep parameters"):
+            JobExpander().expand(config)
+
+    def test_static_custom_tags_reject_reserved_names(self):
+        for name in ("run_hash", "label", "replicate"):
+            with self.assertRaisesRegex(ValueError, "custom_tags may not set"):
+                JobConfig(template_string="x = 1", custom_tags={name: "v"})
+
+    def test_static_custom_tags_round_trip(self):
+        config = JobConfig(template_string="x = 1", custom_tags={"exportRoot": "file:///tmp"})
+        self.assertEqual(JobConfig.from_dict(config.to_dict()).custom_tags, config.custom_tags)
+        self.assertNotIn("custom_tags", JobConfig(template_string="x = 1").to_dict())
+
+    def test_static_custom_tags_reach_the_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "sim.josh"
+            source.write_text("start simulation Main\nend simulation\n")
+            job_set = JobExpander().expand(
+                JobConfig(
+                    template_string="x = 1",
+                    source_path=source,
+                    custom_tags={"exportRoot": "file:///tmp"},
+                )
+            )
+            try:
+                run_config = to_run_config(job_set.jobs[0])
+                self.assertEqual(run_config.custom_tags["exportRoot"], "file:///tmp")
+            finally:
+                job_set.cleanup()
+
     def test_expand_to_specific_dir(self):
         """Expanding to specific directory should use that directory."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2657,6 +2714,61 @@ class TestRunSweepBatchRemote(unittest.TestCase):
 
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
+
+    def _stage_config_for(self, target: str, targets_dir: Path, env: dict[str, str]):
+        """Run one blocking batch job against *target* and return its StageToMinioConfig."""
+        import os
+
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+        mock_cli.batch_remote.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+        minio_vars = ("MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET")
+        clean_env = {k: v for k, v in os.environ.items() if k not in minio_vars}
+        with tempfile.TemporaryDirectory() as tmp_str, patch(
+            "joshpy.targets.TARGETS_DIR", targets_dir
+        ), patch.dict(os.environ, {**clean_env, **env}, clear=True):
+            job = self._make_real_job(Path(tmp_str))
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            run_sweep(mock_cli, job_set, batch_remote=True, target=target, session_id="s1", quiet=True)
+        return mock_cli.stage_to_minio.call_args[0][0]
+
+    def test_stages_to_the_target_profiles_bucket(self):
+        """stageToMinio takes no target, so the profile's endpoint and bucket are passed."""
+        import json
+
+        with tempfile.TemporaryDirectory() as targets_str:
+            targets_dir = Path(targets_str)
+            (targets_dir / "cluster.json").write_text(json.dumps({
+                "type": "kubernetes",
+                "kubernetes": {"context": "ctx", "namespace": "ns", "image": "img"},
+                "minio_endpoint": "https://storage.example.com",
+                "minio_bucket": "profile-bucket",
+            }))
+            stage_cfg = self._stage_config_for(
+                "cluster", targets_dir, {"MINIO_BUCKET": "env-bucket", "MINIO_ACCESS_KEY": "k"}
+            )
+
+        self.assertEqual(stage_cfg.minio_bucket, "profile-bucket")  # the profile wins
+        self.assertEqual(stage_cfg.minio_endpoint, "https://storage.example.com")
+        # Keys stay in the environment, off the command line.
+        self.assertIsNone(stage_cfg.minio_access_key)
+        self.assertIsNone(stage_cfg.minio_secret_key)
+
+    def test_stages_to_the_environments_bucket_without_a_profile(self):
+        with tempfile.TemporaryDirectory() as targets_str:
+            stage_cfg = self._stage_config_for(
+                "unprofiled", Path(targets_str),
+                {"MINIO_BUCKET": "env-bucket", "MINIO_ENDPOINT": "https://env.example.com"},
+            )
+
+        self.assertEqual(stage_cfg.minio_bucket, "env-bucket")
+        self.assertEqual(stage_cfg.minio_endpoint, "https://env.example.com")
 
     def test_stage_failure_short_circuits_dispatch(self):
         """If stage_to_minio fails, batch_remote should not be called."""
