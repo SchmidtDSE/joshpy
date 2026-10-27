@@ -78,6 +78,11 @@ class TestSbiStrategyConfig(unittest.TestCase):
             dict(prior={"a": {"uniform": [0, 1], "normal": [0, 1]}}),
             dict(prior=PRIOR, method_kwargs={"kde": True}),
             dict(prior=PRIOR, method_kwargs={"lra": True}),
+            dict(prior=PRIOR, batch_policy="greedy"),
+            dict(prior=PRIOR, first_round_fraction=0),
+            dict(prior=PRIOR, first_round_fraction=1.5),
+            dict(prior=PRIOR, round_margin=0.9),
+            dict(prior=PRIOR, max_batch=0),
         ]
         for kwargs in bad:
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
@@ -94,6 +99,20 @@ class TestSbiStrategyConfig(unittest.TestCase):
         )
         restored = strategy_from_dict(strategy.to_dict())
         self.assertEqual(restored, strategy)
+
+    def test_batch_policy_round_trips_and_defaults_by_dispatch_mode(self):
+        default = SbiStrategy(prior=PRIOR)
+        self.assertNotIn("batch_policy", default.to_dict())
+        self.assertEqual(default.resolved_batch_policy(batch_remote=False), "exact")
+        self.assertEqual(default.resolved_batch_policy(batch_remote=True), "measured")
+
+        measured = SbiStrategy(
+            prior=PRIOR, batch_policy="measured", first_round_fraction=0.5, round_margin=1.2,
+            max_batch=40,
+        )
+        self.assertEqual(strategy_from_dict(measured.to_dict()), measured)
+        exact = SbiStrategy(prior=PRIOR, batch_policy="exact")
+        self.assertEqual(exact.resolved_batch_policy(batch_remote=True), "exact")
 
     def test_callable_summaries_serialize_as_path(self):
         data = SbiStrategy(prior=PRIOR, summaries=model_summaries).to_dict()
@@ -317,6 +336,32 @@ class TestSbiStrategyRuns(unittest.TestCase):
         carried = [h for h in final["run_hashes"] if h in initial_hashes]
         self.assertEqual(len(carried), final["carried_over"])
 
+    def test_measured_batch_policy_records_rounds_and_surplus(self):
+        exact_registry, measured_registry = self.registry(), self.registry()
+        exact, exact_session = self.run_sbi(exact_registry)
+        exact_calls = self.cli.run.call_count
+        measured, measured_session = self.run_sbi(measured_registry, batch_policy="measured")
+
+        for result in (exact, measured):
+            self.assertEqual(
+                sum(p["simulations"] for p in result.populations), result.succeeded + result.failed
+            )
+            self.assertEqual(result.populations[0]["rounds"], 1)  # the initial population
+            self.assertTrue(all(p["rounds"] >= 1 for p in result.populations))
+        self.assertTrue(all(p["surplus"] == 0 for p in exact.populations))
+        self.assertLess(
+            sum(p["rounds"] for p in measured.populations),
+            sum(p["rounds"] for p in exact.populations),
+        )
+        self.assertGreater(self.cli.run.call_count, exact_calls)
+
+        exact_meta = exact_registry.get_session(exact_session).metadata["sbi"]
+        measured_meta = measured_registry.get_session(measured_session).metadata["sbi"]
+        self.assertNotIn("batch_policy", exact_meta)  # sbi's own loop: settings as before
+        self.assertEqual(measured_meta["batch_policy"]["policy"], "measured")
+        self.assertNotEqual(measured_meta["fingerprint"], exact_meta["fingerprint"])
+        self.assertIn("rounds", measured_meta["populations"][1])
+
     def test_warns_when_every_simulation_shares_a_seed(self):
         registry = self.registry()
         with self.assertWarnsRegex(UserWarning, "same Josh random draws"):
@@ -522,6 +567,114 @@ class TestSbiStrategyRuns(unittest.TestCase):
         self.assertEqual(resumed.run_hashes, uninterrupted.run_hashes)
         self.assertLess(self.cli.run.call_count, total_runs)
         self.assertEqual(self.cli.run.call_count, total_runs - runs_before_crash)
+
+
+@unittest.skipUnless(_has_sbi(), "sbi not installed")
+class TestMeasuredBatchPolicy(unittest.TestCase):
+    """The "measured" SMC-ABC batch policy, through sbi's own API on a cheap toy model."""
+
+    X_O = (0.5, 0.5)
+    SMC = {"num_particles": 100, "num_initial_pop": 400, "num_simulations": 3000, "epsilon_decay": 0.6}
+
+    def run_smc(self, policy, seed, record=None, **policy_kwargs):
+        """Run SMC-ABC on theta + noise; returns (inference, summary, simulator call sizes)."""
+        import numpy as np
+        import torch
+        from sbi.inference import SMCABC
+        from sbi.utils import BoxUniform
+
+        from joshpy.strategies import _measured_smcabc
+
+        calls = []
+
+        def simulator(theta):
+            x = theta + 0.05 * torch.randn_like(theta)
+            calls.append(theta.shape[0])
+            if record is not None:
+                record.append((theta.clone(), x.clone()))
+            return x
+
+        common = dict(
+            simulator=simulator,
+            prior=BoxUniform(torch.zeros(2), torch.ones(2)),
+            distance="l2",
+            simulation_batch_size=None,
+            num_workers=1,
+            show_progress_bars=False,
+        )
+        if policy == "measured":
+            options = dict(first_round_fraction=0.7, round_margin=1.1, max_batch=None)
+            options.update(policy_kwargs)
+            inference = _measured_smcabc()(**common, **options)
+        else:
+            inference = SMCABC(**common)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        _, summary = inference(x_o=torch.tensor([self.X_O]), return_summary=True, **self.SMC)
+        return inference, summary, calls
+
+    def test_a_few_rounds_per_generation_within_the_budget(self):
+        for seed in range(3):
+            _, _, exact_calls = self.run_smc("exact", seed)
+            inference, _, calls = self.run_smc("measured", seed)
+            with self.subTest(seed=seed):
+                self.assertLessEqual(sum(calls), self.SMC["num_simulations"])
+                self.assertLess(len(calls), len(exact_calls) / 5)
+                rounds = [entry["rounds"] for entry in inference.generation_log]
+                self.assertLessEqual(sum(rounds) / len(rounds), 3)
+                self.assertEqual(sum(rounds) + 1, len(calls))  # plus the initial population
+
+    def test_generations_have_exacts_distribution(self):
+        """Same seed, same initial population and tolerances; the generation-2 populations agree."""
+        import numpy as np
+
+        def moments(summary, generation=2):
+            weights = summary["weights"][generation].exp().numpy()
+            weights = weights / weights.sum()
+            particles = summary["particles"][generation].numpy()
+            mean = weights @ particles
+            return mean, np.sqrt(weights @ (particles - mean) ** 2)
+
+        exact, measured = [], []
+        for seed in range(6):
+            _, exact_summary, _ = self.run_smc("exact", seed)
+            _, measured_summary, _ = self.run_smc("measured", seed)
+            self.assertEqual(
+                [float(e) for e in exact_summary["epsilons"][:3]],
+                [float(e) for e in measured_summary["epsilons"][:3]],
+            )
+            exact.append(moments(exact_summary))
+            measured.append(moments(measured_summary))
+        exact_mean, exact_sd = (np.mean([m[i] for m in exact], axis=0) for i in (0, 1))
+        measured_mean, measured_sd = (np.mean([m[i] for m in measured], axis=0) for i in (0, 1))
+        np.testing.assert_allclose(measured_mean, exact_mean, atol=0.02)
+        np.testing.assert_allclose(measured_sd / exact_sd, 1.0, atol=0.2)
+
+    def test_surplus_passes_are_dropped_in_proposal_order(self):
+        """Never the closest: the first passes in proposal order make the population."""
+        import torch
+
+        record = []
+        inference, summary, _ = self.run_smc("measured", 0, record=record, round_margin=3.0)
+        log = inference.generation_log
+        first_call = 1 + log[0]["rounds"]  # after the initial population and generation 1
+        self.assertGreater(log[1]["surplus"], 0)  # a round accepted more than were missing
+
+        epsilon = float(summary["epsilons"][2])
+        thetas = torch.cat([theta for theta, _ in record[first_call : first_call + log[1]["rounds"]]])
+        xs = torch.cat([x for _, x in record[first_call : first_call + log[1]["rounds"]]])
+        passed = torch.linalg.norm(xs - torch.tensor(self.X_O), dim=1) <= epsilon
+        first_passes = thetas[passed][: self.SMC["num_particles"]]
+
+        def as_set(rows):
+            return {tuple(round(v, 6) for v in row) for row in rows.tolist()}
+
+        self.assertEqual(as_set(summary["particles"][2]), as_set(first_passes))
+
+    def test_max_batch_caps_every_round(self):
+        _, _, calls = self.run_smc("measured", 1, max_batch=150)
+        self.assertEqual(calls[0], self.SMC["num_initial_pop"])  # sbi's initial population
+        self.assertLessEqual(max(calls[1:]), 150)
 
 
 class TestAdaptiveBatchExportGuard(unittest.TestCase):

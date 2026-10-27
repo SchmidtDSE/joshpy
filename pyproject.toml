@@ -73,7 +73,8 @@ full = [
 #   pip install "joshpy[sbi]"
 sbi = [
   "joshpy[registry]",
-  "sbi>=0.27",
+  # <0.28: the "measured" SMC-ABC batch policy overrides a private SMCABC method.
+  "sbi>=0.27,<0.28",
 ]
 
 # Documentation

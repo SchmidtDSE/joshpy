@@ -16,7 +16,7 @@ try:
 except ImportError:
     pytest = None  # type: ignore
 
-from joshpy.cell_data import CellDataLoader, DiagnosticQueries
+from joshpy.cell_data import CellDataLoader, DiagnosticQueries, parse_output_steps
 from joshpy.jobs import JobConfig
 from joshpy.registry import RunRegistry
 
@@ -199,6 +199,49 @@ class TestCellDataLoader:
         finally:
             for path, _, _ in files:
                 path.unlink()
+
+
+class TestOutputSteps:
+    """parse_output_steps reads an output_steps spec as Josh reads --output-steps."""
+
+    def test_steps_and_ranges(self):
+        assert parse_output_steps("0-2,5") == [0, 1, 2, 5]
+        assert parse_output_steps(" 209 , 240-242 ") == [209, 240, 241, 242]
+        assert parse_output_steps("3,1-3") == [1, 2, 3]
+
+    def test_none_is_every_step(self):
+        assert parse_output_steps(None) is None
+        assert parse_output_steps("") is None
+
+    def test_invalid_specs(self):
+        with pytest.raises(ValueError, match="not a step or a range"):
+            parse_output_steps("1,x")
+        with pytest.raises(ValueError, match="reversed"):
+            parse_output_steps("5-2")
+
+    def test_load_csv_loads_only_the_steps_asked_for(self):
+        """A batch target's CSV holds every step; only output_steps reach the registry."""
+        skip_if_no_pandas()
+        registry = RunRegistry(":memory:")
+        session_id = registry.create_session(_make_config(), experiment_name="test")
+        registry.register_run(session_id, "abc123", "test.josh", "test", None, {})
+        run_id = registry.start_run("abc123", session_id=session_id)
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            f.write("step,replicate,position.x,position.y,treeCount\n")
+            for step in range(6):
+                f.write(f"{step},0,0.5,0.5,{step}\n")
+            csv_path = Path(f.name)
+        try:
+            rows = CellDataLoader(registry).load_csv(
+                csv_path, run_id, "abc123", steps=parse_output_steps("1,4-5")
+            )
+            loaded = registry.conn.execute(
+                "SELECT step FROM cell_data WHERE run_hash = 'abc123' ORDER BY step"
+            ).fetchall()
+        finally:
+            csv_path.unlink()
+        assert rows == 3
+        assert [step for (step,) in loaded] == [1, 4, 5]
 
 
 class TestDiagnosticQueries:

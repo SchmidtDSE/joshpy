@@ -54,6 +54,7 @@ import itertools
 import re
 import shutil
 import tempfile
+import warnings
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -774,6 +775,11 @@ class SweepConfig:
         )
 
 
+# Tag names joshpy sets on every job (run_hash, label) or Josh resolves itself in
+# export paths ({replicate}, {step}, {timestamp}, {variable}).
+_RESERVED_CUSTOM_TAGS = frozenset({"run_hash", "label", "replicate", "step", "timestamp", "variable"})
+
+
 @dataclass
 class JobConfig:
     """Configuration for a job (may be template for expansion).
@@ -805,8 +811,20 @@ class JobConfig:
         upload_source_path: Template for uploading source files.
         upload_config_path: Template for uploading config files.
         upload_data_path: Template for uploading data files.
-        output_steps: Step range to output (e.g., "0-10,50,100").
-        seed: Random seed for reproducibility.
+        custom_tags: Static ``--custom-tag name=value`` pairs for every job,
+            for export path templates such as
+            ``minio://bucket/{exportPrefix}/out_{run_hash}_{replicate}.csv``.
+            They are not part of ``run_hash``: use them for where outputs go,
+            never for anything that changes the simulation. Keep the scheme
+            (``file://``, ``minio://``) literal: Josh's ``inspect-exports``,
+            which joshpy uses to find outputs, can't resolve a tag there.
+        output_steps: Step range to output (e.g., "0-10,50,100"). A local run
+            writes only these steps (``--output-steps``). ``batchRemote`` takes
+            no ``--output-steps``, so on a batch target Josh writes every step
+            and joshpy loads only these into the registry.
+        seed: Random seed for reproducibility. Part of ``run_hash``.
+            ``batchRemote`` takes no ``--seed``: on a batch target the run is
+            unseeded (``run_sweep`` warns), and only the registry reproduces it.
         crs: Coordinate reference system.
         use_float64: Use double precision instead of BigDecimal.
 
@@ -867,6 +885,9 @@ class JobConfig:
     # bad if it fails or if you later mark it bad. See REGISTRY_PROVENANCE.md.
     attributes: dict[str, Any] = field(default_factory=dict)
 
+    # Static custom tags (see the docstring). Not part of run_hash.
+    custom_tags: dict[str, str] = field(default_factory=dict)
+
     # Additional CLI options
     output_steps: str | None = None
     seed: int | None = None
@@ -891,6 +912,12 @@ class JobConfig:
         if self.import_files and self.source_path is None and self.source_template_path is None:
             raise ValueError(
                 "import_files requires an entry model (source_path or source_template_path)"
+            )
+
+        reserved = sorted(set(self.custom_tags) & _RESERVED_CUSTOM_TAGS)
+        if reserved:
+            raise ValueError(
+                f"custom_tags may not set {reserved}: joshpy or Josh sets these itself"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -939,6 +966,8 @@ class JobConfig:
             result["use_float64"] = self.use_float64
         if self.attributes:
             result["attributes"] = self.attributes
+        if self.custom_tags:
+            result["custom_tags"] = dict(self.custom_tags)
 
         return result
 
@@ -987,6 +1016,8 @@ class JobConfig:
             kwargs["use_float64"] = data["use_float64"]
         if "attributes" in data:
             kwargs["attributes"] = data["attributes"]
+        if "custom_tags" in data:
+            kwargs["custom_tags"] = dict(data["custom_tags"])
 
         return cls(**kwargs)
 
@@ -1457,6 +1488,14 @@ class JobExpander:
             for k, v in config_params.items():
                 if str(k) not in custom_tags:  # don't overwrite file param tags
                     custom_tags[str(k)] = str(v)
+
+            # Static tags, such as where outputs go. Not part of run_hash.
+            clashing = sorted(set(config.custom_tags) & set(custom_tags))
+            if clashing:
+                raise ValueError(
+                    f"custom_tags {clashing} clash with sweep parameters of the same name"
+                )
+            custom_tags.update({str(k): str(v) for k, v in config.custom_tags.items()})
 
             # Compute run_hash (includes josh + config + file_mappings + seed)
             run_hash = _compute_run_hash(
@@ -2067,6 +2106,45 @@ def poll_batch_jobs(
             time.sleep(poll_interval)
 
 
+def _no_wait_job_id(stdout: str) -> str | None:
+    """The batch job id that ``batchRemote --no-wait`` prints, or None.
+
+    Josh prints progress lines ("Loading target profile: ...", "Dispatched. ...")
+    before the JSON object, so read the last line that parses as one with a
+    ``jobId``.
+    """
+    import json
+
+    for line in reversed(stdout.strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("jobId"):
+            return str(data["jobId"])
+    return None
+
+
+def _staging_location(target: str) -> tuple[str | None, str | None]:
+    """The MinIO endpoint and bucket to stage a batch job's inputs to, for *target*.
+
+    ``batchRemote`` reads the target profile itself, but ``stageToMinio`` takes
+    no target: given no endpoint or bucket, Josh falls back to the
+    ``MINIO_ENDPOINT`` and ``MINIO_BUCKET`` environment variables alone. So
+    stage where the profile says (profile field, then environment variable, as
+    :func:`~joshpy.targets.resolve_minio_creds` resolves them). The keys stay
+    in the environment, off the command line.
+    """
+    from joshpy.targets import load_target, resolve_minio_creds
+
+    try:
+        profile = load_target(target)
+    except FileNotFoundError:  # Josh reports a missing profile when it dispatches
+        profile = None
+    creds = resolve_minio_creds(profile)
+    return creds.endpoint, creds.bucket
+
+
 def run_sweep(
     cli: JoshCLI,
     job_set: JobSet,
@@ -2256,6 +2334,8 @@ def run_sweep(
     # subdir per ExpandedJob. Cleaned up in the finally below.
     sweep_workdir: Path | None = None
     _stage_prefix_root: str | None = None
+    _stage_endpoint: str | None = None
+    _stage_bucket: str | None = None
     if batch_remote:
         import tempfile
 
@@ -2263,6 +2343,17 @@ def run_sweep(
             tempfile.mkdtemp(prefix=f"joshpy-sweep-{session_id or 'adhoc'}-")
         )
         _stage_prefix_root = f"sweeps/{session_id or 'adhoc'}/"
+        assert target is not None  # validated above
+        _stage_endpoint, _stage_bucket = _staging_location(target)
+        seeds = sorted({job.seed for job in job_set if job.seed is not None})
+        if seeds:
+            warnings.warn(
+                f"batchRemote takes no --seed: jobs seeded {seeds} run unseeded on target "
+                f"{target!r}. The seed is still part of their run_hash, so the registry, "
+                "not the seed, reproduces them.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _finish_job(
         i: int,
@@ -2446,6 +2537,7 @@ def run_sweep(
                     [(job, patch_info.path if patch_info else "?", list(action.existing))]
                 )
 
+            dispatched = False  # batchRemote was called for this job
             if action is not None and action.action == "skip":
                 if not quiet:
                     print(
@@ -2493,7 +2585,12 @@ def run_sweep(
 
                 job_dir = assemble_batch_workdir(job, sweep_workdir)
                 stage_result = cli.stage_to_minio(
-                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
+                    StageToMinioConfig(
+                        input_dir=job_dir,
+                        prefix=per_job_prefix,
+                        minio_endpoint=_stage_endpoint,
+                        minio_bucket=_stage_bucket,
+                    ),
                 )
                 if not stage_result.success:
                     result = stage_result
@@ -2511,6 +2608,7 @@ def run_sweep(
                     result = cli.batch_remote(
                         br_config, jfr=job_jfr, stream_output=stream_output,
                     )
+                    dispatched = True
             elif remote:
                 # pool dispatches exactly the missing indices via --replicate-indices.
                 dispatch_indices = (
@@ -2534,15 +2632,20 @@ def run_sweep(
 
             # Async batch dispatch: record the run as submitted (no exit code
             # yet) with its batch job id, then poll after the loop.
-            if batch_no_wait and batch_remote and result.success:
-                import json as _json
-
-                try:
-                    job_id = _json.loads(result.stdout.strip())["jobId"]
-                except (ValueError, KeyError) as e:
-                    if not quiet:
-                        print(f"  [WARN] Could not parse --no-wait output: {e}")
-                    # Fall through to normal result handling
+            if batch_no_wait and dispatched and result.success:
+                job_id = _no_wait_job_id(result.stdout)
+                if job_id is None:
+                    # The job may be running, but without its id it can't be
+                    # polled: record a failure, never a completed run.
+                    result = CLIResult(
+                        exit_code=1,
+                        stdout=result.stdout,
+                        stderr=(
+                            f"{result.stderr}\nbatchRemote --no-wait printed no batch job id "
+                            "(a JSON line with \"jobId\"); the job can't be polled."
+                        ),
+                        command=result.command,
+                    )
                 else:
                     dispatched_run_id = None
                     if registry_callback is not None:

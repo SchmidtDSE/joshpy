@@ -28,7 +28,8 @@ parameters produce a stated behaviour, with no observed data.
 Everything runs through :class:`~joshpy.sweep.SweepManager` and is stored in one
 :class:`~joshpy.registry.RunRegistry`, keyed by ``run_hash``. Runs already in
 the registry are reused, so :meth:`KnownTruthStudy.load` simulates only what is
-missing. A study is one experiment family: its runs are recorded under
+missing. Runs execute locally, or on a batch target (``target``), where each
+batch is dispatched together; a run made on a target replays locally. A study is one experiment family: its runs are recorded under
 experiment names prefixed with ``name`` (``{name}_truth``, ``{name}_prior``,
 ``{name}_replicates``, ``{name}_filter``), and searches reuse them.
 
@@ -51,7 +52,7 @@ Example:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from statistics import NormalDist
 from typing import Any
@@ -60,9 +61,9 @@ import numpy as np
 import pandas as pd
 
 from joshpy.cli import JoshCLI
-from joshpy.jobs import ConfigSweepParameter, ExpandedJob, JobConfig, SweepConfig
+from joshpy.jobs import ExpandedJob, JobConfig, SweepConfig
 from joshpy.registry import RunRegistry
-from joshpy.strategies import SbiResult, SbiStrategy
+from joshpy.strategies import ParameterSetsStrategy, SbiResult, SbiStrategy
 from joshpy.sweep import SweepManager
 
 Observe = Callable[[RunRegistry, str, int], Any]
@@ -214,6 +215,12 @@ class KnownTruthStudy:
         truth_seed: Josh seed of the pseudo-observed run, so it is reproducible.
         sbi_seed: Seed of sbi's proposals. With the same seed, a search's first
             draws are the prior simulations, so it reuses those runs.
+        target: Batch target profile (``~/.josh/targets/<name>.json``) to run on,
+            or ``None`` to run locally. On a target, each batch of runs is
+            dispatched together, then polled, and the model's exports must go
+            to ``minio://`` (locally, Josh writes there too, given MinIO
+            credentials). The target is not part of ``run_hash``, so runs made
+            on it replay locally from the registry.
     """
 
     name: str
@@ -225,6 +232,7 @@ class KnownTruthStudy:
     compare: list[str]
     truth_seed: int = 1
     sbi_seed: int = 0
+    target: str | None = None
 
     def __post_init__(self) -> None:
         if self.model.sweep is not None:
@@ -254,6 +262,8 @@ class KnownTruthStudy:
     ) -> ExpandedJob:
         """Run the model once at fixed parameters, unless the registry already holds that run.
 
+        :meth:`run_at_each` with one parameter set.
+
         Args:
             registry: Where the run is recorded and looked up.
             cli: How the model runs.
@@ -265,25 +275,78 @@ class KnownTruthStudy:
         Returns:
             The expanded job; its ``run_hash`` keys the results in the registry.
         """
-        sweep = SweepConfig(
-            config_parameters=[
-                ConfigSweepParameter(name=name, values=[value]) for name, value in params.items()
-            ]
+        return self.run_at_each(registry, cli, [params], experiment, **job)[0]
+
+    def run_at_each(
+        self,
+        registry: RunRegistry,
+        cli: JoshCLI,
+        params: Sequence[Mapping[str, float]],
+        experiment: str,
+        **job: Any,
+    ) -> list[ExpandedJob]:
+        """Run the model at each of several parameter sets, as one batch.
+
+        Runs the registry already holds with every replicate are reused, and the
+        rest run in one session: on the study's ``target``, dispatched together.
+        A run with fewer replicates than asked for is topped up: the registry
+        keeps the replicates it holds, and only the missing replicates are
+        dispatched where their outputs can be listed (a batch target's MinIO;
+        locally, files still on disk). Parameter values from
+        ``SbiResult.to_dataframe()`` reproduce a search's runs.
+
+        Args:
+            registry: Where the runs are recorded and looked up.
+            cli: How the model runs.
+            params: One mapping per run, each with a value for every parameter.
+            experiment: Experiment name of the session.
+            **job: Other :class:`~joshpy.jobs.JobConfig` fields for every run,
+                such as ``seed`` and ``replicates``.
+
+        Returns:
+            One expanded job per parameter set, in order (identical sets share
+            one job); each ``run_hash`` keys its results in the registry.
+
+        Raises:
+            ValueError: If a parameter set doesn't name exactly the study's parameters.
+            SweepExecutionError: If a run failed, after the whole batch has run.
+        """
+        names = self.parameters
+        rows = []
+        for row in params:
+            if set(row) != set(names):
+                raise ValueError(
+                    f"Each parameter set must name exactly {names}; got {sorted(row)}"
+                )
+            rows.append({name: row[name] for name in names})
+        config = replace(
+            self.model, sweep=SweepConfig(strategy=ParameterSetsStrategy(sets=rows)), **job
         )
-        manager = (
-            SweepManager.builder(replace(self.model, sweep=sweep, **job))
-            .with_registry(registry, experiment_name=experiment)
-            .with_cli(cli)
-            .build()
-        )
+        manager = self._manager(config, registry, cli, experiment)
         try:
-            expanded = manager.job_set.jobs[0]
-            if len(registry.loaded_replicates(expanded.run_hash)) < expanded.replicates:
-                manager.run(quiet=True)
-                manager.load_results(quiet=True)
-            return expanded
+            # "pool" tops a run up to its replicate count instead of re-running
+            # (and, on a target, overwriting) the replicates it already has.
+            result = manager.run(quiet=True, collision_policy="pool")
         finally:
             manager.cleanup()
+        by_values = {
+            tuple(run.parameters[name] for name in names): run for run, _ in result.job_results
+        }
+        return [by_values[tuple(row[name] for name in names)] for row in rows]
+
+    def _manager(
+        self, config: JobConfig, registry: RunRegistry, cli: JoshCLI, experiment: str
+    ) -> SweepManager:
+        """A SweepManager for one of the study's sessions, on its target if it has one."""
+        builder = (
+            SweepManager.builder(config)
+            .with_registry(registry, experiment_name=experiment)
+            .with_cli(cli)
+        )
+        if self.target is not None:
+            # Dispatch each batch's runs together, then poll them: they run in parallel.
+            builder = builder.with_batch_remote(self.target, no_wait=True)
+        return builder.build()
 
     def summaries(
         self, registry: RunRegistry, run_hash: str, replicate: int = 0
@@ -300,6 +363,7 @@ class KnownTruthStudy:
         method: str,
         method_kwargs: Mapping[str, Any],
         experiment: str,
+        batch_policy: str | None = None,
     ) -> tuple[SbiResult, str]:
         """Run sbi with joshpy as the simulator; returns ``(SbiResult, session_id)``.
 
@@ -316,6 +380,11 @@ class KnownTruthStudy:
             method: ``"smcabc"`` or ``"mcabc"``.
             method_kwargs: Passed through to sbi.
             experiment: Experiment name of the session.
+            batch_policy: SMC-ABC's batch policy
+                (:class:`~joshpy.strategies.SbiStrategy`). ``None`` chooses by
+                dispatch: ``"measured"`` on the study's ``target``, ``"exact"``
+                locally. The policy changes what is proposed, so name it to
+                replay a target's search locally.
         """
         strategy = SbiStrategy(
             prior=self.prior,
@@ -325,12 +394,10 @@ class KnownTruthStudy:
             method_kwargs=dict(method_kwargs),
             distance="l2",
             seed=self.sbi_seed,
+            batch_policy=batch_policy,
         )
-        manager = (
-            SweepManager.builder(replace(self.model, sweep=SweepConfig(strategy=strategy)))
-            .with_registry(registry, experiment_name=experiment)
-            .with_cli(cli)
-            .build()
+        manager = self._manager(
+            replace(self.model, sweep=SweepConfig(strategy=strategy)), registry, cli, experiment
         )
         try:
             result = manager.run(quiet=True, stop_on_failure=False)
@@ -587,6 +654,7 @@ class LoadedStudy:
         method_kwargs: Mapping[str, Any],
         experiment: str,
         names: list[str] | None = None,
+        batch_policy: str | None = None,
     ) -> tuple[SbiResult, str]:
         """Search for the truth with sbi on z-scored statistics; returns ``(SbiResult, session_id)``.
 
@@ -594,7 +662,7 @@ class LoadedStudy:
         """
         summaries, observed = self.abc_target(names)
         return self.study.search(
-            registry, cli, summaries, observed, method, method_kwargs, experiment
+            registry, cli, summaries, observed, method, method_kwargs, experiment, batch_policy
         )
 
     def posterior(self, result: SbiResult, level: float = 0.9) -> pd.DataFrame:

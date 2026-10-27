@@ -2,7 +2,9 @@
 
 This module defines the strategy pattern for parameter sweep expansion:
 - `CartesianStrategy`: Full cartesian product of all parameters (default)
+- `ParameterSetsStrategy`: Exactly the parameter sets listed, as one batch
 - `OptunaStrategy`: Bayesian optimization using Optuna (requires [adaptive] extra)
+- `SbiStrategy`: Approximate Bayesian computation with sbi (requires [sbi] extra)
 
 The strategy pattern enables different approaches to parameter space exploration
 without changing the SweepConfig interface.
@@ -660,6 +662,66 @@ def _callable_name(fn: Any) -> str:
     return f"{module_name}:{qualname}"
 
 
+@register_strategy("parameter_sets")
+@dataclass
+class ParameterSetsStrategy(SweepStrategy):
+    """Run exactly the parameter sets listed, as one batch.
+
+    A sweep crosses its parameters' values; this runs the sets given, as
+    :meth:`AdaptiveContext.evaluate` runs one batch. Runs the registry already
+    holds with every replicate are reused, the rest run together (on a batch
+    target with ``batch_no_wait=True``: dispatched together, then polled), and
+    every run is loaded. Each run's parameters are recorded as given, so a set
+    taken from an earlier search reproduces that search's ``run_hash``.
+
+    Attributes:
+        sets: One ``{parameter: value}`` dict per run.
+
+    Example:
+        SweepConfig(strategy=ParameterSetsStrategy(sets=[{"a": 1.0, "b": 2.0}, {"a": 1.5, "b": 2.0}]))
+    """
+
+    sets: list[dict[str, Any]]
+
+    def __post_init__(self) -> None:
+        if not self.sets:
+            raise ValueError("sets must list at least one parameter set")
+
+    @property
+    def is_adaptive(self) -> bool:
+        return True  # runs through AdaptiveContext.evaluate, which reuses and batches runs
+
+    def expand(
+        self,
+        config_params: list[ConfigSweepParameter],
+        file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        raise NotImplementedError(
+            "ParameterSetsStrategy runs as one batch through SweepManager.run()"
+        )
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> Any:
+        """Evaluate every set as one batch."""
+        from joshpy.jobs import AdaptiveSweepResult
+
+        ctx.evaluate(self.sets)
+        return AdaptiveSweepResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": "parameter_sets", "sets": [dict(row) for row in self.sets]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ParameterSetsStrategy:
+        return cls(sets=[dict(row) for row in data["sets"]])
+
+
 @register_strategy("optuna")
 @dataclass
 class OptunaStrategy(SweepStrategy):
@@ -1020,6 +1082,7 @@ SummaryFn = Callable[["RunRegistry", str, "ExpandedJob"], dict[str, float]]
 
 _SBI_METHODS = ("smcabc", "mcabc")
 _SBI_PRIOR_KINDS = ("uniform", "normal")
+_SBI_BATCH_POLICIES = ("exact", "measured")
 # Options that make sbi return something other than the simulated particles
 # (a KDE object, or regression-adjusted parameters that were never run).
 _SBI_UNSUPPORTED_KWARGS = ("kde", "kde_kwargs", "kde_sample_weights", "lra", "lra_with_weights",
@@ -1051,12 +1114,161 @@ def _sbi_param_value(value: float) -> float:
     return float(np.format_float_positional(np.float32(value), unique=True, trim="-"))
 
 
+@functools.lru_cache(maxsize=1)
+def _measured_smcabc() -> type:
+    """sbi's SMCABC under the ``measured`` batch policy (built on first use: sbi is optional).
+
+    Overrides the private ``SMCABC._sample_next_population`` of sbi 0.27
+    (pinned ``<0.28`` for that reason); everything else is sbi's.
+    """
+    import math
+
+    import torch
+    from sbi.inference import SMCABC
+
+    class MeasuredSMCABC(SMCABC):  # type: ignore[misc, valid-type]
+        """SMCABC whose rounds are sized from measured acceptance rates.
+
+        A generation needs ``num_particles`` runs within its tolerance. sbi
+        proposes as many runs as are still missing, which takes many rounds.
+        Here round 1 proposes ``first_round_fraction`` of missing / rate, with
+        rate the previous generation's acceptance rate. Generation 1 has no
+        measured rate (the initial population's share within the new tolerance
+        underestimates it several-fold, since proposals now come from the kept
+        particles), so its round 1 proposes as many as are missing, as sbi does.
+        Later rounds propose ``round_margin`` x missing / this generation's
+        measured rate. No round proposes fewer than sbi would, or more than
+        ``max_batch`` or the remaining budget. Passes beyond those still
+        missing are dropped in proposal order, never by distance, so the
+        population has sbi's distribution. ``generation_log`` records each
+        generation's rounds, simulations, passes and surplus (passes dropped).
+        """
+
+        def __init__(
+            self,
+            *args: Any,
+            first_round_fraction: float,
+            round_margin: float,
+            max_batch: int | None,
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self.first_round_fraction = first_round_fraction
+            self.round_margin = round_margin
+            self.max_batch = max_batch
+            self.generation_log: list[dict[str, int]] = []
+            self._previous_rate: float | None = None  # None until generation 1 is measured
+
+        def _sample_next_population(
+            self,
+            particles: Any,
+            log_weights: Any,
+            distances: Any,
+            epsilon: float,
+            x: Any,
+            num_iid_samples: int,
+            use_last_pop_samples: bool = True,
+        ) -> tuple[Any, Any, Any, Any]:
+            """sbi's _sample_next_population, with rounds sized as the class describes."""
+            num_particles = particles.shape[0]
+            new_particles, new_log_weights, new_distances, new_x = [], [], [], []
+            num_accepted = passes = simulated = rounds = 0
+            while num_accepted < num_particles:
+                missing = num_particles - num_accepted
+                if rounds == 0 and self._previous_rate is None:
+                    wanted = missing  # no rate measured yet: propose as sbi would
+                elif rounds == 0:
+                    wanted = self.first_round_fraction * missing / self._previous_rate
+                else:
+                    wanted = self.round_margin * missing / (max(passes, 1) / simulated)
+                num_batch = max(missing, math.ceil(wanted))
+                if self.max_batch is not None:
+                    num_batch = min(num_batch, self.max_batch)
+                num_batch = min(num_batch, self.num_simulations - self.simulation_counter)
+
+                particle_candidates = self._sample_and_perturb(
+                    particles, torch.exp(log_weights), num_samples=num_batch
+                )
+                candidates_repeated = particle_candidates.repeat_interleave(
+                    num_iid_samples, dim=0
+                )
+                x_candidates = self._simulate_with_budget(candidates_repeated)
+                x_candidates = x_candidates.reshape((num_batch, num_iid_samples, -1))
+                if not self.distance.requires_iid_data:
+                    x_candidates = x_candidates.squeeze(1)
+
+                dists = self.distance(self.x_o, x_candidates)
+                accepted = torch.nonzero(dists <= epsilon).flatten()
+                kept = accepted[:missing]  # the first passes, in proposal order
+                passes += len(accepted)
+                simulated += num_batch
+                rounds += 1
+                if len(kept) > 0:
+                    new_particles.append(particle_candidates[kept])
+                    new_log_weights.append(
+                        self._calculate_new_log_weights(
+                            particle_candidates[kept], particles, log_weights
+                        )
+                    )
+                    new_distances.append(dists[kept])
+                    new_x.append(x_candidates[kept])
+                    num_accepted += len(kept)
+
+                # Out of budget with particles missing: fill up from the previous
+                # population, or return it, exactly as sbi does.
+                if (
+                    self.simulation_counter >= self.num_simulations
+                    and num_accepted < num_particles
+                ):
+                    if use_last_pop_samples:
+                        num_remaining = num_particles - num_accepted
+                        new_particles.append(particles[:num_remaining, :])
+                        new_log_weights = [
+                            self._calculate_new_log_weights(
+                                torch.cat(new_particles), particles, log_weights
+                            )
+                        ]
+                        new_distances.append(distances[:num_remaining])
+                        new_x.append(x[:num_remaining])
+                    else:
+                        new_particles = [particles]
+                        new_log_weights = [log_weights]
+                        new_distances = [distances]
+                        new_x = [x]
+                    break
+
+            self._previous_rate = max(passes, 1) / max(simulated, 1)
+            self.generation_log.append(
+                {
+                    "rounds": rounds,
+                    "simulations": simulated,
+                    "passes": passes,
+                    "surplus": passes - num_accepted,  # num_accepted counts kept passes only
+                }
+            )
+
+            new_particles_t = torch.cat(new_particles)
+            new_log_weights_t = torch.cat(new_log_weights)
+            new_distances_t = torch.cat(new_distances)
+            new_x_t = torch.cat(new_x)
+            new_log_weights_t -= torch.logsumexp(new_log_weights_t, dim=0)
+            sort_idx = torch.argsort(new_distances_t)
+            return (
+                new_particles_t[sort_idx],
+                new_log_weights_t[sort_idx],
+                new_distances_t[sort_idx],
+                new_x_t[sort_idx],
+            )
+
+    return MeasuredSMCABC
+
+
 def _count_generation_simulations(
     populations: list[dict[str, Any]],
     call_of: dict[str, int],
     call_sizes: list[int],
 ) -> None:
-    """Add ``simulations`` and ``carried_over`` to each population, in place.
+    """Add ``simulations``, ``rounds`` and ``carried_over`` to each population, in place.
 
     sbi simulates generations in order, each over one or more simulator calls,
     and a generation ends with the call that accepted its last particle. So a
@@ -1071,6 +1283,7 @@ def _count_generation_simulations(
         new = [c for c in calls if c > boundary]
         last = len(call_sizes) - 1 if i == len(populations) - 1 else max(new, default=boundary)
         pop["simulations"] = sum(call_sizes[boundary + 1 : last + 1])
+        pop["rounds"] = last - boundary  # simulator calls: one batch of proposals each
         pop["carried_over"] = len(calls) - len(new)
         boundary = last
 
@@ -1095,10 +1308,12 @@ class SbiResult:
         populations: Per generation: ``generation``, ``epsilon`` (the target
             tolerance), ``run_hashes``, ``weights``, ``distances``,
             ``simulations`` (simulator evaluations the generation used, reused
-            runs included) and ``carried_over`` (particles taken from the
-            previous population: sbi fills the last population this way when
-            the budget runs out mid-generation, so their distances may exceed
-            ``epsilon``). One population for MCABC.
+            runs included), ``rounds`` (the batches they ran in), ``surplus``
+            (passes dropped because a round accepted more than were missing,
+            under the ``"measured"`` batch policy) and ``carried_over``
+            (particles taken from the previous population: sbi fills the last
+            population this way when the budget runs out mid-generation, so
+            their distances may exceed ``epsilon``). One population for MCABC.
         observed: The observed summary statistics.
         summary: sbi's raw ``return_summary`` dictionary.
         load_errors: run_hash -> message, for runs that succeeded but whose
@@ -1199,6 +1414,24 @@ class SbiStrategy(SweepStrategy):
         seed: Seeds torch and numpy before sbi runs. With the same seed, sbi
             and torch versions, rerunning an interrupted sweep against the same
             registry replays the same proposals and reuses completed runs.
+        batch_policy: How SMC-ABC sizes each generation's rounds of proposals
+            (a generation needs ``num_particles`` runs within its tolerance;
+            each round is one batch, and its runs execute together).
+            ``"exact"`` is sbi's own loop: it proposes as many runs as are still
+            missing, so it never overshoots but takes many rounds (18-29 per
+            generation at 20% acceptance). ``"measured"`` sizes rounds from
+            measured acceptance rates: about two rounds per generation, for
+            5-15% more simulations. ``None`` (the default) picks ``"measured"``
+            on a batch target, where each round costs pod start-up and polling,
+            and ``"exact"`` otherwise. Both give a population of the same
+            distribution, but not the same proposals, so a search replays only
+            under the policy it ran with.
+        first_round_fraction: ``"measured"``: round 1 proposes this share of
+            what the previous generation's acceptance rate says is needed.
+        round_margin: ``"measured"``: later rounds propose this multiple of what
+            this generation's measured rate says is needed.
+        max_batch: ``"measured"``: the most runs one round may propose (e.g. the
+            target's capacity); ``None`` for no cap.
 
     Examples:
         >>> strategy = SbiStrategy(
@@ -1223,6 +1456,10 @@ class SbiStrategy(SweepStrategy):
     method_kwargs: dict[str, Any] = field(default_factory=dict)
     distance: str = "l2"
     seed: int = 0
+    batch_policy: str | None = None
+    first_round_fraction: float = 0.7
+    round_margin: float = 1.1
+    max_batch: int | None = None
 
     _summaries_fn: SummaryFn | None = field(default=None, repr=False, compare=False)
 
@@ -1250,6 +1487,19 @@ class SbiStrategy(SweepStrategy):
                 raise ValueError(f"Uniform prior for '{name}' needs low < high, got {args}")
             if kind == "normal" and not b > 0:
                 raise ValueError(f"Normal prior for '{name}' needs std > 0, got {args}")
+        if self.batch_policy is not None and self.batch_policy not in _SBI_BATCH_POLICIES:
+            raise ValueError(
+                f"Invalid batch_policy {self.batch_policy!r}. Must be one of: "
+                f"{_SBI_BATCH_POLICIES}, or None to choose by dispatch mode"
+            )
+        if not 0 < self.first_round_fraction <= 1:
+            raise ValueError(
+                f"first_round_fraction must be in (0, 1], got {self.first_round_fraction}"
+            )
+        if self.round_margin < 1:
+            raise ValueError(f"round_margin must be at least 1, got {self.round_margin}")
+        if self.max_batch is not None and self.max_batch < 1:
+            raise ValueError(f"max_batch must be at least 1, got {self.max_batch}")
         unsupported = sorted(set(self.method_kwargs) & set(_SBI_UNSUPPORTED_KWARGS))
         if unsupported:
             raise ValueError(
@@ -1354,6 +1604,14 @@ class SbiStrategy(SweepStrategy):
         }
         if self.method_kwargs:
             result["method_kwargs"] = self.method_kwargs
+        if self.batch_policy is not None:
+            result["batch_policy"] = self.batch_policy
+        if self.first_round_fraction != 0.7:
+            result["first_round_fraction"] = self.first_round_fraction
+        if self.round_margin != 1.1:
+            result["round_margin"] = self.round_margin
+        if self.max_batch is not None:
+            result["max_batch"] = self.max_batch
         if isinstance(self.summaries, str):
             result["summaries"] = self.summaries
         elif self.summaries is not None:
@@ -1377,6 +1635,10 @@ class SbiStrategy(SweepStrategy):
             method_kwargs=data.get("method_kwargs", {}),
             distance=data.get("distance", "l2"),
             seed=data.get("seed", 0),
+            batch_policy=data.get("batch_policy"),
+            first_round_fraction=data.get("first_round_fraction", 0.7),
+            round_margin=data.get("round_margin", 1.1),
+            max_batch=data.get("max_batch"),
         )
 
     def run_adaptive(self, ctx: AdaptiveContext) -> SbiResult:
@@ -1409,7 +1671,8 @@ class SbiStrategy(SweepStrategy):
         names = self.param_names
         prior = self.build_prior()
         x_o = torch.tensor([[observed[k] for k in keys]], dtype=torch.float32)
-        settings = self._session_settings(observed)
+        policy = self.resolved_batch_policy(batch_remote=ctx.batch_remote)
+        settings = self._session_settings(observed, policy)
         self._warn_on_shared_seed(ctx)
         self._warn_on_version_drift(ctx, settings)
         ctx.registry.update_session_metadata(ctx.session_id, sbi=settings)
@@ -1500,10 +1763,19 @@ class SbiStrategy(SweepStrategy):
             show_progress_bars=False,
         )
         populations: list[dict[str, Any]] = []
+        generation_log: list[dict[str, int]] = []  # "measured" only: rounds and surplus
         if self.method == "smcabc":
-            samples, summary = SMCABC(**common)(
-                x_o=x_o, return_summary=True, **self.method_kwargs
-            )
+            if policy == "measured":
+                smcabc = _measured_smcabc()(
+                    **common,
+                    first_round_fraction=self.first_round_fraction,
+                    round_margin=self.round_margin,
+                    max_batch=self.max_batch,
+                )
+            else:
+                smcabc = SMCABC(**common)
+            samples, summary = smcabc(x_o=x_o, return_summary=True, **self.method_kwargs)
+            generation_log = list(getattr(smcabc, "generation_log", []))
             for t, (particles, log_w, eps, dists) in enumerate(
                 zip(
                     summary["particles"],
@@ -1538,6 +1810,11 @@ class SbiStrategy(SweepStrategy):
                 }
             )
         _count_generation_simulations(populations, call_of, call_sizes)
+        for generation, pop in enumerate(populations):
+            # Passes dropped because a round accepted more than were missing ("measured").
+            # Generation 0 is the initial population, so the log starts at generation 1.
+            entry = generation_log[generation - 1] if 0 < generation <= len(generation_log) else {}
+            pop["surplus"] = entry.get("surplus", 0)
 
         final = populations[-1]
         run_hashes = lookup(samples)
@@ -1624,8 +1901,19 @@ class SbiStrategy(SweepStrategy):
                 stacklevel=2,
             )
 
-    def _session_settings(self, observed: dict[str, float]) -> dict[str, Any]:
-        """Settings recorded in session metadata, with a replay fingerprint."""
+    def resolved_batch_policy(self, *, batch_remote: bool) -> str:
+        """The batch policy a run uses: ``batch_policy``, or else chosen by dispatch mode."""
+        if self.batch_policy is not None:
+            return self.batch_policy
+        return "measured" if batch_remote else "exact"
+
+    def _session_settings(self, observed: dict[str, float], policy: str = "exact") -> dict[str, Any]:
+        """Settings recorded in session metadata, with a replay fingerprint.
+
+        The batch policy is recorded only when it is ``"measured"``: ``"exact"``
+        is sbi's own loop, so sessions from before the policy existed keep their
+        fingerprint.
+        """
         import hashlib
         import json
 
@@ -1642,6 +1930,13 @@ class SbiStrategy(SweepStrategy):
             "distance": self.distance,
             "seed": self.seed,
         }
+        if self.method == "smcabc" and policy == "measured":
+            settings["batch_policy"] = {
+                "policy": policy,
+                "first_round_fraction": self.first_round_fraction,
+                "round_margin": self.round_margin,
+                "max_batch": self.max_batch,
+            }
         settings["fingerprint"] = hashlib.sha256(
             json.dumps(settings, sort_keys=True).encode()
         ).hexdigest()[:12]

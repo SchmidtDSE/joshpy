@@ -224,6 +224,7 @@ website:
           contents:
             - reference/strategies.SweepStrategy.qmd
             - reference/strategies.CartesianStrategy.qmd
+            - reference/strategies.ParameterSetsStrategy.qmd
             - reference/strategies.OptunaStrategy.qmd
             - reference/strategies.SbiStrategy.qmd
             - reference/strategies.SbiResult.qmd
@@ -347,6 +348,7 @@ quartodoc:
       contents:
         - strategies.SweepStrategy
         - strategies.CartesianStrategy
+        - strategies.ParameterSetsStrategy
         - strategies.OptunaStrategy
         - strategies.SbiStrategy
         - strategies.SbiResult

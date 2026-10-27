@@ -4676,6 +4676,8 @@ class RegistryCallback:
             metadata={
                 "parameters": job.parameters,
                 "replicates": job.replicates,
+                "custom_tags": dict(job.custom_tags),  # where outputs went, e.g. {exportPrefix}
+                "output_steps": job.output_steps,  # the steps loaded (None: every step)
             },
         )
 
@@ -4711,6 +4713,8 @@ class RegistryCallback:
             metadata={
                 "parameters": job.parameters,
                 "replicates": job.replicates,
+                "custom_tags": dict(job.custom_tags),  # where outputs went, e.g. {exportPrefix}
+                "output_steps": job.output_steps,  # the steps loaded (None: every step)
                 "batch_job_id": batch_job_id,
                 "target": target,
             },
