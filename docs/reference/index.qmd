@@ -54,6 +54,7 @@ Sweep expansion strategies for parameter optimization
 | --- | --- |
 | [strategies.SweepStrategy](strategies.SweepStrategy.qmd#joshpy.strategies.SweepStrategy) | Base class for sweep expansion strategies. |
 | [strategies.CartesianStrategy](strategies.CartesianStrategy.qmd#joshpy.strategies.CartesianStrategy) | Full cartesian product of all parameters (default strategy). |
+| [strategies.ParameterSetsStrategy](strategies.ParameterSetsStrategy.qmd#joshpy.strategies.ParameterSetsStrategy) | Run exactly the parameter sets listed, as one batch. |
 | [strategies.OptunaStrategy](strategies.OptunaStrategy.qmd#joshpy.strategies.OptunaStrategy) | Bayesian optimization using Optuna. |
 | [strategies.SbiStrategy](strategies.SbiStrategy.qmd#joshpy.strategies.SbiStrategy) | Approximate Bayesian computation with the sbi package. |
 | [strategies.SbiResult](strategies.SbiResult.qmd#joshpy.strategies.SbiResult) | Results from an SbiStrategy run. |
