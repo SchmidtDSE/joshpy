@@ -811,9 +811,12 @@ class JobConfig:
         upload_config_path: Template for uploading config files.
         upload_data_path: Template for uploading data files.
         custom_tags: Static ``--custom-tag name=value`` pairs for every job,
-            for export path templates such as ``{exportRoot}``. They are not
-            part of ``run_hash``: use them for where outputs go, never for
-            anything that changes the simulation.
+            for export path templates such as
+            ``minio://bucket/{exportPrefix}/out_{run_hash}_{replicate}.csv``.
+            They are not part of ``run_hash``: use them for where outputs go,
+            never for anything that changes the simulation. Keep the scheme
+            (``file://``, ``minio://``) literal: Josh's ``inspect-exports``,
+            which joshpy uses to find outputs, can't resolve a tag there.
         output_steps: Step range to output (e.g., "0-10,50,100").
         seed: Random seed for reproducibility.
         crs: Coordinate reference system.
@@ -2097,6 +2100,25 @@ def poll_batch_jobs(
             time.sleep(poll_interval)
 
 
+def _no_wait_job_id(stdout: str) -> str | None:
+    """The batch job id that ``batchRemote --no-wait`` prints, or None.
+
+    Josh prints progress lines ("Loading target profile: ...", "Dispatched. ...")
+    before the JSON object, so read the last line that parses as one with a
+    ``jobId``.
+    """
+    import json
+
+    for line in reversed(stdout.strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("jobId"):
+            return str(data["jobId"])
+    return None
+
+
 def _staging_location(target: str) -> tuple[str | None, str | None]:
     """The MinIO endpoint and bucket to stage a batch job's inputs to, for *target*.
 
@@ -2500,6 +2522,7 @@ def run_sweep(
                     [(job, patch_info.path if patch_info else "?", list(action.existing))]
                 )
 
+            dispatched = False  # batchRemote was called for this job
             if action is not None and action.action == "skip":
                 if not quiet:
                     print(
@@ -2570,6 +2593,7 @@ def run_sweep(
                     result = cli.batch_remote(
                         br_config, jfr=job_jfr, stream_output=stream_output,
                     )
+                    dispatched = True
             elif remote:
                 # pool dispatches exactly the missing indices via --replicate-indices.
                 dispatch_indices = (
@@ -2593,15 +2617,20 @@ def run_sweep(
 
             # Async batch dispatch: record the run as submitted (no exit code
             # yet) with its batch job id, then poll after the loop.
-            if batch_no_wait and batch_remote and result.success:
-                import json as _json
-
-                try:
-                    job_id = _json.loads(result.stdout.strip())["jobId"]
-                except (ValueError, KeyError) as e:
-                    if not quiet:
-                        print(f"  [WARN] Could not parse --no-wait output: {e}")
-                    # Fall through to normal result handling
+            if batch_no_wait and dispatched and result.success:
+                job_id = _no_wait_job_id(result.stdout)
+                if job_id is None:
+                    # The job may be running, but without its id it can't be
+                    # polled: record a failure, never a completed run.
+                    result = CLIResult(
+                        exit_code=1,
+                        stdout=result.stdout,
+                        stderr=(
+                            f"{result.stderr}\nbatchRemote --no-wait printed no batch job id "
+                            "(a JSON line with \"jobId\"); the job can't be polled."
+                        ),
+                        command=result.command,
+                    )
                 else:
                     dispatched_run_id = None
                     if registry_callback is not None:

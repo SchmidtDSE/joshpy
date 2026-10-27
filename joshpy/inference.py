@@ -218,9 +218,9 @@ class KnownTruthStudy:
         target: Batch target profile (``~/.josh/targets/<name>.json``) to run on,
             or ``None`` to run locally. On a target, each batch of runs is
             dispatched together, then polled, and the model's exports must go
-            to ``minio://`` (``JobConfig.custom_tags`` can hold an export root
-            that differs between the two). The target is not part of
-            ``run_hash``, so runs made on it replay locally from the registry.
+            to ``minio://`` (locally, Josh writes there too, given MinIO
+            credentials). The target is not part of ``run_hash``, so runs made
+            on it replay locally from the registry.
     """
 
     name: str
