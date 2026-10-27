@@ -203,7 +203,7 @@ Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94
 | Parameter declarations (direct vs inverse) | Direction agreed | API to draft; the second model is its first user |
 | Field data (a study without a truth run) | Ready, small | Needed for Joshua tree, not for ForeverTree |
 | Test (2) as SMC-ABC on a stability target | Waits | The rebuilt #95 is its rejection version; the target is the projected ratio |
-| Pilot on the cluster | Blocked | A Josh CSV fix for Kubernetes, the batch policy, and a long-run model |
+| Pilot on the cluster | **Cluster reachable** (Oct 27 smoke test) | Runs the rebuild; needs the toolkit PR below and the batch policy. The CSV bug doesn't touch the fire model's counts |
 | Cleanup (Optuna, spin-up) | Parked | Wholesale, once SBI is stable |
 
 Nothing in the stack has merged yet, so new code PRs stack on #96 unless the lower PRs merge first.
@@ -884,6 +884,44 @@ tree posterior needs it; it would also serve the posterior predictive check on t
   adapter tests.
 
 ## Execution on Kubernetes
+
+**Set up and smoke-tested (Oct 27).**
+- **Setup:**
+  - `.devcontainer/targets/gke-test.json` is the shared GKE profile, linked into `~/.josh/targets`
+    by `.devcontainer/scripts/on_create/link_targets.sh` (as in josh-models). Branch
+    `chore/devcontainer-targets` off main, cherry-picked onto the model branch.
+  - The kubectl context comes from gcloud; MinIO keys come from `.env` (git-ignored), loaded with
+    `load_dotenv()`.
+- **Smoke test:** the first ForeverTree model with a `minio://` export, one parameter set, 2
+  replicates. It was staged, dispatched to `gke-test` as one indexed Job, polled and ingested: 693
+  rows per replicate, as locally. It took 126 s end to end; the Job itself took 115 s for 2/2, mostly
+  pod start-up, since a run takes about 2 s.
+- **Found:**
+  - **joshpy bug: staging ignores the profile's bucket.** `run_sweep` calls `stageToMinio` with no
+    `--minio-bucket`, so Josh falls back to `MINIO_BUCKET`, which `.env` doesn't set ("bucket name
+    must not be null"). `resolve_minio_creds(target)` already applies the profile-first order; pass
+    its bucket and endpoint (not the keys) to `StageToMinioConfig`. The smoke test set
+    `MINIO_BUCKET` from the profile instead.
+  - **Josh: the per-job credentials Secret is left behind.** The service account can create and
+    delete Secrets in `joshsim` but not get or list them. Josh's cleanup reads the Secret first, is
+    refused (a warning in stderr), and leaves `josh-creds-<id>` holding the MinIO keys. A
+    server-side dry-run delete shows it still exists after the Job completed. Unknown: whether an
+    owner reference removes it when the Job's TTL (1 hour) does. Fix in Josh (delete without the
+    read) or in RBAC (grant `get`).
+  - **Exports must be `minio://` on the cluster, and `file://` locally.** A custom tag can hold the
+    root (`exportFiles.patch = "{exportRoot}/…_{run_hash}_{replicate}.csv"`; checked locally with
+    `file:///tmp`). Custom tags aren't in `run_hash`, so a run made on the cluster replays locally
+    from the registry.
+- **Implication for SMC-ABC:** at about 2 minutes of overhead per round, sbi's own loop (about 70
+  rounds for PR 3's search) would take over 2 hours of round trips. The `measured` batch policy
+  (about 10 rounds) is what makes the cluster worth it. Warm nodes with the image cached may start
+  faster; the pilot should measure.
+
+**For the rebuild, the toolkit PR needs:** the staging fix; a dispatch target through
+`KnownTruthStudy` (`load`, `search`, `filter_prior`, `run_at`); a batched `run_at` (many
+parameter sets, one session, one dispatch) for the projections; the export root as a custom tag;
+and the batch policy.
+
 
 - **Current mapping:** one parameter set → one `batchRemote` → one indexed Job, with completions
   equal to `replicates`.
