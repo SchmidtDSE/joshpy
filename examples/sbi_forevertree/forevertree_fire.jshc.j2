@@ -1,0 +1,52 @@
+# The second ForeverTree model (forevertree_fire.josh), with stochastic fire:
+# the fire-model case study's configuration. SbiStrategy draws recruitment and
+# droughtMortality from their prior; projectionYears is a template variable (0 for
+# fit runs, 40 for projections). Everything else is fixed. Rates are yearly.
+
+# --- The run ---
+# Years of spin-up on resampled historical climate.
+spinupYears = 200 count
+# Years of the present: the last historical years, in order. A survey records the final one.
+presentYears = 10 count
+# Years of the projection under the future mapped as futureTemperature and futurePrecipitation
+# (0: stop at the survey, as fit runs do; at most the future file's 40 years).
+projectionYears = {{ projectionYears }} count
+# Years in the historical climate files.
+historicalYears = 30 count
+
+# --- Growth, as in forevertree.josh ---
+# How much can a ForeverTree grow in one year?
+maxNewGrowth = 1 m
+# How much is growth reduced by drought? (0 %: drought halts growth; 100 %: no effect)
+minPrecipImpactPct = 40 %
+
+# --- Demography ---
+# Seedlings in each patch at the start of the run.
+initialTrees = 10 count
+# Most trees a patch holds; recruitment falls to zero as a patch fills.
+maxTrees = 40 count
+# Age at which a tree is an adult, whatever its height: it recruits, and survives better.
+maturityAge = 8 years
+# Chance that an adult recruits one tree, in a wet year (500 mm or more) in an empty patch.
+recruitment = {{ recruitment }} %
+# Chance that an adult dies.
+adultMortality = 2 %
+# Chance that a juvenile dies, in a wet year.
+juvenileMortality = 5 %
+# Added to a juvenile's chance of dying in a dry year (300 mm or less); linear in between.
+droughtMortality = {{ droughtMortality }} %
+
+# --- Fuel and fire ---
+# Share of the missing fuel cover that grows back in a wet year (less in drier years).
+fuelGrowth = 40 %
+# Scheduled fire: every fireInterval years from step firstFire, in every patch (0: off).
+fireInterval = 0 count
+firstFire = 10 count
+# Stochastic fire: the yearly chance of fire at full fuel cover, proportional to fuel (0 %: off).
+fireChance = 10 %
+# Chance that a fire kills an adult, at full fuel cover. Juveniles die at the fuel cover itself.
+adultFireMortality = 20 %
+
+# --- Survey ---
+# Chance that a survey finds a juvenile (adults are always found).
+juvenileDetection = 90 %

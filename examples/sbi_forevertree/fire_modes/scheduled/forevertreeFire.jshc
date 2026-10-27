@@ -44,3 +44,7 @@ firstFire = 10 count
 fireChance = 0 %
 # Chance that a fire kills an adult, at full fuel cover. Juveniles die at the fuel cover itself.
 adultFireMortality = 20 %
+
+# --- Survey ---
+# Chance that a survey finds a juvenile (adults are always found).
+juvenileDetection = 90 %

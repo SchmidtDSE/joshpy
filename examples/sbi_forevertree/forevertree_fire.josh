@@ -20,6 +20,10 @@
 # mode: scheduled (fireInterval > 0), stochastic (fireChance > 0), both, or
 # none. fire_modes/ holds a config for each mode.
 #
+# A survey misses juveniles: each patch exports detectedJuveniles, the
+# juveniles a survey would count, each found with chance juvenileDetection.
+# Adults are always found.
+#
 # Outputs go to MinIO, so runs work the same locally (with MinIO keys in the
 # environment) and on a batch target; exportPrefix is a custom tag.
 #
@@ -88,6 +92,9 @@ start simulation Main
   fireChance.init = config forevertreeFire.fireChance
   adultFireMortality.init = config forevertreeFire.adultFireMortality
 
+  # Survey
+  juvenileDetection.init = config forevertreeFire.juvenileDetection
+
   exportFiles.patch = "minio://josh-batch-storage/{exportPrefix}/forevertree_fire_{run_hash}_{replicate}.csv"
 
 end simulation
@@ -111,6 +118,7 @@ start patch Default
   ForeverTree.start = prior.ForeverTree[prior.ForeverTree.dead == false]
   nTrees.start = count(ForeverTree)
   nAdults.start = count(ForeverTree[ForeverTree.age >= meta.maturityAge])
+  nJuveniles.start = nTrees - nAdults
 
   # Fire: scheduled every fireInterval years from step firstFire, or with a
   # yearly chance proportional to last year's fuel (fireChance at full cover).
@@ -143,15 +151,15 @@ start patch Default
   export.year.step = meta.year
   export.yearsFromSurvey.step = meta.yearsFromSurvey
   export.precipitation.step = precipitation
-  export.nTrees.step = count(ForeverTree)
   export.nAdults.step = nAdults
-  export.nJuveniles.step = nTrees - nAdults
+  export.nJuveniles.step = nJuveniles
+  export.detectedJuveniles.step =
+    sample binomial
+    with n of nJuveniles
+    p of meta.juvenileDetection
   export.meanHeight.step = mean(ForeverTree.height) if count(ForeverTree) > 0 count else 0 m
-  export.heightSd.step = std(ForeverTree.height) if count(ForeverTree) > 1 count else 0 m
   export.fuel.step = fuel
   export.burned.step = burned
-  export.deaths.end = count(ForeverTree[ForeverTree.dead])
-  export.recruits.end = recruits
 
 end patch
 
