@@ -1052,12 +1052,18 @@ def _resolve_ingest_metadata(
         print(f"Ingesting results for {run_hash}{label_str}")
         print(f"  Simulation: {simulation}, Replicates: {total_replicates}")
 
+    # The custom tags the latest execution ran with: export paths may use them
+    # ({exportPrefix}), and they are not part of run_hash, so only the run knows.
+    latest = registry.get_runs_for_hash(run_hash)
+    custom_tags = (latest[-1].metadata or {}).get("custom_tags") if latest else None
+
     return _IngestMetadata(
         run_hash=run_hash,
         config=config,
         simulation=simulation,
         total_replicates=total_replicates,
         label=config.label,
+        custom_tags=custom_tags,
     )
 
 

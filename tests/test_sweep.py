@@ -1316,6 +1316,46 @@ class TestIngestResults(unittest.TestCase):
         registry.close()
 
     @patch("joshpy.sweep.CellDataLoader")
+    def test_export_paths_resolve_the_runs_custom_tags(self, mock_loader_cls):
+        """A static tag in the export path ({exportPrefix}) resolves from the run's metadata."""
+        from joshpy.cli import ExportFileInfo, ExportPaths
+        from joshpy.sweep import ingest_results
+
+        registry, session_id, _ = self._make_registry_with_run(replicates=2)
+        latest = registry.start_run(
+            "abc123def456", session_id=session_id,
+            metadata={"replicates": 2, "custom_tags": {"exportPrefix": "study-a"}},
+        )
+        registry.complete_run(latest, exit_code=0)
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 1
+        mock_loader_cls.return_value = mock_loader
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = f"{tmpdir}/{{exportPrefix}}_out_{{run_hash}}_{{replicate}}.csv"
+            mock_cli = MagicMock()
+            mock_cli.inspect_exports.return_value = ExportPaths(
+                simulation="Main",
+                export_files={
+                    "patch": ExportFileInfo(
+                        raw=f"file://{template}", protocol="file", host="", path=template,
+                        file_type="csv",
+                    ),
+                },
+                debug_files={},
+            )
+            for rep in range(2):
+                Path(f"{tmpdir}/study-a_out_abc123def456_{rep}.csv").write_text("step,replicate\n0,0\n")
+
+            ingest_results(mock_cli, registry, "abc123def456", quiet=True)
+
+            loaded = sorted(str(call.kwargs["csv_path"]) for call in mock_loader.load_csv.call_args_list)
+            self.assertEqual(
+                loaded, [f"{tmpdir}/study-a_out_abc123def456_{rep}.csv" for rep in range(2)]
+            )
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
     def test_missing_replicate_skipped(self, mock_loader_cls):
         """Missing CSVs should be skipped gracefully."""
         from joshpy.sweep import ingest_results
