@@ -20,6 +20,13 @@ We map which parameter sets let Joshua trees replace themselves, then check whic
 > probable it is that the projected ratio stays above a target fixed beforehand. The ForeverTree
 > demonstration does this on the second model, with three synthetic futures (`normal`, `hot_dry`,
 > `cool_wet`); see "Rebuild of PR 4 and PR 5" in SBI_IMPLEMENTATION.md.
+>
+> **Update, Oct 28, 2026:** the demonstration is built and rendered on the cluster. The method
+> recovers the controls (probability of meeting the target 1 under `normal` and `cool_wet`, 0
+> under `hot_dry`). Two findings bear on the Joshua tree test: the surveys' stage ratio barely
+> identifies recruitment or juvenile drought mortality when recruitment is density dependent
+> (densities and their spread between sites do), and a pooled ratio target can be met by a stand
+> that has already lost its dry edge, so pair it with the adults' trend.
 
 ## At a glance
 

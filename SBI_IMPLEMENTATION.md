@@ -175,10 +175,10 @@ These findings apply to every page and experiment.
 - Commits end with the `Co-Authored-By` trailer; PR descriptions end with the Claude Code line.
 - Docs PRs stay drafts until the user has reviewed the render.
 
-### Where things stand (Oct 27)
+### Where things stand (Oct 28)
 
-Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94 → #97 → #95 → #96 ("SBI stack
-n/12"). #95 and #96 still sit on #94 until their rebuild moves them onto #97.
+Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94 → #97 → #98 → #99 → #95 → #96
+("SBI stack n/14").
 
 | PR | Branch | Status |
 |----|--------|--------|
@@ -189,19 +189,20 @@ n/12"). #95 and #96 still sit on #94 until their rebuild moves them onto #97.
 | #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Oct 25 review addressed; re-rendered; awaiting the user's review |
 | #92 | `fix/sbi-summaries` | Open. Callables saved only as loadable paths; summaries errors stop the search (Behavior notes) |
 | #94 | `feat/inference-property-filter` | Open. `PropertyFilter` and `KnownTruthStudy.filter_prior`; a replicate top-up no longer waits for files the earlier run never wrote; `to_dataframe()` gives the rendered parameter values |
-| #95 (PR 4) | `docs/inference-rejection-filter` | **Draft, to be rebuilt** on the fire model (Oct 27, "Rebuild of PR 4 and PR 5") |
-| #96 (PR 5) | `docs/inference-posterior-property` | **Draft, to be rebuilt** on the fire model (Oct 27) |
-| #97 | `feat/inference-batch-remote` | Open. Known-truth studies on a batch target, `run_at_each`, `ParameterSetsStrategy`, `JobConfig.custom_tags`, the SMC-ABC batch policy, and two batch fixes (staging bucket; no-wait job id). Tested on `gke-test` |
-| — | `feat/forevertree-fire-model` | Pushed, no PR. The second ForeverTree model and this plan; moves below #95 in the rebuild |
+| #97 | `feat/inference-batch-remote` | Open. Known-truth studies on a batch target, `run_at_each`, `ParameterSetsStrategy`, `JobConfig.custom_tags`, the SMC-ABC batch policy, and batch fixes (staging bucket; no-wait job id; output steps loaded at ingest; a warning that seeds don't reach the target). Tested on `gke-test` |
+| #98 | `feat/forevertree-fire-model` | Open. The fire model, its synthetic climate, its case module and this plan |
+| #99 (page 1) | `docs/inference-fire-case` | **Draft.** "A Model with Births and Deaths": the fire model's study and SMC-ABC fit; rendered on `gke-test` |
+| #95 (page 2) | `docs/inference-rejection-filter` | **Draft, rebuilt** (Oct 28): "What Would It Take?", the filter under `hot_dry`; rendered on `gke-test` |
+| #96 (page 3) | `docs/inference-posterior-property` | **Draft, rebuilt** (Oct 28): "Posterior Probability of Replacement" under each future; rendered on `gke-test` |
 
 ### Next phase: readiness (Oct 27)
 
 | Work | Ready? | Notes |
 |------|--------|-------|
-| Rebuild of PR 4 and PR 5 on the fire model | **Waits on the synthetic climate** | Decided Oct 27 (next section); the data are generated outside this repo |
+| Rebuild of PR 4 and PR 5 on the fire model | **Done** (#98, #99, #95, #96), drafts | Awaiting the user's review of the renders |
 | `csv_precision` passthrough; `use_float64` in `run_hash` | **Ready** | Small code PR ("Josh CSV export bug") |
 | SMC-ABC batch policy | **Done** (#97) | `SbiStrategy(batch_policy="exact" \| "measured")`, defaulting by dispatch mode |
-| Second ForeverTree model | **Drafted**; timeline and climate to revise | Spin-up → survey → projection on the synthetic climate (Oct 27) |
+| Second ForeverTree model | **Done** (#98) | Spin-up → present → projection on the synthetic climate |
 | Parameter declarations (direct vs inverse) | Direction agreed | API to draft; the second model is its first user |
 | Field data (a study without a truth run) | Ready, small | Needed for Joshua tree, not for ForeverTree |
 | Test (2) as SMC-ABC on a stability target | Waits | The rebuilt #95 is its rejection version; the target is the projected ratio |
@@ -209,7 +210,6 @@ n/12"). #95 and #96 still sit on #94 until their rebuild moves them onto #97.
 | Cleanup (Optuna, spin-up) | Parked | Wholesale, once SBI is stable |
 
 Nothing in the stack has merged yet, so new code PRs stack on #96 unless the lower PRs merge first.
-The rebuild is the exception: its code PR and new page go below #95 (next section).
 
 ### Rebuild of PR 4 and PR 5 on the fire model (Oct 27)
 
@@ -284,9 +284,9 @@ juveniles at the dry sites.
 
 **Projection and hypothesis:**
 - Projections are separate runs at the final particles, 10 replicates each, under each future.
-  They share seeds across the three futures, so for each replicate the three futures branch from
-  the same simulated present. That present is a fresh realization of the particle's parameters,
-  not the search's replicate.
+  Each replicate's present is a fresh realization of the particle's parameters, not the search's
+  replicate. (Planned: shared seeds, so the three futures branch from the same present. Dropped:
+  `batchRemote` takes no seed.)
 - The landscape ratio (juveniles over adults, pooled over the occupied patches), averaged over the
   last 10 projection years, must be at or above the target in 9 of 10 replicates. The page also
   shows the pooled reading (as on the current #96).
@@ -351,16 +351,60 @@ ratio mixes recruitment with growth speed. With maturity by age, on `gke-test`:
 The ratio ranks the futures as the adult trend does. Heat (open item 2 below) no longer touches the
 ratio: temperature only changes growth, and growth no longer sets maturity.
 
-**Open (for the user):**
-1. **The target's value.**
-   - Proposed: **0.30 juveniles per adult**, averaged over the last 10 projected years.
-   - It sits midway between `hot_dry`'s highest replicate (0.231) and `normal`'s lowest (0.352).
-   - Any target from 0.24 to 0.35 passes all 10 of the truth's replicates under `normal` and
-     `cool_wet`, and none under `hot_dry`.
-   - Fix it before the fit, and state it on the page as the management target.
+**Decided (Oct 27):**
+1. **The target: 0.30 juveniles per adult**, averaged over the last 10 projected years ("Target .3 is
+   fine"). It sits midway between `hot_dry`'s highest replicate and `normal`'s lowest.
 2. ~~Heat in the ratio~~: moot with maturity by age.
 3. ~~The climate magnitudes and lengths~~: set by the data.
-4. **Detection error in the survey** (juveniles are easy to miss), or exact counts.
+4. **Detection: imperfect but small.** Each juvenile is found with chance 90% (`juvenileDetection`,
+   drawn by the model as `detectedJuveniles`); adults always. "Keep it small so we can still
+   clearly observe what we expect."
+
+**Built (Oct 28): the three pages.** Stack: `#97 → feat/forevertree-fire-model (code) →
+docs/inference-fire-case (page 1) → #95 (page 2) → #96 (page 3)`.
+- **Case module** `forevertree_fire_case.py`: survey of 10 fixed sites (two in each of the five
+  western columns); candidate statistics; `projection_model(future)`; `projected()` (the window
+  ratio and adult λ). Fit runs load the 10 present years, projections the survey year onward.
+- **Prior box:** `recruitment` 10–90%, `droughtMortality` 0–40%.
+- **Finding 1, the survey's ratio is uninformative about these traits.** Over the 200 prior
+  draws, the pooled log ratio has ρ −0.07 (recruitment) and +0.16 (drought mortality).
+  Recruitment is density dependent, so turnover sets the present ratio. ABC compares adult
+  density (ρ +0.84 with recruitment) and the dry-versus-wet density gradient (ρ −0.59 with drought
+  mortality). The ratio stays the hypothesis's measure, in the projections.
+- **Finding 2, the target is out of reach under `hot_dry` for these traits.** A pilot on
+  `gke-test` (3 replicates at each of 18 points spanning recruitment 10–100% × droughtMortality 0–100%): the
+  projected ratio tops out near 0.25. It is highest at high drought mortality, whose stands have
+  already lost their dry edge (dry-edge adults stop recruiting under `hot_dry` and pull the pooled
+  ratio down). Adults decline everywhere (λ 0.976–0.998). Page 2's filter therefore accepts
+  nothing at 0.30; the page says so, and what the ceiling is. The target is applied after the
+  runs, so another target needs no new runs.
+- **Truth projections** (10 replicates per future, page 1): window ratio 0.398 (0.346–0.463)
+  under `normal`, 0.472 (0.408–0.534) under `cool_wet`, 0.200 (0.170–0.234) under `hot_dry`; adult
+  λ 1.000, 1.003, 0.994. 0.30 separates them with every replicate on its side.
+- **Finding 3, a search replays exactly only in the numeric environment it ran in.** The search
+  run from a plain Python script on `gke-test` replayed exactly from another plain Python process,
+  but under reticulate (the R process that renders the pages) it proposed different parameter sets
+  from generation 2 on (float32's last digits; the thread counts match, so likely the BLAS/LAPACK
+  R loads into the process). So each page's first render runs its own simulations on the cluster
+  (`JOSH_BATCH_TARGET=gke-test pixi run docs-inference`), and later renders replay. The session's
+  `versions` (sbi, torch, device) don't capture this; recording the embedding (R or not) and the
+  BLAS in the session would let `_warn_on_version_drift` warn.
+- **Results.** Page 1: the fit's 90% intervals are `recruitment` 39–87% and `droughtMortality`
+  2–23% (truth 50% and 10%; ESS 28 of 30); the final tolerance holds 10% of the truth's replicate
+  surveys. Page 2: no prior draw meets 0.30 under `hot_dry` (25 have a replicate that does; the
+  highest target any draw meets in 9 of 10 replicates is 0.248), and no draw's adults hold.
+  Page 3: P(target | survey) is 1 under `normal` and `cool_wet` (bound 0.89) and 0 under `hot_dry`
+  (bound 0.11); pooled 0.996, 1.000 and 0.005. The controls come out as they should.
+- **Costs on `gke-test`:** `load` (truth + 200 prior draws) 33 minutes; the truth's projections
+  1–2 minutes per future; page 1's search 65 minutes (after the plain-Python search, 89 minutes,
+  was discarded; generations 0 and 1 were reused); page 2's filter (2,000 simulations) 85 minutes;
+  page 3's projections (900) 51 minutes. Most of it is joshpy staging, dispatching, polling and
+  loading jobs one at a time (about 10 s per job); a simulation takes about 16 s. Later renders
+  replay each page locally in 2–3 minutes with no new runs.
+- **Follow-ups for the toolkit:** dispatch is serial (stage the batch in one upload, or dispatch
+  from a thread pool); a transient storage error while staging failed one of page 2's 200 jobs
+  ("We encountered an internal error. Please try again."), and the filter stops on any failure,
+  so staging should retry.
 
 ### #90 review (Oct 21)
 
