@@ -1,6 +1,6 @@
 # SBI Implementation for joshpy
 
-Oct 27, 2026 · @nick · joshpy 0.0.9.35 · sbi 0.27.0 with CPU-only torch 2.14.1
+Oct 29, 2026 · @nick · joshpy 0.0.9.35 · sbi 0.27.0 with CPU-only torch 2.14.1
 
 How joshpy runs the filter-and-refine search in [SBI.md](SBI.md). The machinery is proved on
 the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to a second ForeverTree model
@@ -191,27 +191,205 @@ Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94
 | #94 | `feat/inference-property-filter` | Open. `PropertyFilter` and `KnownTruthStudy.filter_prior`; a replicate top-up no longer waits for files the earlier run never wrote; `to_dataframe()` gives the rendered parameter values |
 | #97 | `feat/inference-batch-remote` | Open. Known-truth studies on a batch target, `run_at_each`, `ParameterSetsStrategy`, `JobConfig.custom_tags`, the SMC-ABC batch policy, and batch fixes (staging bucket; no-wait job id; output steps loaded at ingest; a warning that seeds don't reach the target). Tested on `gke-test` |
 | #98 | `feat/forevertree-fire-model` | Open. The fire model, its synthetic climate, its case module and this plan |
-| #99 (page 1) | `docs/inference-fire-case` | **Draft.** "A Model with Births and Deaths": the fire model's study and SMC-ABC fit; rendered on `gke-test` |
-| #95 (page 2) | `docs/inference-rejection-filter` | **Draft, rebuilt** (Oct 28): "What Would It Take?", the filter under `hot_dry`; rendered on `gke-test` |
-| #96 (page 3) | `docs/inference-posterior-property` | **Draft, rebuilt** (Oct 28): "Posterior Probability of Replacement" under each future; rendered on `gke-test` |
+| #99 (page 1) | `docs/inference-fire-case` | **Draft, to be rebuilt** on the marked-plot design (Oct 29, below). Rendered Oct 28: "A Model with Births and Deaths" |
+| #95 (page 2) | `docs/inference-rejection-filter` | **Draft, to be rebuilt** (Oct 29). Rendered Oct 28: "What Would It Take?" |
+| #96 (page 3) | `docs/inference-posterior-property` | **Draft, to be rebuilt** (Oct 29). Rendered Oct 28: "Posterior Probability of Replacement" |
+
+**Oct 29:** the user's review of the three rendered pages found that their fit and their hypothesis
+fail as a known-truth demonstration. The fire model's identifiability was diagnosed, and the
+demo adopts a new design: inverse parameters `recruitment` and `juvenileMortality`, and a
+marked-plot survey revisited over a 20-year present. See "Fire model review: identifiability and
+survey design (Oct 29)" below. The pages are rebuilt on it.
 
 ### Next phase: readiness (Oct 27)
 
 | Work | Ready? | Notes |
 |------|--------|-------|
-| Rebuild of PR 4 and PR 5 on the fire model | **Done** (#98, #99, #95, #96), drafts | Awaiting the user's review of the renders |
+| Rebuild of PR 4 and PR 5 on the fire model | **Reviewed (Oct 29); to be redone** | The marked-plot design (Oct 29 section) replaces the fit and the hypothesis; prep checklist there |
 | `csv_precision` passthrough; `use_float64` in `run_hash` | **Ready** | Small code PR ("Josh CSV export bug") |
 | SMC-ABC batch policy | **Done** (#97) | `SbiStrategy(batch_policy="exact" \| "measured")`, defaulting by dispatch mode |
 | Second ForeverTree model | **Done** (#98) | Spin-up → present → projection on the synthetic climate |
 | Parameter declarations (direct vs inverse) | Direction agreed | API to draft; the second model is its first user |
 | Field data (a study without a truth run) | Ready, small | Needed for Joshua tree, not for ForeverTree |
 | Test (2) as SMC-ABC on a stability target | Waits | The rebuilt #95 is its rejection version; the target is the projected ratio |
-| Pilot on the cluster | **Toolkit ready** (#97, tested on `gke-test`) | The rebuild is the pilot. Open: the credentials Secret each dispatch leaves behind. The CSV bug doesn't touch the fire model's counts |
+| Pilot on the cluster | **Toolkit ready** (#97, tested on `gke-test`) | The rebuild is the pilot. Open: the credentials Secret each dispatch leaves behind. The CSV bug doesn't touch the fire model's counts. **Oct 29: `gke-test` jobs stayed `pending` for over an hour**; check the cluster before the big run |
 | Cleanup (Optuna, spin-up) | Parked | Wholesale, once SBI is stable |
 
 Nothing in the stack has merged yet, so new code PRs stack on #96 unless the lower PRs merge first.
 
+### Fire model review: identifiability and survey design (Oct 29)
+
+**The review.** The three rendered pages (Oct 28) ran correctly but fail as a known-truth
+demonstration:
+- **The hypothesis did not depend on the fit.** P(target) came out 1 / 0 / 1 under `normal` /
+  `hot_dry` / `cool_wet`, and under `hot_dry` the prior already gave 0 (every draw 0.07–0.27
+  against 0.30). A posterior collapsed onto the truth would give the same numbers, so the survey
+  changed no conclusion.
+- **The fit was weak and pulled away from the truth.** Over the truth's 30 replicate surveys, the
+  posterior mean averaged 63% for `recruitment` (truth 50%) and 15.6% for `droughtMortality`
+  (truth 10%). The model was meant to make θ easy to recover, so either the model does not
+  behave as intended or the inference is wrong.
+
+**Diagnosis: the inference works; the model's parameters were not identifiable from the survey.**
+All checks are read-only, on the docs registry's runs:
+- **The inference is calibrated.** Leave-one-out coverage is 0.92 and 0.905 (0.905 expected). The
+  truth's 30 replicate surveys are covered 97% and 100% of the time. The reference simulations
+  reproduce the truth's survey: a local fit predicts 11.1 adults per site and a gradient of −1.03,
+  against 11.8 and −1.00 over the replicates. SMC-ABC and plain rejection agree (67 / 11 against
+  70 / 10).
+- **Both parameters act through one channel,** how many juveniles survive to become adults. +10%
+  recruitment adds 2.0 adults per site, and +10% drought mortality removes 3.6. The density
+  gradient moves in nearly the same proportion (+0.37, −1.07). So the two statistics measure
+  about one combination: a ridge. A linear-Gaussian reading gives posterior SDs of 46 and 19 from
+  one survey alone, with correlation +0.97. That is wider than the prior box (SD 23.1 and 11.5),
+  so the box decides where along the ridge the posterior sits, and its middle lies at higher
+  values of both. The pseudo-observed survey also falls at the truth's 90th percentile (16 adults
+  per site against a mean of 11.8).
+- **The stage ratio measures turnover.** With density-dependent recruitment, a settled stand has
+  J/A = μ_A (1 − s^T) / ((1 − s) s^T) (adult mortality μ_A, juvenile survival s, maturity age T).
+  That is independent of `recruitment`, which only sets how full patches get. It rises as juvenile
+  survival falls (0.17 at 1% juvenile mortality, 0.20 at 5%, 0.50 at 20%; no fire or drought). A
+  pilot inverting juvenile mortality (41 draws on `gke-test`) confirmed it: the draws that meet a
+  fixed ratio target under `hot_dry` have the highest juvenile mortality (15.7–19.9%), and three of
+  the five have almost no adults left at the survey sites. **A fixed ratio target rewards poor
+  juvenile survival**, so it cannot be the replacement hypothesis with these parameters.
+
+**Process: sufficiency, tested by simulation (agreed Oct 29).** Sufficiency is a property of a
+statistic S relative to the data D (p(θ | S) = p(θ | D)); it says nothing about whether D
+identifies θ. So there are two questions: is D informative, and is S sufficient for D?
+0. **Set the bar first:** recovery as good as the first model's.
+1. **List candidate designs D** (sites, visits, what each visit records).
+2. **Measure what each D knows:** regress each parameter on a rich feature set of D over the prior
+   simulations, cross-validated (semi-automatic ABC, @fearnhead2012). Posterior SD ≈ prior SD ×
+   √(1 − R²) on average. A regression can underfit, so this is a lower bound on what D knows.
+3. **Compare S with that.** If S reaches nearly the R² of all of D, S is approximately sufficient
+   for D.
+4. **Signal against noise:** replicates at the truth.
+5. **Simulation tests in both directions:**
+   - necessity: drop a statistic and the posterior widens;
+   - sufficiency: add statistics and the posterior does not change (@joyce2008);
+   - recovery: leave-one-out coverage, and the truth's replicate surveys.
+   The first model's "Testing Sufficiency" section shows only necessity (dropping the CV); add the
+   sufficiency direction to both case studies.
+
+**The leave-one-out width has a floor.** With 200 simulations and k = 20, statistics that equal
+the parameters give widths of 0.32 and 0.34. The first model's 0.37 and 0.36 sat at that floor.
+Compare designs by R² (posterior SD over prior SD), not by that width. On that scale the first
+model's mean and CV reach R² 1.00 and 0.98 (SD ratio 0.03 and 0.14): it is nearly deterministic.
+
+**Findings.** Pilots ran in the scratchpad (`turnover_pilot/`, `marked_pilot/`; uncommitted),
+on the docs' 200 prior draws plus 30 truth replicates where noted:
+
+| Parameters | Design | R², first | R², second | Note |
+|---|---|---|---|---|
+| `recruitment`, `droughtMortality` | Density + gradient, 10 sites, once | 0.65 | 0.37 | The docs' fit |
+| | All raw counts, 10 sites, once | 0.70 | 0.41 | So S ≈ sufficient for D, and D is the limit |
+| | Counted revisits, 1 to 10 visits | 0.70–0.72 | 0.41–0.46 | Revisits add nothing |
+| | All 63 patches, once | 0.73 | 0.56 | Sites help a little |
+| | Marked plots, yearly, model-derived statistics | (width 0.40–0.44) | (width 0.83) | Leave-one-out widths; drought mortality stays unidentified |
+| `recruitment`, `juvenileMortality` | Counts, once / yearly | 0.44 / 0.46 | 0.51 / 0.50 | Posterior means at the truth 61% and 7.1–7.4% |
+| | Marked plots every 3 years, 18 years, model-derived statistics | 0.80 | 0.69 | Posterior means at the truth 53% and 5.8% |
+| | Marked plots yearly, model-derived statistics | 0.85 | 0.72 | Posterior means at the truth 49% and 6.1% |
+
+- **Counted revisits recount the same plants.** At 98% adult survival a year, 83% of the adults at
+  a revisit 9 years later are the same trees. What limits the fit is each site's own history of
+  fires and recruitment luck; a new site adds an independent history, a revisit does not.
+- **Marked plots record rates, and in this model the rates are nearly the parameters.** Two
+  statistics follow the model's equations:
+  - `r_hat`: new plants per (marked adult × wet year × open space), where open space is
+    1 − N/40, over all intervals;
+  - `jm_hat`: the yearly death rate of marked juveniles over intervals without fire.
+  Generic pooled features missed the open-space weighting, so their R² undersold the marked data:
+  the same lesson as the first model's CV.
+- **`droughtMortality` is limited by exposure, not by the statistic.** At the truth, juveniles at
+  the 10 sites log about 180 juvenile-years of dryness in unburned years over 19 years. At 10%
+  that predicts about 18 extra deaths, lost in binomial and fire noise. All 63 patches reach
+  width 0.67. Coverage stays calibrated: the method reports that it does not know.
+- **Survey effort over years** (marked plots every 3 years, posterior SD over prior SD):
+
+  | Years of revisits | `recruitment` | `juvenileMortality` |
+  |---|---|---|
+  | 3 | 0.65 | 0.79 |
+  | 6 | 0.53 | 0.66 |
+  | 12 | 0.52 | 0.65 |
+  | 18 | 0.45 | 0.56 |
+
+  More frequent visits over the same span help too: every 5 / 3 / 2 / 1 years gives 0.52 / 0.45 /
+  0.43 / 0.39 for `recruitment` and 0.64 / 0.56 / 0.52 / 0.53 for `juvenileMortality`.
+- **The two statistics are nearly sufficient for the marked-plot data.** Adding every other
+  feature (counts per half of the gradient, survival of marked juveniles and adults, new plants per
+  adult) changes R² by 0.00 for `recruitment` and +0.03–0.05 for `juvenileMortality`. Those
+  features alone reach 0.54 and 0.63–0.67. The rest of the juvenile signal is probably in the stage
+  ratio, which depends on juvenile survival in a settled stand; it is the candidate third
+  statistic. Subtracting the known drought hazard from `jm_hat` closes only 0.01–0.03.
+- **Recovery is unbiased and calibrated.** Coverage is 0.90–0.95. The posterior means at the
+  truth sit at 49–55% and 5.8–6.5%; the prior's floor at 1% pulls the second up.
+- **The gap to the first model is demographic noise.** Each marked juvenile is one Bernoulli trial
+  a year, and the 10 sites hold at most 40 plants each (about 30 juveniles alive at a time). Even
+  sufficient statistics cannot beat that.
+
+**Decided (Oct 29): the fire model's design for the demo.**
+- **Inverse parameters: `recruitment` (10–90%) and `juvenileMortality` (1–20%)**; truth 50% and
+  5%. `droughtMortality` is direct, at 10%. Recruitment and juvenile survival are the two vital
+  rates a marked-plot program measures, which is the Joshua tree case.
+- **The present is 20 years**, the survey program's window, after the 200-year spin-up.
+- **The survey: the 10 fixed sites as marked plots.** Each visit marks every plant and records the
+  fates of those marked at the last visit (alive or dead, by their stage when marked) and the
+  plants new since. Climate and fires are recorded every year. The default schedule is every 3
+  years (7 visits, steps 201–219). The model exports every year, so a page can compare schedules
+  and spans from the same runs.
+- **Statistics:** `r_hat` and `jm_hat`, with the log stage ratio as a candidate third. Page 1
+  demonstrates sufficiency by simulation in both directions.
+- **The bar for the fire model** is unbiased, calibrated recovery whose uncertainty narrows with
+  survey effort, not the first model's tightness. Bigger plots (`maxTrees` about 200) would push
+  toward that tightness, at slower runs; parked.
+- **For Joshua tree:** survey effort over years reduces uncertainty when revisits follow marked
+  plants. The number of marked plants followed sets the floor. Responses expressed only in rare
+  conditions (drought, fire) need long records spanning those events, or sites placed where they
+  happen.
+
+**How the pilot read fates.** It read them from age-structure exports: live trees younger than 2,
+3, 4, 5, 6, 9, 10, 11, 12 and 13 years, per patch and year. A tree is age 1 the first time it is
+counted. So at a revisit k years on:
+- trees aged k + 1 or more were there at the last visit;
+- those aged k + 8 or more were adults then;
+- trees younger than k + 1 are new.
+This was checked: survivors never exceed the plants marked. The pilot assumed every marked plant
+is refound and every new plant seen. Detection error applied to counts only, and it cost nothing.
+
+**Open before the big run:**
+1. **The hypothesis for pages 2–3.** The ratio target rewards poor juvenile survival. The
+   candidate is adults' λ under `hot_dry` (for example λ ≥ 0.99, keeping two-thirds of the adults
+   over 40 years). Under the old parameters, λ ≥ 0.99 under `hot_dry` gave a prior probability of
+   0.30 and a posterior probability of about 0.97. It is measured after the runs, so it does not
+   block the simulations.
+2. **Where the big run runs.** `gke-test` jobs stayed `pending` for over an hour on Oct 29, and up
+   to 200 dispatched pilot jobs may still be queued there. Check the cluster first. Locally, the
+   pilot's 230 runs took about 20 minutes at 5 in parallel, outside joshpy, which runs one
+   simulation at a time locally.
+3. **Detection on marked plots:** whether new juveniles are found at 90%. The pilot found detection
+   cost nothing on counts.
+
+**Prep checklist:**
+- **Model** (`forevertree_fire.josh`): the age-structure exports. **Template:** `presentYears = 20`,
+  `juvenileMortality` templated, `droughtMortality = 10 %`.
+- **Case module:** prior and truth; `SURVEY_STEP` 219 and the visit schedule; `observe` returns the
+  marked-plot records; `statistics` gives `r_hat`, `jm_hat`, the log ratio and the counts;
+  `projected()` keeps the window ratio and adult λ.
+- **Pages:**
+  - Page 1 rebuilt around the survey design: counts against marked plots, the sufficiency tests,
+    and the effort curve.
+  - Pages 2–3 rebuilt with the chosen hypothesis.
+- **Cost:** the same simulation counts as Oct 28 (200 prior draws, a search of about 600, a
+  filter of 2,000, 900 projections). Runs are about 5% longer (220 steps to the survey, against
+  210).
+
 ### Rebuild of PR 4 and PR 5 on the fire model (Oct 27)
+
+> **Superseded in part (Oct 29):** the inverse parameters, the survey, the statistics and the
+> ratio-target hypothesis below give way to the marked-plot design in "Fire model review:
+> identifiability and survey design (Oct 29)". The timeline, the climate, the futures and the
+> page plan's three-page shape stand.
 
 The growth-band pages (#95, #96) are rebuilt on the second ForeverTree model, around replacement.
 `faster`, `steady` and the growth window go: they were invented because the first model's trees

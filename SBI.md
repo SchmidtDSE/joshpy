@@ -27,6 +27,22 @@ We map which parameter sets let Joshua trees replace themselves, then check whic
 > identifies recruitment or juvenile drought mortality when recruitment is density dependent
 > (densities and their spread between sites do), and a pooled ratio target can be met by a stand
 > that has already lost its dry edge, so pair it with the adults' trend.
+>
+> **Update, Oct 29, 2026:** the Oct 28 demonstration fails as a known-truth check. Its fit leaned
+> away from the truth, and its hypothesis came out the same whatever the survey said. The inference
+> is calibrated: the model's two parameters were not identifiable from a one-year count survey.
+> Findings that bear on the Joshua tree test:
+> - **Counted revisits barely reduce uncertainty;** they recount the same long-lived plants.
+> - **Marked-plot revisits do,** for vital rates every plant expresses every year (recruitment per
+>   adult, juvenile survival). The uncertainty shrinks with years of revisits, and the number of
+>   marked plants followed sets its floor.
+> - **Responses expressed only in rare conditions** (juvenile drought mortality) stay unidentified
+>   without long records spanning those conditions.
+> - **A fixed juvenile:adult ratio target measures turnover, not replacement:** it rewards poor
+>   juvenile survival.
+>
+> The demo now fits `recruitment` and `juvenileMortality` to marked plots revisited over 20 years.
+> See "Fire model review: identifiability and survey design (Oct 29)" in SBI_IMPLEMENTATION.md.
 
 ## At a glance
 
