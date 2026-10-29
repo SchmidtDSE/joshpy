@@ -371,11 +371,22 @@ is refound and every new plant seen. Detection error applied to counts only, and
    cost nothing on counts.
 
 **Prep checklist:**
-- **Model** (`forevertree_fire.josh`): the age-structure exports. **Template:** `presentYears = 20`,
-  `juvenileMortality` templated, `droughtMortality = 10 %`.
-- **Case module:** prior and truth; `SURVEY_STEP` 219 and the visit schedule; `observe` returns the
-  marked-plot records; `statistics` gives `r_hat`, `jm_hat`, the log ratio and the counts;
-  `projected()` keeps the window ratio and adult λ.
+- **Done (Oct 29): model** (`forevertree_fire.josh`): the age-structure exports. **Template** and
+  the `fire_modes` configs: `presentYears = 20`; in the template, `juvenileMortality` is templated
+  and `droughtMortality = 10 %`.
+- **Done (Oct 29): case module.**
+  - Prior and truth; `SURVEY_STEP` 219; `visits()`; `present()`.
+  - `observe` returns the marked-plot records, one row per site and visit.
+  - `statistics` gives `r_hat` and `jm_hat` (in %), plus `log_ratio`, `adult_density` and
+    `density_gradient` from the counts. `STATISTICS = ["r_hat", "jm_hat"]`.
+  - `projected()` keeps the window ratio and adult λ.
+  - Checked against the pilot: the same statistics to 1e-14 on 27 of its runs, for 1-, 3- and
+    5-year schedules. One local truth run went through joshpy end to end: 20 present years
+    loaded, 7 visits, `r_hat` 41, `jm_hat` 7.7 (truth 50 and 5; both statistics are biased by
+    design: unseen recruits, drought deaths).
+- **Registry:** the new model gives new run hashes, so the big run can use a fresh registry. Keep
+  `forevertree_fire.duckdb` (1.7 GB) until the old pages are replaced. Disk had about 5 GB free
+  on Oct 29.
 - **Pages:**
   - Page 1 rebuilt around the survey design: counts against marked plots, the sufficiency tests,
     and the effort curve.

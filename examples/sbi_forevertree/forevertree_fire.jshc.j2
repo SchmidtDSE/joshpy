@@ -1,13 +1,14 @@
 # The second ForeverTree model (forevertree_fire.josh), with stochastic fire:
 # the fire-model case study's configuration. SbiStrategy draws recruitment and
-# droughtMortality from their prior; projectionYears is a template variable (0 for
+# juvenileMortality from their prior; projectionYears is a template variable (0 for
 # fit runs, 40 for projections). Everything else is fixed. Rates are yearly.
 
 # --- The run ---
 # Years of spin-up on resampled historical climate.
 spinupYears = 200 count
-# Years of the present: the last historical years, in order. A survey records the final one.
-presentYears = 10 count
+# Years of the present: the last historical years, in order. Marked plots are surveyed over
+# them, and the final one is the survey year.
+presentYears = 20 count
 # Years of the projection under the future mapped as futureTemperature and futurePrecipitation
 # (0: stop at the survey, as fit runs do; at most the future file's 40 years).
 projectionYears = {{ projectionYears }} count
@@ -32,9 +33,9 @@ recruitment = {{ recruitment }} %
 # Chance that an adult dies.
 adultMortality = 2 %
 # Chance that a juvenile dies, in a wet year.
-juvenileMortality = 5 %
+juvenileMortality = {{ juvenileMortality }} %
 # Added to a juvenile's chance of dying in a dry year (300 mm or less); linear in between.
-droughtMortality = {{ droughtMortality }} %
+droughtMortality = 10 %
 
 # --- Fuel and fire ---
 # Share of the missing fuel cover that grows back in a wet year (less in drier years).

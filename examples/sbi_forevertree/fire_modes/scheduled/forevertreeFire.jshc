@@ -4,8 +4,9 @@
 # --- The run ---
 # Years of spin-up on resampled historical climate.
 spinupYears = 200 count
-# Years of the present: the last historical years, in order. A survey records the final one.
-presentYears = 10 count
+# Years of the present: the last historical years, in order. Marked plots are surveyed over
+# them, and the final one is the survey year.
+presentYears = 20 count
 # Years of the projection under the future mapped as futureTemperature and futurePrecipitation
 # (0: stop at the survey, as fit runs do; at most the future file's 40 years).
 projectionYears = 40 count

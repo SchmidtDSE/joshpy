@@ -22,9 +22,14 @@ Two kinds of run share one model:
   ``cool_wet``): :func:`projection_model`. Each is a separate run, so its present
   is a fresh realization of its parameters, not a fit run's.
 
-The pseudo-observed data are a **survey**: stage counts at fixed sites in the
-survey year. Adults are always found; each juvenile is found with chance
-``juvenileDetection`` (90%), drawn by the model (``detectedJuveniles``).
+The pseudo-observed data are a **survey of marked plots**: 10 fixed sites,
+revisited every ``VISIT_EVERY`` years over the 20-year present. Each visit counts
+the adults and juveniles, marks every plant, and finds which of the plants marked
+at the last visit survive (by their stage when marked) and which plants are new.
+Climate and fires are recorded every year. Adults are always counted; each
+juvenile is counted with chance ``juvenileDetection`` (90%), drawn by the model
+(``detectedJuveniles``). Marked plants are always refound. The model exports
+every present year, so other schedules can be read from the same runs.
 
 Every run writes to ``minio://`` (``exportPrefix`` below), so the same study runs
 locally, given MinIO keys in the environment, or on a batch target: set
@@ -53,16 +58,16 @@ from joshpy.registry import RunRegistry
 HERE = Path(__file__).resolve().parent
 CLIMATE = HERE / "climate"
 
-TRUTH = {"recruitment": 50.0, "droughtMortality": 10.0}
+TRUTH = {"recruitment": 50.0, "juvenileMortality": 5.0}
 PRIOR = {
     "recruitment": {"uniform": [10.0, 90.0]},
-    "droughtMortality": {"uniform": [0.0, 40.0]},
+    "juvenileMortality": {"uniform": [1.0, 20.0]},
 }
 TRUTH_SEED = 3  # names the pseudo-observed run (batchRemote takes no seed)
 N_PRIOR = 200
 
 # The run (forevertree_fire.jshc.j2): spin-up, present, projection.
-SPINUP_YEARS, PRESENT_YEARS, PROJECTION_YEARS = 200, 10, 40
+SPINUP_YEARS, PRESENT_YEARS, PROJECTION_YEARS = 200, 20, 40
 SURVEY_STEP = SPINUP_YEARS + PRESENT_YEARS - 1  # the present's last year
 FINAL_STEP = SURVEY_STEP + PROJECTION_YEARS
 WINDOW = range(FINAL_STEP - 9, FINAL_STEP + 1)  # the last 10 projected years
@@ -88,10 +93,11 @@ SURVEY_SITES = [
     (4.5, 5.5),
 ]
 DETECTION = 0.9  # juvenileDetection in forevertree_fire.jshc.j2
-# What ABC compares. The survey's log ratio barely moves with either parameter
-# (see the fire-model page), so the fit compares how full the stand is and how
-# far east it reaches.
-STATISTICS = ["adult_density", "density_gradient"]
+VISIT_EVERY = 3  # years between visits to the marked plots: steps 201, 204, ..., 219
+MAX_TREES, MATURITY_AGE = 40, 8  # maxTrees and maturityAge in forevertree_fire.jshc.j2
+# What ABC compares: one statistic per parameter, each built from the model's
+# equations (see statistics()).
+STATISTICS = ["r_hat", "jm_hat"]
 
 
 # --- Observation: raw output -> survey -> statistics ---------------------------------
@@ -115,43 +121,140 @@ def survey_year(registry: RunRegistry, run_hash: str, replicate: int = 0) -> pd.
     return cells[columns].sort_values(["y", "x"], ignore_index=True)
 
 
+def visits(every: int = VISIT_EVERY, years: int = PRESENT_YEARS) -> list[int]:
+    """Steps of the visits, every ``every`` years back from the survey year, within ``years``."""
+    if not 1 <= every <= 5:
+        raise ValueError(f"Revisits every 1 to 5 years are supported, not {every}")
+    first = SURVEY_STEP - years + 1
+    return sorted(range(SURVEY_STEP, first - 1, -every))
+
+
+def present(registry: RunRegistry, run_hash: str, replicate: int = 0) -> pd.DataFrame:
+    """The surveyed sites in every present year: counts, age structure, rain and fire."""
+    cells = registry.conn.execute(
+        """
+        SELECT * FROM cell_data_current
+        WHERE run_hash = ? AND replicate = ? AND step BETWEEN ? AND ?
+        """,
+        [run_hash, replicate, SURVEY_STEP - PRESENT_YEARS + 1, SURVEY_STEP],
+    ).df()
+    if cells.empty:
+        raise ValueError(f"No present years for run {run_hash}, replicate {replicate}")
+    cells = cells.rename(
+        columns={
+            "position_x": "x",
+            "position_y": "y",
+            "nAdults": "adults",
+            "nJuveniles": "juveniles",
+            "detectedJuveniles": "detected",
+        }
+    )
+    cells = cells.set_index(["x", "y"]).loc[SURVEY_SITES].reset_index()
+    cells["dryness"] = np.clip((500 - cells["precipitation"]) / 200, 0, 1)  # as the model maps it
+    cells["burned"] = cells["burned"].astype(str).str.lower().eq("true")
+    return cells.sort_values(["step", "y", "x"], ignore_index=True)
+
+
 def observe(
-    registry: RunRegistry, run_hash: str, replicate: int = 0, *, detection: bool = True
+    registry: RunRegistry,
+    run_hash: str,
+    replicate: int = 0,
+    *,
+    detection: bool = True,
+    every: int = VISIT_EVERY,
+    years: int = PRESENT_YEARS,
 ) -> pd.DataFrame:
-    """The survey of one run: each site's adults, and its juveniles found and present.
+    """The marked-plot survey of one run: one row per site and visit.
+
+    Every visit counts adults and juveniles (``detected``: the juveniles found).
+    From the second visit on, a row also records the interval since the last
+    visit, k years: the plants marked then (``marked_juveniles``,
+    ``marked_adults``), those still alive (``surviving_juveniles``,
+    ``surviving_adults``, by their stage when marked), the plants new since
+    (``new``), the open space at the last visit (1 - plants / maxTrees), the
+    interval's wet years (the sum of 1 - dryness) and whether a fire burned.
+
+    The fates come from the age structure the model exports: a tree is age 1 the
+    year it is first counted, so the trees aged k + 1 or more were alive at the
+    last visit, and those aged k + maturityAge or more were adults then.
 
     With ``detection=False``, the survey finds every juvenile (model noise only).
     """
-    cells = survey_year(registry, run_hash, replicate).set_index(["x", "y"])
-    surveyed = cells.loc[SURVEY_SITES].reset_index()
-    if not detection:
-        surveyed["detected"] = surveyed["juveniles"]
-    return surveyed
+    cells = present(registry, run_hash, replicate)
+    steps = visits(every, years)
+    at = cells.set_index(["step", "x", "y"])
+    rows = []
+    for i, step in enumerate(steps):
+        now = at.loc[step]
+        row = pd.DataFrame(
+            {
+                "step": step,
+                "adults": now["adults"],
+                "juveniles": now["juveniles"],
+                "detected": now["detected"] if detection else now["juveniles"],
+            }
+        )
+        if i > 0:
+            last, k = at.loc[steps[i - 1]], step - steps[i - 1]
+            between = cells[cells["step"].between(steps[i - 1], step - 1)].groupby(["x", "y"])
+            plants = now["adults"] + now["juveniles"]
+            row["marked_juveniles"] = last["juveniles"]
+            row["marked_adults"] = last["adults"]
+            row["surviving_juveniles"] = now[f"below{k + MATURITY_AGE}"] - now[f"below{k + 1}"]
+            row["surviving_adults"] = plants - now[f"below{k + MATURITY_AGE}"]
+            row["new"] = now[f"below{k + 1}"]
+            row["open_space"] = (1 - (last["adults"] + last["juveniles"]) / MAX_TREES).clip(lower=0)
+            row["wet_years"] = k - between["dryness"].sum()  # the sum of 1 - dryness
+            row["burned"] = between["burned"].any()
+        rows.append(row.reset_index())
+    return pd.concat(rows, ignore_index=True)
 
 
 def statistics(survey: pd.DataFrame) -> dict[str, float]:
-    """Candidate summary statistics of a survey's counts: adults, and juveniles found.
+    """Candidate summary statistics of a marked-plot survey.
 
-    Counts are pooled over sites, with half a tree added to each pooled count so
-    that an empty survey still has a finite log. The gradients compare the four
-    dry sites (x > 3, under 450 mm of rain) with the four wet ones (x < 2, about
-    500 mm or more).
+    From the fates of marked plants, one statistic per parameter, each following
+    the model's equations:
+
+    - ``r_hat``: new plants per marked adult, per wet year, per unit of open
+      space, in %. Recruits ~ Binomial(adults, recruitment x (1 - dryness) x open
+      space), so this tracks ``recruitment`` (below it: recruits that die before
+      the next visit are never seen).
+    - ``jm_hat``: the yearly death rate of marked juveniles, over intervals
+      without fire, in %. A juvenile dies with chance juvenileMortality + dryness x
+      droughtMortality, so this tracks ``juvenileMortality``.
+
+    From the counts alone, as a survey without marked plants would have:
+    ``log_ratio`` (juveniles found per adult, pooled over sites and visits),
+    ``adult_density`` (adults per site in the survey year) and
+    ``density_gradient`` (log adults at the four dry sites minus the four wet
+    ones, in the survey year). Pooled counts get half a plant, so that an empty
+    survey still has a finite log, and the rates get a pseudo-observation.
     """
-    wet, dry = survey[survey["x"] < 2], survey[survey["x"] > 3]
-
-    def log_ratio(sites: pd.DataFrame) -> float:
-        return float(np.log((sites["detected"].sum() + 0.5) / (sites["adults"].sum() + 0.5)))
-
-    def log_adults(sites: pd.DataFrame) -> float:
-        return float(np.log(sites["adults"].sum() + 0.5))
-
-    return {
-        "log_ratio": log_ratio(survey),
-        "adult_density": float(survey["adults"].mean()),
-        "occupied": float((survey["adults"] > 0).mean()),
-        "ratio_gradient": log_ratio(dry) - log_ratio(wet),
-        "density_gradient": log_adults(dry) - log_adults(wet),
+    intervals = survey.dropna(subset=["new"])
+    final = survey[survey["step"] == survey["step"].max()]
+    wet, dry = final[final["x"] < 2], final[final["x"] > 3]
+    out = {
+        "log_ratio": float(
+            np.log((survey["detected"].sum() + 0.5) / (survey["adults"].sum() + 0.5))
+        ),
+        "adult_density": float(final["adults"].mean()),
+        "density_gradient": float(
+            np.log(dry["adults"].sum() + 0.5) - np.log(wet["adults"].sum() + 0.5)
+        ),
+        "r_hat": np.nan,
+        "jm_hat": np.nan,
     }
+    if not intervals.empty:
+        k = int(np.diff(np.unique(survey["step"]))[0])
+        exposure = intervals["marked_adults"] * intervals["open_space"] * intervals["wet_years"]
+        unburned = intervals[~intervals["burned"].astype(bool)]
+        survival = (unburned["surviving_juveniles"].sum() + 0.9**k) / (
+            unburned["marked_juveniles"].sum() + 1
+        )
+        out["r_hat"] = float(100 * (intervals["new"].sum() + 0.5) / (exposure.sum() + 1))
+        out["jm_hat"] = float(100 * (1 - min(survival, 1.0) ** (1 / k)))
+    return out
 
 
 # --- Projections: the future the hypotheses are about ----------------------------------

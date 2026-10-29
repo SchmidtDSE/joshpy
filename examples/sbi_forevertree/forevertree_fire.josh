@@ -22,7 +22,9 @@
 #
 # A survey misses juveniles: each patch exports detectedJuveniles, the
 # juveniles a survey would count, each found with chance juvenileDetection.
-# Adults are always found.
+# Adults are always found. Marked plots follow plants between revisits: each
+# patch exports its age structure (below2 ... below13), from which the fates of
+# the plants marked at one visit can be read at the next.
 #
 # Outputs go to MinIO, so runs work the same locally (with MinIO keys in the
 # environment) and on a batch target; exportPrefix is a custom tag.
@@ -120,6 +122,22 @@ start patch Default
   nAdults.start = count(ForeverTree[ForeverTree.age >= meta.maturityAge])
   nJuveniles.start = nTrees - nAdults
 
+  # The age structure, for following marked plants between revisits: live trees
+  # younger than each age. A tree is age 1 the first year it is counted, so at a
+  # revisit k years on, the trees aged k + 1 or more were there at the last visit,
+  # and those aged k + 8 or more were adults then. Any revisit schedule (k = 1 to
+  # 5 years) can be read off these counts afterwards.
+  below2.start = count(ForeverTree[ForeverTree.age < 2 years])
+  below3.start = count(ForeverTree[ForeverTree.age < 3 years])
+  below4.start = count(ForeverTree[ForeverTree.age < 4 years])
+  below5.start = count(ForeverTree[ForeverTree.age < 5 years])
+  below6.start = count(ForeverTree[ForeverTree.age < 6 years])
+  below9.start = count(ForeverTree[ForeverTree.age < 9 years])
+  below10.start = count(ForeverTree[ForeverTree.age < 10 years])
+  below11.start = count(ForeverTree[ForeverTree.age < 11 years])
+  below12.start = count(ForeverTree[ForeverTree.age < 12 years])
+  below13.start = count(ForeverTree[ForeverTree.age < 13 years])
+
   # Fire: scheduled every fireInterval years from step firstFire, or with a
   # yearly chance proportional to last year's fuel (fireChance at full cover).
   scheduledFire.step = {
@@ -153,6 +171,16 @@ start patch Default
   export.precipitation.step = precipitation
   export.nAdults.step = nAdults
   export.nJuveniles.step = nJuveniles
+  export.below2.step = below2
+  export.below3.step = below3
+  export.below4.step = below4
+  export.below5.step = below5
+  export.below6.step = below6
+  export.below9.step = below9
+  export.below10.step = below10
+  export.below11.step = below11
+  export.below12.step = below12
+  export.below13.step = below13
   export.detectedJuveniles.step =
     sample binomial
     with n of nJuveniles
