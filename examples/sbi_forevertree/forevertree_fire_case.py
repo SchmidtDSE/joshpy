@@ -73,9 +73,12 @@ FINAL_STEP = SURVEY_STEP + PROJECTION_YEARS
 WINDOW = range(FINAL_STEP - 9, FINAL_STEP + 1)  # the last 10 projected years
 FUTURES = ["normal", "hot_dry", "cool_wet"]
 
-# The hypothesis: at least TARGET_RATIO juveniles per adult over the window,
-# a management target fixed before the analysis.
-TARGET_RATIO = 0.30
+# The hypothesis: the adults' yearly growth factor over the projection is at
+# least TARGET_LAMBDA, so the stand keeps at least 0.99^40 = 67% of its adults:
+# a management target fixed before the analysis. (A fixed juvenile:adult ratio
+# target would reward poor juvenile survival: a settled stand's ratio rises as
+# its juveniles die faster.)
+TARGET_LAMBDA = 0.99
 
 # Fixed survey sites, like monitoring plots: grid positions (x, y) of 10 of the
 # 63 patches, two in each of the five western columns, where the trees are.
@@ -96,8 +99,9 @@ DETECTION = 0.9  # juvenileDetection in forevertree_fire.jshc.j2
 VISIT_EVERY = 3  # years between visits to the marked plots: steps 201, 204, ..., 219
 MAX_TREES, MATURITY_AGE = 40, 8  # maxTrees and maturityAge in forevertree_fire.jshc.j2
 # What ABC compares: one statistic per parameter, each built from the model's
-# equations (see statistics()).
-STATISTICS = ["r_hat", "jm_hat"]
+# equations, and the stage ratio, which in a settled stand also depends on
+# juvenile survival (see statistics() and the fire-model page).
+STATISTICS = ["r_hat", "jm_hat", "log_ratio"]
 
 
 # --- Observation: raw output -> survey -> statistics ---------------------------------
@@ -129,8 +133,18 @@ def visits(every: int = VISIT_EVERY, years: int = PRESENT_YEARS) -> list[int]:
     return sorted(range(SURVEY_STEP, first - 1, -every))
 
 
+_PRESENTS: dict[tuple[int, str, int], pd.DataFrame] = {}
+
+
 def present(registry: RunRegistry, run_hash: str, replicate: int = 0) -> pd.DataFrame:
-    """The surveyed sites in every present year: counts, age structure, rain and fire."""
+    """The surveyed sites in every present year: counts, age structure, rain and fire.
+
+    Read once per run and replicate, so that surveying one run on several
+    schedules queries the registry once.
+    """
+    key = (id(registry), run_hash, replicate)
+    if key in _PRESENTS:
+        return _PRESENTS[key]
     cells = registry.conn.execute(
         """
         SELECT * FROM cell_data_current
@@ -152,7 +166,8 @@ def present(registry: RunRegistry, run_hash: str, replicate: int = 0) -> pd.Data
     cells = cells.set_index(["x", "y"]).loc[SURVEY_SITES].reset_index()
     cells["dryness"] = np.clip((500 - cells["precipitation"]) / 200, 0, 1)  # as the model maps it
     cells["burned"] = cells["burned"].astype(str).str.lower().eq("true")
-    return cells.sort_values(["step", "y", "x"], ignore_index=True)
+    _PRESENTS[key] = cells = cells.sort_values(["step", "y", "x"], ignore_index=True)
+    return cells
 
 
 def observe(
@@ -224,21 +239,20 @@ def statistics(survey: pd.DataFrame) -> dict[str, float]:
       without fire, in %. A juvenile dies with chance juvenileMortality + dryness x
       droughtMortality, so this tracks ``juvenileMortality``.
 
-    From the counts alone, as a survey without marked plants would have:
-    ``log_ratio`` (juveniles found per adult, pooled over sites and visits),
-    ``adult_density`` (adults per site in the survey year) and
-    ``density_gradient`` (log adults at the four dry sites minus the four wet
-    ones, in the survey year). Pooled counts get half a plant, so that an empty
-    survey still has a finite log, and the rates get a pseudo-observation.
+    From the counts alone, as a survey without marked plants would have, each
+    pooled over the visits: ``log_ratio`` (juveniles found per adult),
+    ``adult_density`` (adults per site) and ``density_gradient`` (log adults at
+    the four dry sites minus the four wet ones). Pooled counts get half a plant,
+    so that an empty survey still has a finite log, and the rates get a
+    pseudo-observation.
     """
     intervals = survey.dropna(subset=["new"])
-    final = survey[survey["step"] == survey["step"].max()]
-    wet, dry = final[final["x"] < 2], final[final["x"] > 3]
+    wet, dry = survey[survey["x"] < 2], survey[survey["x"] > 3]
     out = {
         "log_ratio": float(
             np.log((survey["detected"].sum() + 0.5) / (survey["adults"].sum() + 0.5))
         ),
-        "adult_density": float(final["adults"].mean()),
+        "adult_density": float(survey["adults"].mean()),
         "density_gradient": float(
             np.log(dry["adults"].sum() + 0.5) - np.log(wet["adults"].sum() + 0.5)
         ),
