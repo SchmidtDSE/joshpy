@@ -67,6 +67,17 @@ adds the entry to the page's own reference list.
 - @talts2018 and @csillery2012: the coverage check over held-out simulations.
 - @beaumont2002: regression adjustment of accepted parameters.
 
+## Inference: A model with births and deaths
+
+[Page](inference/fire-model.qmd)
+
+- @zurell2010: the virtual ecologist: the survey, and the juveniles it misses,
+  simulated with the system.
+- @hartig2011: summary statistics, and testing their sufficiency on simulated
+  data.
+- @joyce2008: approximate sufficiency: adding statistics that leave the
+  posterior unchanged.
+
 ## Adaptive Parameter Optimization
 
 [Tutorial](tutorials/adaptive-sweep.qmd)

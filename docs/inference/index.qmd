@@ -73,26 +73,25 @@ variability comes from:
 
 ## Roadmap
 
-The pages in this section build toward fitting a Joshua tree model to I&M
-survey data, using the ForeverTree model as a known
-truth:
+The pages in this section use ForeverTree models as known truths, so every
+result can be checked against them. The first two fit a model whose trees grow
+but never die, and teach the mechanics of ABC:
 
 1. **[ForeverTree case study](forevertree.qmd)**: the model, a simulated
    survey, prior simulations, and choosing summary statistics.
 2. **[SMC-ABC on a simulated survey](smc-abc.qmd)**: option (a), with a
    sufficiency test and a coverage check.
-3. **Rejection filter on a model property**: option (d), asking which
-   parameters produce a target behaviour.
-4. **Posterior probability of a model property**: combining the two.
 
-| ForeverTree example | Joshua tree case |
-|---------------------|------------------|
-| Survey of fixed cells with measurement error | I&M sites, plot sizes, stage classes, detection |
-| Mean height and CV of the surveyed cells | Log juvenile:adult ratio; optionally density or the spread between sites |
-| Final window of the same run | End window of a separate long spin-up under normal climate |
-| Annual height gain inside a band | Log λ inside $[-\delta, \delta]$ |
-| Within-window SD of the gain | The "not chaotic" criterion |
-| Truth outside the band | A declining truth: P(stable \| I&M) should come out low |
+The next three ask a monitoring question of a second model, whose trees are
+born and die: will the stand hold its adults under a changed climate? They fit
+the present, from marked plots revisited over 20 years, and test the future.
+
+3. **[A model with births and deaths](fire-model.qmd)**: the model, three
+   climate futures, marked plots, statistics from the model's equations and
+   tests of their sufficiency, and an SMC-ABC fit.
+4. **What would it take?**: option (d), a rejection filter on the projected
+   stand, with no data.
+5. **Posterior probability of the target**: combining the two.
 
 ## References
 
