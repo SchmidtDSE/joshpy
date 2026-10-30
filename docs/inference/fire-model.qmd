@@ -1,0 +1,889 @@
+---
+title: "A Model with Births and Deaths"
+description: "A second known-truth study: a ForeverTree model whose trees are born and die, marked plots revisited over 20 years, statistics built from the model's equations, and an SMC-ABC fit to the present"
+execute:
+  warning: false
+---
+
+{{< include _sbi-setup.qmd >}}
+
+## Introduction
+
+The first two pages fit a model whose trees grow but never die. This page
+builds a second known-truth study around a monitoring question: **will the
+stand hold its adults as the climate changes?** Adults are long-lived, so their
+fate is decided by two vital rates that monitoring can measure: how readily
+adults recruit new plants, and how many juveniles survive to replace them.
+
+The study fits the present and tests the future:
+
+1. **Survey the present.** Fixed plots, revisited every few years over 20
+   years. Every plant on a plot is marked, so each visit finds which marked
+   plants survived and which plants are new.
+2. **Fit the survey.** SMC-ABC gives the values of the two vital rates
+   consistent with it.
+3. **Project.** Run the parameter sets the survey supports 40 years forward,
+   under each of three climate futures, and test a **management target**: the
+   stand keeps at least two-thirds of its adults over the 40 years.
+
+This page builds the study and fits the survey (steps 1 and 2), and projects
+the truth to show what the target separates. It also shows why the survey
+design matters: a survey that only counts plants, however often it returns,
+cannot recover these rates, and marked plots can. The next two pages take step
+3: [what it would take](rejection-filter.qmd) to meet the target, with no data,
+and the [posterior probability](posterior-property.qmd) of meeting it, given
+the survey.
+
+::: {.callout-note}
+## Runtime
+
+The first render runs about 800 simulations: the truth's projections, the truth
+and 200 prior simulations, 30 more replicates of the truth, and 540 for
+SMC-ABC. That is about 4 hours on a laptop, one simulation at a time. Set
+`JOSH_BATCH_TARGET` to a batch target profile, such as `gke-test`, and each
+batch of simulations is dispatched together to a Kubernetes cluster; there it
+took about 2.5 hours, most of it the SMC-ABC search. The runs are stored in the
+registry `forevertree_fire.duckdb`, shared by the next two pages, so a later
+render replays them without a target.
+
+- **Josh's `batchRemote` takes no seed**, so on a cluster the seeded runs below
+  run unseeded. The seed is part of a run's `run_hash`, and the registry, not
+  the seed, reproduces it.
+- **A search replays exactly only where it ran.** An SMC-ABC search run from
+  plain Python proposes different parameter sets from its second generation on
+  when replayed under R, which renders these pages: the proposals differ in
+  float32's last digits, so their `run_hash`es differ. Run a page's first
+  render itself, on the cluster, rather than its searches from a script.
+:::
+
+What is specific to the model lives in one module,
+`examples/sbi_forevertree/forevertree_fire_case.py`:
+
+```{python}
+import sys
+from dataclasses import replace
+from functools import partial
+
+from dotenv import find_dotenv, load_dotenv
+
+_ = load_dotenv(find_dotenv(usecwd=True))  # MinIO keys from the repository's .env, if any
+sys.path.insert(0, "../../examples/sbi_forevertree")
+import forevertree_fire_case as case
+import numpy as np
+import pandas as pd
+
+from joshpy.cli import JoshCLI
+from joshpy.inference import KnownTruthStudy, effective_sample_size
+from joshpy.jar import JarMode
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry("forevertree_fire.duckdb")  # shared by the replacement pages
+cli = JoshCLI(josh_jar=JarMode.DEV)
+```
+
+## The Model
+
+The model keeps ForeverTree's landscape: 63 patches of 16 km on a gradient from
+wet in the west to dry in the east. Its trees still grow, but they are now born
+and die:
+
+- **Adults recruit.** A tree is an adult from 8 years of age. Each year, each
+  adult recruits one new tree with chance `recruitment` in a wet year in an
+  empty patch, less in drier years and as the patch fills (40 trees at most).
+- **Juveniles die more than adults.** An adult dies with chance 2% a year. A
+  juvenile dies with chance `juvenileMortality` in a wet year, plus 10% in the
+  driest years.
+- **Fire.** Fuel grows back in wet years. Each year a patch burns with a chance
+  that rises with its fuel, up to 10% at full cover. A fire kills juveniles at
+  its intensity (the fuel that burned) and adults at a fifth of it.
+- **Patches are on their own.** Seeds don't disperse and fire doesn't spread,
+  so a patch that loses its trees stays empty.
+
+Dryness, which recruitment and juvenile deaths read, is linear in a year's rain,
+from none at 500 mm to complete at 300 mm. Maturity is by age, not height.
+
+Two parameters are unknown, and the study estimates them (**inverse
+parameters**). Everything else is fixed at known values (**direct
+parameters**):
+
+| Parameter | Meaning | Prior | Truth |
+|-----------|---------|-------|-------|
+| `recruitment` | Chance that an adult recruits a tree in a year, at its highest (wet year, empty patch) | Uniform, 10 to 90% | 50% |
+| `juvenileMortality` | Chance that a juvenile dies in a wet year | Uniform, 1 to 20% | 5% |
+
+| Fixed | Value |
+|-------|-------|
+| Age at maturity (`maturityAge`) | 8 years |
+| Trees per patch, at most (`maxTrees`) | 40 |
+| Adult mortality (`adultMortality`) | 2% a year |
+| Added juvenile mortality in the driest years (`droughtMortality`) | 10% |
+| Chance of fire at full fuel cover (`fireChance`) | 10% a year |
+| Adults a full-intensity fire kills (`adultFireMortality`) | 20% |
+| Juveniles a count finds (`juvenileDetection`) | 90% |
+
+::: {.callout-note collapse="true"}
+## View Simulation File (forevertree_fire.josh)
+
+```{python}
+#| echo: false
+print((case.HERE / "forevertree_fire.josh").read_text(encoding="utf-8"))
+```
+:::
+
+::: {.callout-note collapse="true"}
+## View Configuration Template (forevertree_fire.jshc.j2)
+
+```{python}
+#| echo: false
+print((case.HERE / "forevertree_fire.jshc.j2").read_text(encoding="utf-8"))
+```
+:::
+
+::: {.callout-note collapse="true"}
+## View the Case Study Module (forevertree_fire_case.py)
+
+```{python}
+#| echo: false
+#| output: asis
+print("````python\n" + (case.HERE / "forevertree_fire_case.py").read_text(encoding="utf-8").rstrip() + "\n````")
+```
+:::
+
+## The Climate and Its Futures
+
+The climate is synthetic, made for this study: yearly rain and mean
+temperature on a grid over the landscape (generated outside joshpy; each NetCDF
+file in `examples/sbi_forevertree/climate/` records its seed).
+`preprocess_climate.py` writes them onto the model's patches. Rain falls from
+about 550 mm in the west to 230 mm in the east, and wet and dry years are
+mostly shared across the landscape, so recruitment comes in pulses.
+
+Each run has three parts:
+
+| Part | Years | Climate |
+|------|-------|---------|
+| Spin-up | 200 | Historical years drawn at random from 30 |
+| Present | 20 | The last 20 historical years, in order; the survey's years |
+| Projection | 40 | One future: `normal`, `hot_dry` or `cool_wet` |
+
+The futures start the year after the survey:
+
+- **`normal`** continues the historical climate.
+- **`hot_dry`** ramps to about 26% less rain and 1.8 K warmer by its last
+  decade.
+- **`cool_wet`** ramps to about 16% more rain and 0.9 K cooler.
+
+Fit runs stop at the end of the present (`projectionYears = 0`) and read no
+future. A projection is a separate run, `case.projection_model(future)`: the
+same model run 40 years further, with that future's files mapped. Temperature
+changes only growth, and growth doesn't set maturity, so here a future acts on
+the stand through its rain.
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.projection_model)
+```
+
+## The Truth and Its Futures
+
+First, what the target means at the truth. We run the truth's parameters with
+each future, 10 replicates each. Each replicate's present is a fresh
+realization of the truth, not the pseudo-observed run's.
+
+```{python}
+spec = KnownTruthStudy(**case.STUDY)
+truth_futures = {
+    future: replace(spec, model=case.projection_model(future)).run_at(
+        registry, cli, case.TRUTH, f"forevertree_fire_truth_{future}", replicates=10
+    )
+    for future in case.FUTURES
+}
+```
+
+The target is about the adults over the whole landscape: their yearly growth
+factor λ from the end of the present to the last projected year must be at
+least `case.TARGET_LAMBDA`, 0.99, so that after 40 years at least 0.99⁴⁰ ≈ 67%
+of them remain. `case.projected` measures λ for one replicate, with the
+landscape's juveniles per adult over the last 10 projected years beside it:
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.projected)
+```
+
+```{python}
+at_truth = pd.concat(
+    [
+        pd.DataFrame(
+            [case.projected(registry, job.run_hash, r) for r in range(job.replicates)]
+        ).assign(future=future)
+        for future, job in truth_futures.items()
+    ],
+    ignore_index=True,
+)
+at_truth["meets target"] = at_truth["adult_lambda"] >= case.TARGET_LAMBDA
+at_truth.groupby("future", sort=False).agg(
+    adult_lambda=("adult_lambda", "mean"),
+    lambda_low=("adult_lambda", "min"),
+    lambda_high=("adult_lambda", "max"),
+    meets_target=("meets target", "mean"),
+    ratio=("ratio", "mean"),
+).round(3)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+truth_years = pd.concat(
+    [case.landscape(registry, [job.run_hash]).assign(future=future) for future, job in truth_futures.items()],
+    ignore_index=True,
+)
+at_survey = truth_years.loc[truth_years["years"] == 0, ["future", "replicate", "adults"]]
+truth_years = truth_years.merge(at_survey.rename(columns={"adults": "survey_adults"}))
+truth_years["adults_relative"] = truth_years["adults"] / truth_years["survey_adults"]
+rain = registry.conn.execute(
+    """
+    SELECT run_hash, step, AVG(precipitation) AS rain
+    FROM cell_data_current
+    WHERE run_hash IN (SELECT unnest(?)) AND replicate = 0
+    GROUP BY ALL
+    """,
+    [[job.run_hash for job in truth_futures.values()]],
+).df()
+rain["future"] = rain["run_hash"].map({job.run_hash: f for f, job in truth_futures.items()})
+rain["years"] = rain["step"] - case.SURVEY_STEP
+target_path = pd.DataFrame({"years": np.arange(case.PROJECTION_YEARS + 1)})
+target_path["adults_relative"] = case.TARGET_LAMBDA ** target_path["years"]
+```
+
+```{r}
+#| label: fig-truth-futures
+#| fig-cap: "The truth projected under each future, 10 replicates each, from the end of the present (year 0)."
+#| fig-subcap:
+#|   - "Landscape mean rain. The futures differ only after the present."
+#|   - "Adults over the whole landscape, relative to year 0. The dashed line is the target's path: 1% fewer a year."
+#|   - "Juveniles per adult over the whole landscape."
+#| layout-ncol: 3
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 3.6
+#| fig-height: 3.6
+future_colours <- scale_colour_manual(NULL, values = c(cool_wet = blue, normal = ink, hot_dry = orange))
+by_year <- list(future_colours, labs(x = "years since the present"), theme(legend.position = "top"))
+
+ggplot(py$rain, aes(years, rain, colour = future)) +
+  geom_line(linewidth = 0.7) +
+  by_year +
+  labs(y = "landscape mean rain (mm)")
+
+ggplot(py$truth_years, aes(years, adults_relative, colour = future, group = interaction(future, replicate))) +
+  geom_line(alpha = 0.45) +
+  geom_line(aes(years, adults_relative), py$target_path, inherit.aes = FALSE, linetype = "dashed") +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  by_year +
+  labs(y = "adults / adults at year 0")
+
+ggplot(py$truth_years, aes(years, ratio, colour = future, group = interaction(future, replicate))) +
+  geom_line(alpha = 0.45) +
+  by_year +
+  labs(y = "juveniles per adult")
+```
+
+At the truth, the target holds in every future, but by different margins. In
+the normal and cool, wet futures the adults hold steady (λ 1.000 and 1.003). In
+the hot, dry future they decline by 0.7% a year (λ 0.993, from 0.992 to 0.996
+across the replicates), close to the target's 1%. Juveniles per adult halve
+there, from about 0.41 to 0.21: dry years recruit fewer plants and kill more
+juveniles. But adults live long, so after 40 years the stand still holds most
+of them.
+
+So the target is a question about the hot, dry future. There, parameter sets
+near the truth meet it, and sets with fewer recruits or more juvenile deaths do
+not. Whether the survey can tell them apart is what the rest of this page, and
+the next two, ask.
+
+## The Pseudo-Observed Data: Marked Plots
+
+A monitoring program returns to fixed plots, and on a marked plot it tags every
+plant, so that at the next visit it can tell the survivors from the newcomers.
+The pseudo-observed data are such a **survey**:
+
+- **10 fixed sites**, two in each of the five western columns, where the trees
+  are (from about 550 mm of rain to 400 mm);
+- **visited every 3 years over the 20-year present**, seven visits in all
+  (`case.visits()`);
+- at each visit, the **adults and the juveniles found**: adults always, each
+  juvenile with chance 90%;
+- from the second visit on, the **fates of the plants marked at the last
+  visit**: which survive, by their stage when marked, and which plants are new.
+  Marked plants are always refound.
+- the **rain and fires of every year**, which a program records anyway.
+
+The model draws the counts' detection itself, as in the
+[first case study](forevertree.qmd#the-pseudo-observed-data-a-survey): the
+observer is simulated with the system [@zurell2010], so the same survey applies
+to the truth and to every simulation.
+
+```josh
+export.detectedJuveniles.step =
+  sample binomial
+  with n of nJuveniles
+  p of meta.juvenileDetection
+```
+
+Josh exports patches, not individual trees. A marked plot can still be read
+from the patches' **age structure**: the model exports how many live trees are
+younger than each of a few ages, and a tree is 1 year old the first year it is
+counted. So at a revisit k years on, the trees aged k + 1 or more were there at
+the last visit, those aged k + 8 or more were adults then, and the rest are
+new:
+
+```josh
+below4.start = count(ForeverTree[ForeverTree.age < 4 years])
+below11.start = count(ForeverTree[ForeverTree.age < 11 years])
+```
+
+Every present year is exported, so any schedule of revisits every 1 to 5 years
+can be read from the same runs: [What a Survey Can Know](#what-a-survey-can-know)
+compares them.
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.visits, case.observe)
+```
+
+## Defining the Study
+
+`KnownTruthStudy` takes the model, prior, truth, survey and statistics, as on
+the [first case study](forevertree.qmd#defining-the-study). Its `target` sends
+each batch of runs to a batch target when `JOSH_BATCH_TARGET` names one:
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source("MODEL", "STUDY")
+```
+
+```{python}
+study = spec.load(registry, cli)
+study.truth_data.head(12)
+```
+
+`load` runs the truth and 200 prior simulations, unless the registry already
+holds them. `study.truth_data` is the pseudo-observed survey, one row per site
+and visit.
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+cells = case.survey_year(registry, study.truth_job.run_hash)
+sites = (
+    study.truth_data.loc[study.truth_data["step"] == case.SURVEY_STEP, ["x", "y"]]
+    .sort_values(["x", "y"], ignore_index=True)
+)
+sites["site"] = np.arange(1, len(sites) + 1)  # numbered west to east
+fates = (
+    study.truth_data.dropna(subset=["new"])
+    .groupby("step")[["marked_juveniles", "surviving_juveniles", "marked_adults", "surviving_adults", "new"]]
+    .sum()
+    .reset_index()
+    .melt(id_vars="step", var_name="record", value_name="plants")
+)
+fates["year"] = fates["step"] - case.SURVEY_STEP + case.PRESENT_YEARS
+```
+
+```{r}
+#| label: fig-survey
+#| fig-cap: "The pseudo-observed survey."
+#| fig-subcap:
+#|   - "Adults in each patch in the last year of the present. Outlined patches are surveyed, numbered west to east."
+#|   - "What each revisit finds, pooled over the 10 sites: the plants marked at the last visit, those still alive, and the plants new since."
+#| layout-ncol: 2
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 5
+#| fig-height: 4
+ggplot(py$cells, aes(x, y)) +
+  geom_tile(aes(fill = adults)) +
+  geom_tile(data = py$sites, fill = NA, colour = ink, linewidth = 0.8) +
+  geom_label(aes(label = site), py$sites, size = 3, linewidth = 0, label.padding = unit(0.1, "lines")) +
+  scale_fill_gradient("adults", low = "#f4f3ee", high = "#0d366b") +
+  scale_y_reverse() +
+  coord_equal() +
+  labs(x = "west (wet) → east (dry)", y = "north → south") +
+  theme(axis.text = element_blank(), panel.grid = element_blank())
+
+record_labels <- c(
+  marked_adults = "adults marked", surviving_adults = "adults surviving",
+  marked_juveniles = "juveniles marked", surviving_juveniles = "juveniles surviving", new = "new plants"
+)
+fates <- transform(py$fates, record = factor(record, names(record_labels), record_labels))
+ggplot(fates, aes(factor(year), plants, fill = record)) +
+  geom_col(position = position_dodge(width = 0.85), width = 0.8) +
+  scale_fill_manual(NULL, values = setNames(c(ink, muted, orange, "#f2c094", aqua), record_labels)) +
+  labs(x = "revisit (year of the present)", y = "plants, all 10 sites") +
+  guides(fill = guide_legend(nrow = 2)) +
+  theme(legend.position = "top")
+```
+
+Over its six revisits, the survey marks 381 juveniles, of which 238 survive to
+the next visit (62% over 3 years, fires included), and 849 adults, of which 756
+survive (89%). It finds 234 new plants. Fire burns 14 of the 60 site-intervals.
+These are small numbers, and each statistic below pools them over all sites and
+intervals. Their chance variation, not the observer, is what limits how much the
+survey can say ([What the Replicates Say](#what-the-replicates-say)).
+
+## Choosing Summary Statistics
+
+The [first case study's process](forevertree.qmd#choosing-among-them) asks for
+statistics that move with the parameters, roughly one per parameter, and
+finally a test of sufficiency on simulated data. On the first model, the CV of
+the heights divided growth out and tracked drought sensitivity: a statistic
+read off the model's equation. Here too the best statistics come from the
+model's equations, turned around:
+
+- **Recruits.** Each year an adult recruits with chance
+  `recruitment` × (1 − dryness) × (1 − plants / 40). So new plants per marked
+  adult, per wet year, per unit of open space, track `recruitment`. They track
+  it from below, since recruits that die before the next visit are never seen,
+  but they are computed the same way for every simulation, which is all ABC
+  needs.
+- **Juvenile deaths.** A juvenile dies with chance `juvenileMortality` +
+  10% × dryness, or in a fire. So the yearly death rate of marked juveniles,
+  over intervals without fire, tracks `juvenileMortality`.
+
+Beside them, three statistics a survey without marked plants would have:
+
+| Statistic | Definition | Describes |
+|-----------|------------|-----------|
+| `r_hat` | New plants per (marked adult × wet year × open space), %, over all intervals | Recruitment per adult |
+| `jm_hat` | Yearly death rate of marked juveniles over intervals without fire, % | Juvenile survival |
+| `log_ratio` | $\log\big((J + \tfrac12) / (A + \tfrac12)\big)$, juveniles found $J$ and adults $A$, over all sites and visits | The stage ratio |
+| `adult_density` | Adults per site, over all visits | How full the stand is |
+| `density_gradient` | $\log(A + \tfrac12)$ at the 4 dry sites minus at the 4 wet sites, over all visits | How far east the stand reaches |
+
+```{python}
+#| echo: false
+#| output: asis
+case.show_source(case.statistics)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+parameters, candidates = list(case.PRIOR), list(study.candidates)
+candidate_points = study.reference.melt(
+    id_vars=candidates, value_vars=parameters, var_name="parameter", value_name="parameter_value"
+).melt(id_vars=["parameter", "parameter_value"], var_name="statistic")
+observed_values = pd.DataFrame({"statistic": candidates, "value": study.candidates.values()})
+true_values = pd.DataFrame({"parameter": parameters, "value": [case.TRUTH[p] for p in parameters]})
+rho = study.correlations().stack().rename_axis(["statistic", "parameter"]).reset_index(name="rho")
+```
+
+```{r}
+#| label: fig-candidates
+#| fig-cap: "Candidate statistics of the survey against each parameter, over 200 prior simulations. The orange dashed line is the statistic's pseudo-observed value; the black line is the parameter's true value."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 7
+#| fig-height: 9
+statistic_labels <- c(
+  r_hat = "r_hat (%)", jm_hat = "jm_hat (%)", log_ratio = "log ratio",
+  adult_density = "adults per site", density_gradient = "density gradient"
+)
+in_order <- function(df) transform(df, statistic = factor(statistic, names(statistic_labels)))
+
+ggplot(in_order(py$candidate_points), aes(parameter_value, value)) +
+  geom_point(colour = blue, size = 0.9, alpha = 0.7) +
+  geom_hline(
+    aes(yintercept = value, linetype = "pseudo-observed value"), in_order(py$observed_values),
+    colour = orange, linewidth = 0.8
+  ) +
+  geom_vline(aes(xintercept = value, linetype = "true parameter value"), py$true_values) +
+  geom_text(
+    aes(Inf, Inf, label = sprintf("ρ = %+.2f", rho)), in_order(py$rho),
+    hjust = 1.1, vjust = 1.5, size = 3.2
+  ) +
+  facet_grid(
+    statistic ~ parameter,
+    scales = "free", switch = "both", labeller = labeller(statistic = statistic_labels)
+  ) +
+  scale_linetype_manual(
+    NULL, values = c("pseudo-observed value" = "dashed", "true parameter value" = "solid")
+  ) +
+  labs(x = "parameter value (%)", y = NULL) +
+  theme(legend.position = "top", strip.placement = "outside")
+```
+
+```{python}
+study.correlations().round(2)
+```
+
+Each rate statistic follows its own parameter, as the equations promise:
+`r_hat` moves with `recruitment` (ρ = 0.65) and hardly with `juvenileMortality`
+(0.06), and `jm_hat` moves with `juvenileMortality` (0.70) and little with
+`recruitment` (0.17). The counts do less, and mix the two. The stage ratio
+follows `juvenileMortality` (0.65). Adult density rises with `recruitment`
+(0.53) and falls with `juvenileMortality` (−0.62), so a dense stand can mean
+many recruits or few juvenile deaths. The density gradient follows neither. The
+scatter around each trend is the survey's chance variation. The rows of points
+at 50%, 10% and 0 are simulations whose surveyed sites are empty, mostly from
+low `recruitment` or high `juvenileMortality`: they score the pseudo-observation
+that each statistic adds to its counts.
+
+The pseudo-observed `r_hat`, 39%, is below the truth's 50%, since recruits that
+die before the next visit are never seen. Its `jm_hat`, 6.1%, is above the
+truth's 5%, since dry years add to juvenile deaths. Every simulation is biased
+the same way, so both still place the truth among the simulations: in the figure,
+each orange line crosses its statistic's trend near the black line.
+
+### Testing sufficiency on simulated data
+
+The leave-one-out check of the [SMC-ABC page](smc-abc.qmd#calibration-a-coverage-check)
+says how much a set of statistics tells about each parameter, from the
+reference table alone: each prior simulation in turn plays the observed data,
+and the 20 closest of the others are accepted. A width near 1 means the
+statistics say nothing about the parameter.
+
+The check has a floor. With 200 simulations, the 20 closest span part of the
+prior even when the statistics determine the parameters exactly. Scoring the
+parameters themselves as statistics shows where it lies:
+
+```{python}
+def width_floor(k=20):
+    """Leave-one-out widths if the statistics were the parameters themselves."""
+    theta = study.reference[list(case.PRIOR)].to_numpy()
+    z = (theta - theta.mean(axis=0)) / theta.std(axis=0, ddof=1)
+    level = (k - 1) / (k + 1)
+    spans = np.array([level * (spec["uniform"][1] - spec["uniform"][0]) for spec in case.PRIOR.values()])
+    widths = []
+    for i in range(len(z)):
+        distance = np.sqrt(((z - z[i]) ** 2).sum(axis=1))
+        distance[i] = np.inf
+        accepted = theta[np.argsort(distance, kind="stable")[:k]]
+        widths.append((accepted.max(axis=0) - accepted.min(axis=0)) / spans)
+    return pd.Series(np.mean(widths, axis=0), index=list(case.PRIOR), name="width")
+
+
+width_floor().round(3)
+```
+
+Sufficiency is tested in both directions [@hartig2011]. **Necessity:** drop a
+statistic, and the parameter it tracks should become unidentified. **Sufficiency:**
+add statistics, and the posterior should not narrow, since what they carry is
+already in the set [@joyce2008].
+
+```{python}
+sets = {
+    "r_hat alone": ["r_hat"],
+    "jm_hat alone": ["jm_hat"],
+    "r_hat + jm_hat": ["r_hat", "jm_hat"],
+    "r_hat + jm_hat + log_ratio (compared)": case.STATISTICS,
+    "all five": ["r_hat", "jm_hat", "log_ratio", "adult_density", "density_gradient"],
+    "counts only": ["log_ratio", "adult_density", "density_gradient"],
+}
+pd.concat({label: study.leave_one_out(names) for label, names in sets.items()}).round(3)
+```
+
+**Necessity holds.** Each rate statistic alone identifies its own parameter and
+says almost nothing about the other. `r_hat` alone narrows `recruitment` to a
+width of 0.62 and leaves `juvenileMortality` at 0.96; `jm_hat` alone does the
+reverse (0.98 and 0.70).
+
+**Sufficiency holds, to the check's precision.** Adding the stage ratio to the
+two rates narrows `juvenileMortality` from 0.74 to 0.67: how many juveniles
+there are per adult depends on how long juveniles survive, and that adds to
+what a few hundred marked juveniles record. Adding the two density statistics
+after that narrows nothing (0.67 and 0.69, against 0.64 and 0.67). A statistic
+with no new information only adds noise to the distance. Coverage stays near
+its nominal 19/21 ≈ 0.905 throughout (0.89 to 0.94), so rejection ABC is
+calibrated with every set.
+
+Unlike on the first model, the widths stay well above the floor: 0.64 and 0.67,
+against 0.34 and 0.33. The statistics are sufficient, but the survey is not
+decisive. Ten sites of a few dozen plants each, revisited over 20 years, record
+a few hundred births and deaths, and their chance variation leaves part of the
+prior open. That is a limit of the data, not of the statistics, and the next
+section asks how survey effort changes it.
+
+So ABC compares **`r_hat`, `jm_hat` and `log_ratio`**. As on the first case
+study, each statistic is compared as a z-score over the prior simulations:
+
+```{python}
+pd.DataFrame(
+    {
+        "pseudo-observed": study.observed,
+        "prior mean (μ)": study.center,
+        "prior SD (σ)": study.scale,
+        "pseudo-observed z-score": study.zscore(study.observed),
+    }
+).loc[case.STATISTICS].round(3)
+```
+
+## What a Survey Can Know
+
+The same 200 prior simulations can be surveyed on other schedules, since every
+present year is in the registry. Each design gets its own reference table, and
+the same leave-one-out check:
+
+```{python}
+def designed(every, years):
+    """The study, surveyed every `every` years over the last `years` years of the present."""
+    observe = partial(case.observe, every=every, years=years)
+    reference = study.reference[["run_hash", *case.PRIOR]].reset_index(drop=True)
+    surveyed = pd.DataFrame([case.statistics(observe(registry, h)) for h in reference["run_hash"]])
+    return replace(
+        study,
+        study=replace(spec, observe=observe),
+        truth_data=observe(registry, study.truth_job.run_hash),
+        reference=pd.concat([reference, surveyed], axis=1),
+    )
+
+
+designs = {
+    "every 3 years, over 4 years (2 visits)": (3, 4),
+    "every 3 years, over 7 years (3 visits)": (3, 7),
+    "every 3 years, over 13 years (5 visits)": (3, 13),
+    "every 3 years, over 19 years (7 visits; the survey)": (3, 19),
+    "every 5 years, over 20 years (4 visits)": (5, 20),
+    "every 2 years, over 20 years (10 visits)": (2, 20),
+    "every year, over 20 years (20 visits)": (1, 20),
+}
+effort = pd.concat(
+    {label: designed(*design).leave_one_out() for label, design in designs.items()}
+)
+effort["width"].unstack().round(3)
+```
+
+And what counting alone gives, with every visit's counts and no marking:
+
+```{python}
+pd.concat(
+    {
+        "counts, last year only": designed(3, 1).leave_one_out(["adult_density", "density_gradient", "log_ratio"]),
+        "counts, every year for 20 years": designed(1, 20).leave_one_out(["adult_density", "density_gradient", "log_ratio"]),
+    }
+)["width"].unstack().round(3)
+```
+
+Survey effort narrows the posterior steadily. Revisiting every 3 years, the
+widths fall from 0.80 and 0.82 after one interval to 0.64 and 0.67 after six,
+as each interval adds births and deaths to the pooled rates. More frequent
+visits help `recruitment` most (0.57 every 2 years, 0.56 every year), since
+fewer recruits die unseen between visits. They help `juvenileMortality` less
+(0.65 and 0.66), since a marked juvenile's death is recorded however long the
+interval. Visiting every 5 years costs a little (0.69 and 0.75).
+
+Counting alone gains little from revisits. One year of counts gives widths of
+0.90 and 0.86, and 20 yearly counts 0.80 and 0.81, no better than marked plots
+after a single 3-year interval. Successive counts share most of their plants,
+so they repeat each other. The fates of marked plants are new information at
+every visit.
+
+## What the Replicates Say
+
+The truth's own replicates show how much a survey varies at fixed parameters,
+and whether the fit recovers the truth on average, not only from one survey.
+We run the truth 30 more times:
+
+```{python}
+replicates = spec.run_at(
+    registry, cli, case.TRUTH, "forevertree_fire_truth_replicates",
+    replicates=30, seed=case.TRUTH_SEED + 1,
+)
+replicate_surveys = pd.concat(
+    [
+        pd.DataFrame(
+            [case.statistics(observe(registry, replicates.run_hash, r)) for r in range(replicates.replicates)]
+        ).assign(observation=label)
+        for label, observe in [
+            ("all juveniles found", partial(case.observe, detection=False)),
+            ("survey (90% found)", case.observe),
+        ]
+    ],
+    ignore_index=True,
+)
+replicate_surveys["distance"] = study.distance(replicate_surveys)
+spread = replicate_surveys.groupby("observation")[case.STATISTICS].std() / pd.Series(study.scale)[case.STATISTICS]
+spread.round(3)
+```
+
+Each replicate survey can play the observed data in turn. Rejection ABC on the
+reference table, keeping the 20 closest simulations, gives one posterior per
+survey; across the 30, do they centre on the truth, and cover it?
+
+```{python}
+surveys = replicate_surveys[replicate_surveys["observation"] == "survey (90% found)"]
+reference_z = study.zscore(study.reference).to_numpy()
+recovery = []
+for z in study.zscore(surveys).to_numpy():
+    accepted = study.reference.iloc[np.argsort(np.sqrt(((reference_z - z) ** 2).sum(axis=1)))[:20]]
+    recovery.append(
+        {
+            f"{name} {measure}": value
+            for name in case.PRIOR
+            for measure, value in [
+                ("mean", accepted[name].mean()),
+                ("covered", accepted[name].min() < case.TRUTH[name] < accepted[name].max()),
+            ]
+        }
+    )
+recovery = pd.DataFrame(recovery)
+recovery.agg(["mean", "std"]).round(3)
+```
+
+At the truth, a survey's statistics vary by a fifth to a third of their spread
+across the prior: 0.23 prior SDs for `r_hat`, 0.18 for `jm_hat` and 0.37 for
+`log_ratio`. Missing a tenth of the juveniles barely adds to this (0.369 against
+0.375 for the ratio). The variation is the plants' own, not the observer's.
+
+Across the 30 surveys, rejection ABC centres on the truth for `recruitment`
+(a mean of 51.2% against 50%, varying by 4.8 points from survey to survey). For
+`juvenileMortality` it centres slightly above the truth (6.7% against 5%). The
+20 accepted simulations span about two-thirds of the prior. The truth, 5%, is
+near the low end of a prior from 1% to 20%, so their mean leans toward the
+prior's middle. Every one of the 30 accepted ranges covers the truth, for both
+parameters.
+
+```{python}
+survey_distance = replicate_surveys.loc[
+    replicate_surveys["observation"] == "survey (90% found)", "distance"
+]
+print(
+    f"replicate distances at the truth: median {survey_distance.median():.2f}, "
+    f"largest {survey_distance.max():.2f} (z-score units)"
+)
+```
+
+## Fitting the Present: SMC-ABC
+
+The fit is the [SMC-ABC page](smc-abc.qmd)'s, on the three statistics: 60
+initial draws, 30 particles and 600 simulations. On a batch target, each round
+of proposals is one batch, and SMC-ABC's `"measured"` batch policy sizes the
+rounds from the acceptance rate it has measured, so that each generation takes
+about two rounds instead of one per missing particle. The policy changes which
+parameter sets are proposed, so the search names it, and a replay without a
+target proposes the same runs:
+
+```{python}
+SMC = {"num_initial_pop": 60, "num_particles": 30, "epsilon_decay": 0.5, "num_simulations": 600}
+result, session_id = study.search(
+    registry, cli, "smcabc", SMC, "forevertree_fire_smcabc", batch_policy="measured"
+)
+evaluated = [job.run_hash for job, _ in result.job_results]
+reused = set(evaluated) & set(study.reference["run_hash"])
+print(f"{len(evaluated)} evaluations, {result.failed} failed; {len(reused)} reused prior simulations")
+```
+
+Each generation's tolerance, simulations and rounds (batches):
+
+```{python}
+pd.DataFrame(
+    [
+        {
+            "generation": population["generation"],
+            "target ε": population["epsilon"],
+            "largest distance": max(population["distances"]),
+            "simulations": population["simulations"],
+            "rounds": population.get("rounds"),
+            "carried over": population["carried_over"],
+        }
+        for population in result.populations
+    ]
+).set_index("generation").round(3)
+```
+
+```{python}
+largest = max(result.populations[-1]["distances"])
+print(
+    f"truth's replicate surveys within the final population's largest distance ({largest:.3f}): "
+    f"{(survey_distance <= largest).mean():.0%}"
+)
+```
+
+The search ran three generations, halving the tolerance each time, from 1.56
+to 0.78 to 0.39, in one or two rounds each. The third ran out of budget: its
+344 simulations gave 23 particles within 0.39, and the 7 closest particles of
+the second generation were carried over to make 30. That is why its largest
+distance, 0.45, is above its target. The budget roughly suffices: 0.45 is about
+the median distance of the truth's own replicate surveys from the
+pseudo-observed one (0.40), and 60% of them lie within it. A tighter tolerance
+would start to fit this survey's chance variation.
+
+```{python}
+study.posterior(result).round(3)
+```
+
+```{python}
+particles = result.to_dataframe()
+print(f"effective sample size: {effective_sample_size(particles['weight']):.1f} of {len(particles)} particles")
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+prior_points = study.reference[list(case.PRIOR)]
+truth = pd.DataFrame([case.TRUTH])
+```
+
+```{r}
+#| label: fig-posterior
+#| fig-cap: "The 200 prior simulations (grey) and the 30 final SMC-ABC particles (blue, sized by weight), over the prior box. The cross marks the truth."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 5.5
+#| fig-height: 4.6
+ggplot(py$particles, aes(recruitment, juvenileMortality)) +
+  geom_point(data = py$prior_points, colour = muted, alpha = 0.5, size = 1.3) +
+  geom_point(aes(size = weight), colour = blue, alpha = 0.75) +
+  geom_point(data = py$truth, shape = 4, size = 3.5, stroke = 1.5, colour = ink) +
+  scale_size_area("posterior weight", max_size = 4) +
+  scale_x_continuous("recruitment (%)", limits = c(10, 90)) +
+  scale_y_continuous("juvenileMortality (%)", limits = c(1, 20)) +
+  theme(legend.position = "top")
+```
+
+The posterior contains the truth and centres near it: `recruitment` 53% (90%
+interval 41 to 67%) and `juvenileMortality` 6.2% (2.4 to 11.2%). It narrows
+`recruitment` to about a third of the prior and `juvenileMortality` to about
+half. Most particles sit close to the cross. The heaviest, at about 67% and
+11%, is a parameter set with more recruits and more juvenile deaths than the
+truth. Its weight is large because few proposals landed near it, and it
+stretches the upper end of both intervals. The effective sample size, 22.9 of
+30, says the weights are even enough for these summaries to be stable.
+
+This is what the second model was built to show: with statistics read off the
+model's equations, and a survey that records births and deaths, the fit recovers
+the truth. It is calibrated, but not narrow. The survey's 10 sites leave about a
+third of the prior for `recruitment` and half for `juvenileMortality`. The next
+page asks what the target needs, and the last whether this posterior is narrow
+enough to answer it.
+
+## Picking Up on the Next Pages
+
+The next two pages define the same study and reload everything from the
+registry:
+
+```{python}
+#| eval: false
+import forevertree_fire_case as case
+from joshpy.inference import KnownTruthStudy
+
+spec = KnownTruthStudy(**case.STUDY)
+study = spec.load(registry, cli)  # survey, prior simulations, z-scores
+result, _ = study.search(registry, cli, "smcabc", SMC, "forevertree_fire_smcabc", batch_policy="measured")
+hot_dry = replace(spec, model=case.projection_model("hot_dry"))  # the same study, projected
+```
+
+```{python}
+#| include: false
+registry.close()  # the registry stays on disk for the other replacement pages
+```
+
+## References
+
+::: {#refs}
+:::
