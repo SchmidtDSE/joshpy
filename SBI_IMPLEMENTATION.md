@@ -1,10 +1,10 @@
 # SBI Implementation for joshpy
 
-Oct 21, 2026 · @nick · joshpy 0.0.9.34 · sbi 0.27.0 with CPU-only torch 2.14.1
+Oct 30, 2026 · @nick · joshpy 0.0.9.35 · sbi 0.27.0 with CPU-only torch 2.14.1
 
 How joshpy runs the filter-and-refine search in [SBI.md](SBI.md). The machinery is proved on
-the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to the grass–shrub and Joshua
-tree experiments.
+the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to a second ForeverTree model
+(births, deaths, fuel and fire) and the Joshua tree experiments.
 
 ## Principles
 
@@ -83,6 +83,19 @@ Contracts the stack implements; the tests named here pin them.
   batch sweeps.
 - **Resume.** Rerunning an interrupted search with the same seed against the same registry ends
   with identical particles (`test_interrupted_run_replays_identically`).
+- **Topping up replicates** (#94). Asking for R replicates of a run the registry holds with fewer
+  finds the same `run_hash` and reruns it with all R: the CLI runs replicates 0..R−1, and loading
+  skips the indices already loaded, so their data and `run_id` don't change
+  (`test_run_with_fewer_replicates_is_rerun_without_reloading_it`,
+  `test_filter_prior_tops_up_the_prior_simulations`). Before #94, `evaluate` first tried to load
+  the missing replicates from the old run's export paths, waiting about 1 s per missing file.
+  `collision_policy="pool"` would run only the missing indices, but saves nothing measurable
+  locally (JVM startup dominates).
+- **Particle values are the rendered values** (#94). `SbiResult.to_dataframe()` gives each
+  parameter as the run was rendered (the float32 draw's shortest decimal, as in
+  `job.parameters`), so rerunning a particle's parameters reproduces its `run_hash`
+  (`test_particles_carry_the_values_their_runs_were_rendered_with`). `SbiResult.samples` stays
+  sbi's float32 tensor.
 - **Run attributes are last-writer-wins.** The latest sbi session that touches a `run_hash` sets
   its `sbi_*` attributes. Read populations from the `SbiResult` or the session metadata.
 
@@ -141,6 +154,11 @@ These findings apply to every page and experiment.
     `grep -c 'Text(\|Line2D\|BarContainer' docs/_freeze/inference/*/execute-results/html.json`
     should print 0. The case study displays its module's source, so the module mustn't contain
     those names either (build legends from labelled lines, not `Line2D` handles).
+  - **A running `quarto preview` re-executes a page whenever its `.qmd` changes**, including through
+    `git stash`, `checkout` or `rebase`. Its R session holds the shared registry's lock while it
+    runs, so a render started meanwhile fails with `RegistryBusyError` (and may print a glibc
+    `malloc()` error as R exits). Wait for the preview's R process to exit, and don't touch a
+    `.qmd` while a render runs.
   - A render can crash once at the end of a page's knit with `corrupted double-linked list`
     (glibc), seen once on a warm re-render. No freeze is written, `set -e` stops the script, and
     `docs/inference/<page>_files/` is left behind. Delete that and rerun; the retry passed. It
@@ -157,18 +175,473 @@ These findings apply to every page and experiment.
 - Commits end with the `Co-Authored-By` trailer; PR descriptions end with the Claude Code line.
 - Docs PRs stay drafts until the user has reviewed the render.
 
-### Where things stand (Oct 21)
+### Where things stand (Oct 30)
 
-Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 ("SBI stack n/8").
+Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94 → #97 → #98 → #99 → #95 → #96
+("SBI stack n/14").
 
 | PR | Branch | Status |
 |----|--------|--------|
 | #86, #87, #88 | `feat/adaptive-evaluate-batch`, `feat/batch-no-wait-resume`, `feat/sbi-strategy` | Open, awaiting merge |
 | #89 (PR 1) | `docs/sbi-tutorial` | Done. Inference tab and landing page, site-wide references, old tutorial retired |
 | #93 | `feat/inference-known-truth` | Open. Experimental `joshpy.inference`: `KnownTruthStudy` and `LoadedStudy`, extracted from the case study after the #90 review |
-| #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. Review addressed (below); awaiting the user's look at the render |
-| #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Re-rendered on #93 and the revised case study; awaiting the user's review |
+| #90 (PR 2) | `docs/inference-forevertree` | Done, **draft**. #90 review and Oct 25 review addressed (below); re-rendered |
+| #91 (PR 3) | `docs/inference-smc-abc` | Done, **draft**. Oct 25 review addressed; re-rendered; awaiting the user's review |
 | #92 | `fix/sbi-summaries` | Open. Callables saved only as loadable paths; summaries errors stop the search (Behavior notes) |
+| #94 | `feat/inference-property-filter` | Open. `PropertyFilter` and `KnownTruthStudy.filter_prior`; a replicate top-up no longer waits for files the earlier run never wrote; `to_dataframe()` gives the rendered parameter values |
+| #97 | `feat/inference-batch-remote` | Open. Known-truth studies on a batch target, `run_at_each`, `ParameterSetsStrategy`, `JobConfig.custom_tags`, the SMC-ABC batch policy, and batch fixes (staging bucket; no-wait job id; output steps loaded at ingest; a warning that seeds don't reach the target). Tested on `gke-test` |
+| #98 | `feat/forevertree-fire-model` | Open. The fire model (marked-plot exports), its synthetic climate, its case module and this plan |
+| #99 (page 1) | `docs/inference-fire-case` | **Draft, rebuilt** on the marked-plot design and rendered on `gke-test` (Oct 29): "A Model with Births and Deaths" |
+| #95 (page 2) | `docs/inference-rejection-filter` | **Draft, rebuilt** and rendered (Oct 29): "What Would It Take?" |
+| #96 (page 3) | `docs/inference-posterior-property` | **Draft, rebuilt** and rendered (Oct 30): "Posterior Probability of the Target" |
+
+**Oct 29:** the user's review of the three rendered pages found that their fit and their hypothesis
+fail as a known-truth demonstration. The fire model's identifiability was diagnosed, and the
+demo adopts a new design: inverse parameters `recruitment` and `juvenileMortality`, and a
+marked-plot survey revisited over a 20-year present. See "Fire model review: identifiability and
+survey design (Oct 29)" below. The pages were rebuilt on it and rendered on `gke-test` (Oct
+29–30); results under "The big run" there. All three await the user's review.
+
+### Next phase: readiness (Oct 27)
+
+| Work | Ready? | Notes |
+|------|--------|-------|
+| Rebuild of PR 4 and PR 5 on the fire model | **Redone (Oct 29–30)**, awaiting review | The marked-plot design (Oct 29 section); results under "The big run" |
+| `csv_precision` passthrough; `use_float64` in `run_hash` | **Ready** | Small code PR ("Josh CSV export bug") |
+| SMC-ABC batch policy | **Done** (#97) | `SbiStrategy(batch_policy="exact" \| "measured")`, defaulting by dispatch mode |
+| Second ForeverTree model | **Done** (#98) | Spin-up → present → projection on the synthetic climate |
+| Parameter declarations (direct vs inverse) | Direction agreed | API to draft; the second model is its first user |
+| Field data (a study without a truth run) | Ready, small | Needed for Joshua tree, not for ForeverTree |
+| Test (2) as SMC-ABC on a stability target | Waits | The rebuilt #95 is its rejection version; the target is the projected ratio |
+| Pilot on the cluster | **Toolkit ready** (#97, tested on `gke-test`) | The rebuild is the pilot. Open: the credentials Secret each dispatch leaves behind. The CSV bug doesn't touch the fire model's counts. The big run (Oct 29–30) ran there without failures; loading runs one at a time is now the slowest part |
+| Cleanup (Optuna, spin-up) | Parked | Wholesale, once SBI is stable |
+
+Nothing in the stack has merged yet, so new code PRs stack on #96 unless the lower PRs merge first.
+
+### Fire model review: identifiability and survey design (Oct 29)
+
+**The review.** The three rendered pages (Oct 28) ran correctly but fail as a known-truth
+demonstration:
+- **The hypothesis did not depend on the fit.** P(target) came out 1 / 0 / 1 under `normal` /
+  `hot_dry` / `cool_wet`, and under `hot_dry` the prior already gave 0 (every draw 0.07–0.27
+  against 0.30). A posterior collapsed onto the truth would give the same numbers, so the survey
+  changed no conclusion.
+- **The fit was weak and pulled away from the truth.** Over the truth's 30 replicate surveys, the
+  posterior mean averaged 63% for `recruitment` (truth 50%) and 15.6% for `droughtMortality`
+  (truth 10%). The model was meant to make θ easy to recover, so either the model does not
+  behave as intended or the inference is wrong.
+
+**Diagnosis: the inference works; the model's parameters were not identifiable from the survey.**
+All checks are read-only, on the docs registry's runs:
+- **The inference is calibrated.** Leave-one-out coverage is 0.92 and 0.905 (0.905 expected). The
+  truth's 30 replicate surveys are covered 97% and 100% of the time. The reference simulations
+  reproduce the truth's survey: a local fit predicts 11.1 adults per site and a gradient of −1.03,
+  against 11.8 and −1.00 over the replicates. SMC-ABC and plain rejection agree (67 / 11 against
+  70 / 10).
+- **Both parameters act through one channel,** how many juveniles survive to become adults. +10%
+  recruitment adds 2.0 adults per site, and +10% drought mortality removes 3.6. The density
+  gradient moves in nearly the same proportion (+0.37, −1.07). So the two statistics measure
+  about one combination: a ridge. A linear-Gaussian reading gives posterior SDs of 46 and 19 from
+  one survey alone, with correlation +0.97. That is wider than the prior box (SD 23.1 and 11.5),
+  so the box decides where along the ridge the posterior sits, and its middle lies at higher
+  values of both. The pseudo-observed survey also falls at the truth's 90th percentile (16 adults
+  per site against a mean of 11.8).
+- **The stage ratio measures turnover.** With density-dependent recruitment, a settled stand has
+  J/A = μ_A (1 − s^T) / ((1 − s) s^T) (adult mortality μ_A, juvenile survival s, maturity age T).
+  That is independent of `recruitment`, which only sets how full patches get. It rises as juvenile
+  survival falls (0.17 at 1% juvenile mortality, 0.20 at 5%, 0.50 at 20%; no fire or drought). A
+  pilot inverting juvenile mortality (41 draws on `gke-test`) confirmed it: the draws that meet a
+  fixed ratio target under `hot_dry` have the highest juvenile mortality (15.7–19.9%), and three of
+  the five have almost no adults left at the survey sites. **A fixed ratio target rewards poor
+  juvenile survival**, so it cannot be the replacement hypothesis with these parameters.
+
+**Process: sufficiency, tested by simulation (agreed Oct 29).** Sufficiency is a property of a
+statistic S relative to the data D (p(θ | S) = p(θ | D)); it says nothing about whether D
+identifies θ. So there are two questions: is D informative, and is S sufficient for D?
+0. **Set the bar first:** recovery as good as the first model's.
+1. **List candidate designs D** (sites, visits, what each visit records).
+2. **Measure what each D knows:** regress each parameter on a rich feature set of D over the prior
+   simulations, cross-validated (semi-automatic ABC, @fearnhead2012). Posterior SD ≈ prior SD ×
+   √(1 − R²) on average. A regression can underfit, so this is a lower bound on what D knows.
+3. **Compare S with that.** If S reaches nearly the R² of all of D, S is approximately sufficient
+   for D.
+4. **Signal against noise:** replicates at the truth.
+5. **Simulation tests in both directions:**
+   - necessity: drop a statistic and the posterior widens;
+   - sufficiency: add statistics and the posterior does not change (@joyce2008);
+   - recovery: leave-one-out coverage, and the truth's replicate surveys.
+   The first model's "Testing Sufficiency" section shows only necessity (dropping the CV); add the
+   sufficiency direction to both case studies.
+
+**The leave-one-out width has a floor.** With 200 simulations and k = 20, statistics that equal
+the parameters give widths of 0.32 and 0.34. The first model's 0.37 and 0.36 sat at that floor.
+Compare designs by R² (posterior SD over prior SD), not by that width. On that scale the first
+model's mean and CV reach R² 1.00 and 0.98 (SD ratio 0.03 and 0.14): it is nearly deterministic.
+
+**Findings.** Pilots ran in the scratchpad (`turnover_pilot/`, `marked_pilot/`; uncommitted),
+on the docs' 200 prior draws plus 30 truth replicates where noted:
+
+| Parameters | Design | R², first | R², second | Note |
+|---|---|---|---|---|
+| `recruitment`, `droughtMortality` | Density + gradient, 10 sites, once | 0.65 | 0.37 | The docs' fit |
+| | All raw counts, 10 sites, once | 0.70 | 0.41 | So S ≈ sufficient for D, and D is the limit |
+| | Counted revisits, 1 to 10 visits | 0.70–0.72 | 0.41–0.46 | Revisits add nothing |
+| | All 63 patches, once | 0.73 | 0.56 | Sites help a little |
+| | Marked plots, yearly, model-derived statistics | (width 0.40–0.44) | (width 0.83) | Leave-one-out widths; drought mortality stays unidentified |
+| `recruitment`, `juvenileMortality` | Counts, once / yearly | 0.44 / 0.46 | 0.51 / 0.50 | Posterior means at the truth 61% and 7.1–7.4% |
+| | Marked plots every 3 years, 18 years, model-derived statistics | 0.80 | 0.69 | Posterior means at the truth 53% and 5.8% |
+| | Marked plots yearly, model-derived statistics | 0.85 | 0.72 | Posterior means at the truth 49% and 6.1% |
+
+- **Counted revisits recount the same plants.** At 98% adult survival a year, 83% of the adults at
+  a revisit 9 years later are the same trees. What limits the fit is each site's own history of
+  fires and recruitment luck; a new site adds an independent history, a revisit does not.
+- **Marked plots record rates, and in this model the rates are nearly the parameters.** Two
+  statistics follow the model's equations:
+  - `r_hat`: new plants per (marked adult × wet year × open space), where open space is
+    1 − N/40, over all intervals;
+  - `jm_hat`: the yearly death rate of marked juveniles over intervals without fire.
+  Generic pooled features missed the open-space weighting, so their R² undersold the marked data:
+  the same lesson as the first model's CV.
+- **`droughtMortality` is limited by exposure, not by the statistic.** At the truth, juveniles at
+  the 10 sites log about 180 juvenile-years of dryness in unburned years over 19 years. At 10%
+  that predicts about 18 extra deaths, lost in binomial and fire noise. All 63 patches reach
+  width 0.67. Coverage stays calibrated: the method reports that it does not know.
+- **Survey effort over years** (marked plots every 3 years, posterior SD over prior SD):
+
+  | Years of revisits | `recruitment` | `juvenileMortality` |
+  |---|---|---|
+  | 3 | 0.65 | 0.79 |
+  | 6 | 0.53 | 0.66 |
+  | 12 | 0.52 | 0.65 |
+  | 18 | 0.45 | 0.56 |
+
+  More frequent visits over the same span help too: every 5 / 3 / 2 / 1 years gives 0.52 / 0.45 /
+  0.43 / 0.39 for `recruitment` and 0.64 / 0.56 / 0.52 / 0.53 for `juvenileMortality`.
+- **The two statistics are nearly sufficient for the marked-plot data.** Adding every other
+  feature (counts per half of the gradient, survival of marked juveniles and adults, new plants per
+  adult) changes R² by 0.00 for `recruitment` and +0.03–0.05 for `juvenileMortality`. Those
+  features alone reach 0.54 and 0.63–0.67. The rest of the juvenile signal is probably in the stage
+  ratio, which depends on juvenile survival in a settled stand; it is the candidate third
+  statistic. Subtracting the known drought hazard from `jm_hat` closes only 0.01–0.03.
+- **Recovery is unbiased and calibrated.** Coverage is 0.90–0.95. The posterior means at the
+  truth sit at 49–55% and 5.8–6.5%; the prior's floor at 1% pulls the second up.
+- **The gap to the first model is demographic noise.** Each marked juvenile is one Bernoulli trial
+  a year, and the 10 sites hold at most 40 plants each (about 30 juveniles alive at a time). Even
+  sufficient statistics cannot beat that.
+
+**Decided (Oct 29): the fire model's design for the demo.**
+- **Inverse parameters: `recruitment` (10–90%) and `juvenileMortality` (1–20%)**; truth 50% and
+  5%. `droughtMortality` is direct, at 10%. Recruitment and juvenile survival are the two vital
+  rates a marked-plot program measures, which is the Joshua tree case.
+- **The present is 20 years**, the survey program's window, after the 200-year spin-up.
+- **The survey: the 10 fixed sites as marked plots.** Each visit marks every plant and records the
+  fates of those marked at the last visit (alive or dead, by their stage when marked) and the
+  plants new since. Climate and fires are recorded every year. The default schedule is every 3
+  years (7 visits, steps 201–219). The model exports every year, so a page can compare schedules
+  and spans from the same runs.
+- **Statistics:** `r_hat` and `jm_hat`, with the log stage ratio as a candidate third. Page 1
+  demonstrates sufficiency by simulation in both directions.
+- **The bar for the fire model** is unbiased, calibrated recovery whose uncertainty narrows with
+  survey effort, not the first model's tightness. Bigger plots (`maxTrees` about 200) would push
+  toward that tightness, at slower runs; parked.
+- **For Joshua tree:** survey effort over years reduces uncertainty when revisits follow marked
+  plants. The number of marked plants followed sets the floor. Responses expressed only in rare
+  conditions (drought, fire) need long records spanning those events, or sites placed where they
+  happen.
+
+**How the pilot read fates.** It read them from age-structure exports: live trees younger than 2,
+3, 4, 5, 6, 9, 10, 11, 12 and 13 years, per patch and year. A tree is age 1 the first time it is
+counted. So at a revisit k years on:
+- trees aged k + 1 or more were there at the last visit;
+- those aged k + 8 or more were adults then;
+- trees younger than k + 1 are new.
+This was checked: survivors never exceed the plants marked. The pilot assumed every marked plant
+is refound and every new plant seen. Detection error applied to counts only, and it cost nothing.
+
+**Open before the big run:**
+1. **The hypothesis for pages 2–3.** *Resolved: λ ≥ 0.99 (below).* The ratio target rewards
+   poor juvenile survival. The candidate is adults' λ under `hot_dry` (for example λ ≥ 0.99,
+   keeping two-thirds of the adults over 40 years). Under the old parameters, λ ≥ 0.99 under
+   `hot_dry` gave a prior probability of 0.30 and a posterior probability of about 0.97. It is
+   measured after the runs, so it does not block the simulations.
+2. **Where the big run runs.** *Resolved: `gke-test`, which ran it without failures.* `gke-test`
+   jobs stayed `pending` for over an hour on Oct 29, and up to 200 dispatched pilot jobs may
+   still be queued there. Check the cluster first. Locally, the pilot's 230 runs took about 20
+   minutes at 5 in parallel, outside joshpy, which runs one simulation at a time locally.
+3. **Detection on marked plots:** whether new juveniles are found at 90%. The pilot found detection
+   cost nothing on counts.
+
+**Prep checklist:**
+- **Done (Oct 29): model** (`forevertree_fire.josh`): the age-structure exports. **Template** and
+  the `fire_modes` configs: `presentYears = 20`; in the template, `juvenileMortality` is templated
+  and `droughtMortality = 10 %`.
+- **Done (Oct 29): case module.**
+  - Prior and truth; `SURVEY_STEP` 219; `visits()`; `present()`.
+  - `observe` returns the marked-plot records, one row per site and visit.
+  - `statistics` gives `r_hat` and `jm_hat` (in %), plus `log_ratio`, `adult_density` and
+    `density_gradient` from the counts. `STATISTICS = ["r_hat", "jm_hat"]`.
+  - `projected()` keeps the window ratio and adult λ.
+  - Checked against the pilot: the same statistics to 1e-14 on 27 of its runs, for 1-, 3- and
+    5-year schedules. One local truth run went through joshpy end to end: 20 present years
+    loaded, 7 visits, `r_hat` 41, `jm_hat` 7.7 (truth 50 and 5; both statistics are biased by
+    design: unseen recruits, drought deaths).
+- **Registry:** the new model gives new run hashes, so the big run can use a fresh registry. Keep
+  `forevertree_fire.duckdb` (1.7 GB) until the old pages are replaced. Disk had about 5 GB free
+  on Oct 29.
+- **Pages:**
+  - Page 1 rebuilt around the survey design: counts against marked plots, the sufficiency tests,
+    and the effort curve.
+  - Pages 2–3 rebuilt with the chosen hypothesis.
+- **Cost:** the same simulation counts as Oct 28 (200 prior draws, a search of about 600, a
+  filter of 2,000, 900 projections). Runs are about 5% longer (220 steps to the survey, against
+  210).
+
+**Decided (Oct 29): the target is adults' λ ≥ 0.99 over the 40 projected years** (two-thirds of
+the adults kept), measured by `case.projected` on the whole landscape. The case module has
+`TARGET_LAMBDA = 0.99` and no ratio target. In the pilot under `hot_dry`, the truth's λ was 0.9934
+and 62% of draws passed in every replicate.
+
+**The big run (Oct 29), page 1.** Rendered on `gke-test` into a fresh `forevertree_fire.duckdb`
+(the Oct 28 registry is kept as `forevertree_fire.oct28.duckdb`). About 800 simulations in about
+2.5 hours: 3 futures × 10 replicates of the truth projected, the truth, 200 prior draws, 30 truth
+replicates, and 540 new SMC-ABC runs (5 rounds, 108 minutes). The first attempt stopped on a
+single-visit survey (`statistics` had no `new` column to drop); fixed in the case module.
+- **Truth under the futures:** λ 1.000 (`normal`), 0.993 (`hot_dry`, range 0.992–0.996), 1.003
+  (`cool_wet`); every replicate meets the target. Juveniles per adult: 0.41, 0.21, 0.48.
+- **Leave-one-out widths** (`recruitment`, `juvenileMortality`; floor 0.34, 0.33): `r_hat` alone
+  0.62 / 0.96, `jm_hat` alone 0.98 / 0.70, both 0.66 / 0.74, with `log_ratio` (compared) 0.64 /
+  0.67, all five 0.67 / 0.69, counts only 0.80 / 0.82. Coverage 0.89–0.94. Necessity and
+  sufficiency both hold; the stage ratio adds to `juvenileMortality`, the densities add nothing.
+  Wider than the pilot's 0.55 / 0.64, which came from its own 200 draws: with 200 simulations,
+  the widths vary from one set of draws to the next.
+- **Effort** (widths): every 3 years over 4 / 7 / 13 / 19 years 0.80 / 0.73 / 0.66 / 0.64 and
+  0.82 / 0.80 / 0.71 / 0.67; every 5 / 2 / 1 years over 20 years 0.69 / 0.57 / 0.56 and 0.75 /
+  0.65 / 0.66. Counts only: one year 0.90 / 0.86, 20 yearly counts 0.80 / 0.81.
+- **Truth replicates:** survey spread 0.23 / 0.18 / 0.37 prior SDs (`r_hat`, `jm_hat`,
+  `log_ratio`). Rejection ABC (k = 20) over the 30 surveys: means 51.2% and 6.7%, every range
+  covers the truth.
+- **SMC-ABC:** ε 1.56 → 0.78 → 0.39; the third generation carried 7 over (largest distance 0.45;
+  60% of the truth's replicate surveys within it). Posterior `recruitment` 53.3% (90%: 41.0–67.0),
+  `juvenileMortality` 6.2% (2.4–11.2), truth inside both; ESS 22.9 of 30.
+- **Page 2** (rejection filter, `hot_dry`; 2,000 projections, 1 h 40 min on `gke-test`: 40 minutes
+  to simulate, an hour to load): 81 of 200 draws pass (P = 0.405), 199 meet the target in at
+  least one replicate, 46 in all 10. A draw's median λ: 0.978–0.996 (5–95%), median 0.993; the
+  replicates' SD is 0.0046, as large as most draws' distance from the target. The accepted region
+  is `recruitment` above about 30% with `juvenileMortality` below about 10%, or above 50% up to
+  about 15%. The projected ratio follows `juvenileMortality` (ρ 0.59), not λ (0.10). 32 draws
+  have a replicate whose landscape loses every adult (λ = 0), so the figure uses medians and
+  each draw's share of replicates meeting the target.
+- **Page 3** (900 projections, about an hour): P(target | survey) = 1 / 0.953 / 1 under `normal`
+  / `hot_dry` / `cool_wet` (ESS 22.9; P = 1 means at least 0.87). Under `hot_dry`, one particle
+  (52%, 8.2%; weight 0.047) meets the target in 8 of 10 replicates; 20 particles in all 10.
+  Posterior λ under `hot_dry` 0.9946 (90%: 0.9900–0.9991), against the truth's 0.993. **The
+  survey moves the `hot_dry` answer from 0.41 to 0.95**: the hypothesis now depends on the fit,
+  which the Oct 28 pages failed to show. No future is a negative control: the truth meets the
+  target under all three.
+- **Mistake to avoid:** a plain-Python `study.search` against the rendered registry proposed new
+  runs from generation 2 and began simulating them locally (35 runs) before it was stopped. The
+  stray session was removed with `drop_run`. Inspect a search through the rendered page or a
+  read-only query.
+
+### Rebuild of PR 4 and PR 5 on the fire model (Oct 27)
+
+> **Superseded in part (Oct 29):** the inverse parameters, the survey, the statistics and the
+> ratio-target hypothesis below give way to the marked-plot design in "Fire model review:
+> identifiability and survey design (Oct 29)". The timeline, the climate, the futures and the
+> page plan's three-page shape stand.
+
+The growth-band pages (#95, #96) are rebuilt on the second ForeverTree model, around replacement.
+`faster`, `steady` and the growth window go: they were invented because the first model's trees
+never die, and they read as artificial. The first model's pages (#90, #91) stay as they are, since
+they teach the ABC mechanics.
+
+**Decided (Oct 27):**
+- **Fit the present, test the future.** SMC-ABC fits the survey's juvenile:adult ratios (the
+  present); the hypothesis is about a projection (the future). That is the Joshua tree test (1) as
+  planned ("Joshua tree design"). The ratio is in the fit, so a hypothesis about the ratio in the
+  survey years would only restate the data; one about the projected ratio does not.
+- **Hypothesis: the projected ratio stays above a target**, a fixed number of juveniles per adult
+  set before the analysis, as a management target would be. It is not relative to the stand's own
+  ratio, and it is not adult λ.
+- **Inverse parameters: `recruitment` and `droughtMortality`.** Everything else is direct, at the
+  defaults. Two parameters keep the first model's 2-D figures.
+- **Fire: stochastic** (`fireChance` 10%, scheduled fire off).
+- **Climate: three synthetic futures, `normal`, `hot_dry` and `cool_wet`,** generated outside this
+  repo and copied in (spec below). `observedPrecipChange` leaves the model.
+
+**The three futures are the controls.** One survey, one fit, three projections. With the target
+fixed, P(ratio above the target | survey) should come out high under `cool_wet` and low under
+`hot_dry`, with `normal` wherever the truth's own projection puts it. They replace the growth
+bands as positive and negative controls, in terms a manager uses.
+
+**Synthetic climate: what this repo needs** (generated elsewhere; the repo has no generator, but
+writes NetCDF with `scipy.io.netcdf_file` and preprocesses it with `NetcdfPreprocessConfig` or
+`GridSpec.preprocess_netcdf`, as in the timestep-interventions tutorial and
+`tests/test_jshdz_integration.py`):
+- **Extent:** the ForeverTree grid, top-left 36.73° N, −119.52° E, bottom-right 35.80° N,
+  −117.98° E, in 16 km patches (63 of them). Any lat/lon grid covering it at the demo data's
+  resolution (10 × 8 cells over the extent) or finer; preprocessing interpolates onto the patches.
+- **Variables, yearly:** `temperature` (annual mean, K) and `precipitation` (annual total, mm).
+  Precipitation in mm drops the model's kg m⁻² s⁻¹ conversion.
+- **Files** (NetCDF, dimensions `(time, lat, lon)`, `time` counted in years):
+  - `historical`: a stationary present, proposed 30 years. The spin-up resamples these years, and
+    the last 11 are the survey window, read in order.
+  - `normal`, `hot_dry`, `cool_wet`: one file per future, proposed 40 years each, starting the year
+    after the survey.
+- **Spatial structure:** a precipitation gradient across the model's response range, so that about
+  half the patches can hold trees. Dryness is linear from 300 mm (1) to 500 mm (0), and recruitment
+  and juvenile drought deaths read it; the demo data's cell means span 240–550 mm. Temperature near
+  the growth optimum (300 K; the growth map is quadratic over 270–330 K), with a mild gradient.
+- **Year-to-year variation:** a regional component shared by every patch (wet and dry years for
+  the whole landscape, which make recruitment pulses), plus a smaller local one. For scale: in the
+  demo data, each cell's SD between years is about 39 mm (10%), uncorrelated between cells.
+- **Futures:** `normal` continues the historical statistics; `hot_dry` and `cool_wet` ramp away from
+  them. Proposed: linear ramps to −30% precipitation and +2 K by year 40 (`hot_dry`), and to +20%
+  and −1 K (`cool_wet`).
+- **Seeded and documented**, so the tutorial can say how the data were made.
+
+**Model changes, once the data are in:**
+- Timeline: spin-up → survey → projection, as states on the simulation. `steps.high` is the sum of
+  the three lengths; the projection length is a direct parameter, so fit runs can stop at the
+  survey (0 projection years).
+- Externals: `historicalTemperature` and `historicalPrecipitation` for the spin-up (resampled) and
+  the survey years (in order), and `futureTemperature` and `futurePrecipitation` for the
+  projection. The future is chosen by `file_mappings`: a direct file parameter, so one fit serves
+  three projections.
+- To verify first: that a fit run (no projection years) needs no future files mapped, since its
+  future lookups never evaluate.
+- Exports go to `minio://josh-batch-storage/{exportPrefix}/…_{run_hash}_{replicate}.csv`, with
+  the prefix in `JobConfig.custom_tags` (the scheme must be literal; "Execution on Kubernetes").
+
+**Survey and statistics (proposed):** stage counts (juveniles, adults) at about 10 fixed sites
+spread along the rain gradient within the occupied range, in the last survey year. Statistics:
+the pooled log juvenile:adult ratio, adult density, and the slope of the log ratio along the rain
+gradient. The slope is what should identify `droughtMortality`, since drought deaths show as fewer
+juveniles at the dry sites.
+
+**Projection and hypothesis:**
+- Projections are separate runs at the final particles, 10 replicates each, under each future.
+  Each replicate's present is a fresh realization of the particle's parameters, not the search's
+  replicate. (Planned: shared seeds, so the three futures branch from the same present. Dropped:
+  `batchRemote` takes no seed.)
+- The landscape ratio (juveniles over adults, pooled over the occupied patches), averaged over the
+  last 10 projection years, must be at or above the target in 9 of 10 replicates. The page also
+  shows the pooled reading (as on the current #96).
+
+**Page plan:**
+1. **A model with births and deaths** (new): the fire model, the synthetic climate and its three
+   futures, the survey, the truth, prior simulations, the statistics, and the SMC-ABC fit.
+2. **What would it take?** (#95, rebuilt): rejection sampling from the prior under `hot_dry`. Which
+   `recruitment` and `droughtMortality` values keep the projected ratio above the target, and how
+   far are they from the posterior? This is the rejection version of the Joshua tree test (2).
+3. **Posterior probability of replacement** (#96, rebuilt): P(ratio above the target | survey)
+   under each future, with the projected ratio's posterior bands over the 40 years against the
+   target. The Oct 26 review's framing (biological names, a manager's reading, two readings of
+   the probability) carries over.
+
+**Stack:** `#94 → #97 (toolkit) → model and case-module code (new PR) → page 1 (new PR) → #95 →
+#96`. The model
+branch moves below #95, and #95 and #96 are force-pushed with their rebuilt content; both stay
+drafts. `final_window_gain` leaves `forevertree_case.py`.
+
+**Cost (rough, local, one run at a time):** about 10 s per run to the survey and 12 s with a
+40-year projection. That puts the first render at about 10 hours:
+- 200 prior draws: about 35 minutes;
+- a 600-simulation search: about 1.7 hours;
+- the filter's 200 draws at 10 replicates: about 5.5 hours;
+- the projections, 30 particles × 10 replicates × 3 futures: about 3 hours.
+
+A 100-year spin-up, fewer filter draws or a smaller grid would cut it.
+
+**The synthetic climate landed (Oct 27)** in `examples/sbi_forevertree/climate/`, generated outside
+this repo (`data/generate_fire_climate.py`; each NetCDF records its seed). It matches the spec:
+- **Historical (30 years):**
+  - rain falls 546 → 234 mm west to east, and 60% of cells sit in the 300–500 mm response range;
+  - year-to-year CV is about 10%, 59% of it shared across the landscape;
+  - temperature is 294–306 K by cell.
+- **Futures (40 years each):** by the last decade, `hot_dry` has −26% rain and +1.8 K, and
+  `cool_wet` +16% rain and −0.9 K; `normal` stays within ±5%.
+
+`preprocess_climate.py` writes the committed `.jshd` files. The model's timeline is in place:
+spin-up, present, projection. A fit run (`projectionYears = 0`) needs no future files. A run takes
+about 16 s locally; 3 futures × 10 replicates took one cluster round of about 215 s.
+
+**Decided Oct 27: maturity is by age (`maturityAge`, default 8 years), as in the JOTR model.**
+Projecting the truth with height-based maturity (adult from 5 m), 10 replicates per future:
+
+| Future | Ratio, last 10 projected years | Adult λ per year |
+|---|---|---|
+| `cool_wet` | 0.244 ± 0.022 | 1.003 |
+| `normal` | 0.257 ± 0.015 | 0.998 |
+| `hot_dry` | 0.215 ± 0.016 | 0.990 |
+
+The ratio put `cool_wet` below `normal` though its adults grew. Wet years speed growth, so juveniles
+reach adult height sooner, emptying the juvenile class as recruitment rises. A height-based stage
+ratio mixes recruitment with growth speed. With maturity by age, on `gke-test`:
+
+| Future | Ratio at the survey | Ratio, last 10 projected years | Adult λ per year |
+|---|---|---|---|
+| `cool_wet` | 0.47 ± 0.05 | 0.458 ± 0.049 (0.39–0.54) | 1.004 |
+| `normal` | 0.48 ± 0.06 | 0.393 ± 0.031 (0.35–0.44) | 1.000 |
+| `hot_dry` | 0.45 ± 0.06 | 0.200 ± 0.025 (0.16–0.23) | 0.994 |
+
+The ratio ranks the futures as the adult trend does. Heat (open item 2 below) no longer touches the
+ratio: temperature only changes growth, and growth no longer sets maturity.
+
+**Decided (Oct 27):**
+1. **The target: 0.30 juveniles per adult**, averaged over the last 10 projected years ("Target .3 is
+   fine"). It sits midway between `hot_dry`'s highest replicate and `normal`'s lowest.
+2. ~~Heat in the ratio~~: moot with maturity by age.
+3. ~~The climate magnitudes and lengths~~: set by the data.
+4. **Detection: imperfect but small.** Each juvenile is found with chance 90% (`juvenileDetection`,
+   drawn by the model as `detectedJuveniles`); adults always. "Keep it small so we can still
+   clearly observe what we expect."
+
+**Built (Oct 28): the three pages.** Stack: `#97 → feat/forevertree-fire-model (code) →
+docs/inference-fire-case (page 1) → #95 (page 2) → #96 (page 3)`.
+- **Case module** `forevertree_fire_case.py`: survey of 10 fixed sites (two in each of the five
+  western columns); candidate statistics; `projection_model(future)`; `projected()` (the window
+  ratio and adult λ). Fit runs load the 10 present years, projections the survey year onward.
+- **Prior box:** `recruitment` 10–90%, `droughtMortality` 0–40%.
+- **Finding 1, the survey's ratio is uninformative about these traits.** Over the 200 prior
+  draws, the pooled log ratio has ρ −0.07 (recruitment) and +0.16 (drought mortality).
+  Recruitment is density dependent, so turnover sets the present ratio. ABC compares adult
+  density (ρ +0.84 with recruitment) and the dry-versus-wet density gradient (ρ −0.59 with drought
+  mortality). The ratio stays the hypothesis's measure, in the projections.
+- **Finding 2, the target is out of reach under `hot_dry` for these traits.** A pilot on
+  `gke-test` (3 replicates at each of 18 points spanning recruitment 10–100% × droughtMortality 0–100%): the
+  projected ratio tops out near 0.25. It is highest at high drought mortality, whose stands have
+  already lost their dry edge (dry-edge adults stop recruiting under `hot_dry` and pull the pooled
+  ratio down). Adults decline everywhere (λ 0.976–0.998). Page 2's filter therefore accepts
+  nothing at 0.30; the page says so, and what the ceiling is. The target is applied after the
+  runs, so another target needs no new runs.
+- **Truth projections** (10 replicates per future, page 1): window ratio 0.398 (0.346–0.463)
+  under `normal`, 0.472 (0.408–0.534) under `cool_wet`, 0.200 (0.170–0.234) under `hot_dry`; adult
+  λ 1.000, 1.003, 0.994. 0.30 separates them with every replicate on its side.
+- **Finding 3, a search replays exactly only in the numeric environment it ran in.** The search
+  run from a plain Python script on `gke-test` replayed exactly from another plain Python process,
+  but under reticulate (the R process that renders the pages) it proposed different parameter sets
+  from generation 2 on (float32's last digits; the thread counts match, so likely the BLAS/LAPACK
+  R loads into the process). So each page's first render runs its own simulations on the cluster
+  (`JOSH_BATCH_TARGET=gke-test pixi run docs-inference`), and later renders replay. The session's
+  `versions` (sbi, torch, device) don't capture this; recording the embedding (R or not) and the
+  BLAS in the session would let `_warn_on_version_drift` warn.
+- **Results.** Page 1: the fit's 90% intervals are `recruitment` 39–87% and `droughtMortality`
+  2–23% (truth 50% and 10%; ESS 28 of 30); the final tolerance holds 10% of the truth's replicate
+  surveys. Page 2: no prior draw meets 0.30 under `hot_dry` (25 have a replicate that does; the
+  highest target any draw meets in 9 of 10 replicates is 0.248), and no draw's adults hold.
+  Page 3: P(target | survey) is 1 under `normal` and `cool_wet` (bound 0.89) and 0 under `hot_dry`
+  (bound 0.11); pooled 0.996, 1.000 and 0.005. The controls come out as they should.
+- **Costs on `gke-test`:** `load` (truth + 200 prior draws) 33 minutes; the truth's projections
+  1–2 minutes per future; page 1's search 65 minutes (after the plain-Python search, 89 minutes,
+  was discarded; generations 0 and 1 were reused); page 2's filter (2,000 simulations) 85 minutes;
+  page 3's projections (900) 51 minutes. Most of it is joshpy staging, dispatching, polling and
+  loading jobs one at a time (about 10 s per job); a simulation takes about 16 s. Later renders
+  replay each page locally in 2–3 minutes with no new runs.
+- **Follow-ups for the toolkit:** dispatch is serial (stage the batch in one upload, or dispatch
+  from a thread pool); a transient storage error while staging failed one of page 2's 200 jobs
+  ("We encountered an internal error. Please try again."), and the filter stops on any failure,
+  so staging should retry.
 
 ### #90 review (Oct 21)
 
@@ -181,6 +654,283 @@ Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 ("SBI s
 | 5 | z-score instead of dividing by the SD | Statistics are z-scored with the prior simulations' mean and SD. Distances don't change, because the mean cancels |
 | 6 | The pipeline figure is confusing | Two figures: model output → survey → S_obs, then the prior simulations against S_obs in measured units and as z-scores |
 | 7 | The likelihood-approximation section | Kept, with prose placing it in Hartig et al.'s three steps and options (a) and (b) |
+
+### Review of the Inference pages (Oct 25)
+
+| # | Note | Change |
+|---|------|--------|
+| 1 | `case.known_truth_study()` is a wrapper with no purpose | The module holds `STUDY`, the arguments as a dict; pages call `KnownTruthStudy(**case.STUDY)`, and the case study shows the dict. `model_config()`, `replicate_study()`, `replicate_job()` and `gain_filter()` are gone too: the replicate study and the `PropertyFilter` are written out on the pages |
+| 2 | Bless a few general plots (e.g. S_sim vs S_obs as a convergence signal), but avoid the maintenance burden | None blessed yet. Parked below, as a data method with the plot left to the page |
+| 3 | Pattern-oriented modelling: how many patterns do mean and CV fix? Within-site CV, temporal patterns? | Answered from the prior simulations (Parked: patterns at more scales). No change to the statistics yet; the user decides |
+| 4 | Is the posterior predictive check a held-out pattern? | Yes; the SMC-ABC page now says so (Grimm et al. 2005) |
+| 5 | "Starting from the middle" is too meta | "Picking Up from the Case Study", stating what the page assumes; the rejection-filter page says the same |
+| 6 | Use ggplot, inline and folded, not plot code buried in `forevertree_case.py` | Every figure is a folded ggplot2 chunk on its page, fed by a folded pandas chunk; the module keeps only what is specific to ForeverTree (constants, `final_heights`, `observe`, `statistics`, `STUDY`, `final_window_gain`) |
+
+All three pages were re-rendered on their own branches with no new simulations; printed outputs
+are unchanged apart from tables now showing the statistics' own names (`mean_height`,
+`height_cv`) and the replay timing.
+
+### Review of the PR 4 and PR 5 pages (Oct 26)
+
+| # | Note | Change |
+|---|------|--------|
+| 1 | The docs are a generic guide; keep anything about the Joshua tree test out of them | Removed from the rejection-filter page, the posterior-property page, and the Inference index's roadmap sentence and mapping table. The removed text is kept in `JOTR_NOTES.md` in the repo root, a scratch file outside git. This plan keeps the Joshua tree design |
+| 2 | F1, F2, R1, R2 read as opaque; put them in biological terms | `faster` (the stand gains 0.75–0.87 m of height a year, 20–40% more than at the truth), `steady` (its gain swings no more between years), and the positive control's `same_rate` and `same_swings`. ḡ and s_g are named the stand's growth rate and growth variability |
+| 3 | Read the results as a manager would: bound the biological parameters, then state how likely the posterior is to meet a hypothesis about the landscape | The posterior page opens with that two-step workflow, shows the trait intervals, and ends with "Reading the Results". The rejection-filter page reads its accepted region as a planting choice (more drought-tolerant trees, not faster-growing ones) |
+| 4 | Why estimate the prior probability of a band we don't expect to be realistic? | The band is a negative control, which the pages now say. The rejection filter's result is the accepted region (what it would take), not its prior share. On the posterior page the prior column is labelled a baseline, and the realistic statement is the posterior one |
+
+Also added to the posterior page: the probability read two ways, by the 90% rule (a stand that
+reliably behaves so) and by pooling replicates (one realization of the landscape). For growing as
+at the truth, 0.93 against 0.99. Both pages were re-rendered with no new simulations; every number
+is unchanged.
+
+### Joshua tree design (Oct 25)
+
+**Two separate tests, never one combined search.**
+1. **Fit.** Which parameter sets reproduce the I&M patterns (pattern-oriented: several
+   statistics, at the scales where the model has processes)? SMC-ABC, as on the SMC-ABC page.
+   Whether the fitted sets replace themselves is checked **post hoc**:
+   P(replacing | I&M) = Σ wᵢ·passᵢ / Σ wᵢ over the final particles, each topped up to N replicates.
+   Decided Oct 27: the fit uses the present (the surveys' juvenile:adult ratios, among other
+   patterns) and the check is a projection under future climates: whether the projected ratio
+   stays above a target. The rebuilt PR 5 does exactly this on the fire model.
+2. **Counterfactual: an idealized scenario of stability** (revised Oct 26). Also SMC-ABC: target
+   statistics that describe stability (e.g. a population growth rate of 1 and a low year-to-year
+   CV) take the place of observed patterns, and ε plays the band's role. It runs from the prior,
+   independently of (1), which de-risks the work: (2) doesn't depend on (1) fitting well.
+   Starting from (1)'s posterior instead isn't an important distinction. PR 4's `PropertyFilter`
+   is the rejection version and a cheap first look. Replacement is a counterfactual that a
+   one-timestep survey can't characterize, so it never enters (1)'s fit.
+
+This supersedes SBI.md's "one run, two checks" with four outcome groups, and its filter-and-refine
+search over both checks.
+
+**What the existing workflow covers, and the gaps:**
+- Test (1): `SbiStrategy` SMC-ABC, then `PropertyFilter.evaluate` on the final particles after a
+  top-up (`run_at` with `replicates=N`; since #94 a particle's parameters reproduce its run). PR 5
+  shows whether a top-up helper earns a place in the toolkit.
+- Test (2): `SbiStrategy` SMC-ABC with the stability target as `observed`; the second ForeverTree
+  model provides the growth rate. `PropertyFilter` on prior draws (`filter_prior`) is the rejection
+  version.
+- **Gap: field data.** `KnownTruthStudy.load` runs a truth to get S_obs. With I&M data, S_obs comes
+  from the data, and the prior simulations only set the z-score scale. Small generalization: a
+  study without a truth, S_obs given.
+- **Gap: SMC-ABC's round structure on Kubernetes** (next; decided Oct 26 in "SMC-ABC batch
+  policy").
+
+**Kubernetes: one Job per parameter set; rounds, not generations, set the wall-clock.**
+- One proposal → one indexed Job with N completions; a batch of proposals is dispatched together
+  and polled (`batch_no_wait`). Staging each set separately is fine: Joshua tree runs are slow
+  enough that staging won't dominate.
+- **During the fit, one replicate per proposal.** sbi's SMC-ABC compares one simulation per
+  proposal with S_obs, and its acceptance across proposals handles the noise. N replicates are only
+  needed for the post-hoc check, so top up the final particles (one extra round) rather than run N
+  for every proposal (N× the cost, spent mostly on rejected proposals).
+- **A generation is many rounds.** Within a generation, sbi proposes only as many as are still
+  missing (`SMCABC._sample_next_population`), so batches shrink as particles are accepted. PR 3's
+  600 simulations ran as **70 sequential batches** (generations 0–4: 1, 19, 17, 29 and 4 rounds),
+  most late ones of 1–2 proposals. Wall-clock ≈ rounds × run time, with the cluster mostly idle.
+  Decided Oct 26: a configurable batch policy ("SMC-ABC batch policy"). The alternatives were an
+  engine built for parallel ABC-SMC (pyABC's distributed samplers keep workers busy) and sequential
+  neural estimation with fixed-size rounds (parked in SBI.md for trust reasons).
+
+**Early stopping and failures: test the workflow first.** Both are invasive, early stopping
+especially. Run a pilot on the cluster, see which failures occur and what stopping would save,
+then decide.
+
+**Parameter declarations: one way for every strategy.** SBI is becoming joshpy's canonical
+workflow (a plain random sweep is a prior simulation that keeps every draw). Today sweeps and
+Optuna read `ConfigSweepParameter` (`values` as a list, `np.arange` or a range dict),
+`FileSweepParameter` and `CompoundSweepParameter`, while `SbiStrategy` takes its own continuous
+prior dict and no file parameters. Review before the next case study:
+- **Terminology (Oct 26): direct vs inverse (indirect) parameterization** (Hartig et al. 2011), not
+  "prior". A reader takes a "prior" to mean the parameter must be fit by inverse modelling, but
+  direct parameterization is normal for some models.
+  - *Direct* parameters carry values: fixed, or swept, with one search per combination (a
+    condition).
+  - *Inverse* parameters carry a distribution that SBI samples.
+- declare both on the same parameter objects, and have `SbiStrategy` read the inverse ones from
+  `SweepConfig`;
+- file and compound parameters are direct only: a categorical can't take sbi's Gaussian
+  perturbation kernel, so infer such inputs through continuous parameters instead;
+- fire (Oct 26): per patch, not spatial, because the Joshua tree design simulates each point. Fire
+  is sometimes deterministic and sometimes stochastic, and the model can't assume either, so both
+  modes come from the jshc (see "Second ForeverTree model"). No file primitive is needed. Any
+  observed fire history stays fixed files (`file_mappings`).
+
+**Grass–shrub fire is not a case study (Oct 26).** At 1,000 steps it is stable at every damage
+setting, so stability isn't something to find there ("Second ForeverTree model"). Its role moves
+into ForeverTree.
+
+### SMC-ABC batch policy (Oct 26)
+
+**A generation needs `num_particles` passed runs (inside ε); every proposal is simulated.** ε, the
+importance weights and the perturbation kernel change only between generations, because they need
+the finished population. Rounds within a generation are repeated draws from one fixed proposal;
+only the count of passes changes when a round returns. sbi proposes as many runs as passes are
+missing, so it never overshoots (the fewest simulations) but needs many rounds. The tail is the
+cost: with one particle missing at 20% acceptance, the last particle alone averages 5 rounds.
+
+**The batch policy is a trade-off between wasted compute and wall-clock, so it's configurable on
+`SbiStrategy`:**
+- `exact`: sbi's own loop. Fewest simulations; 18–29 rounds per generation at 20% acceptance and
+  78–122 at 5% (30–300 particles). Right when runs execute one at a time, as `SweepManager` does
+  locally, where wall-clock tracks total simulations.
+- `measured`: round 1 proposes a fraction (default 0.7) of missing ÷ the previous generation's
+  acceptance rate, so it rarely overshoots. Later rounds size from this generation's measured rate
+  with a margin (default 1.1), and an optional cap per round (cluster capacity) bounds every batch.
+  Simulated: 2.0–2.2 rounds per generation, for extra simulations of +14% at 30 particles, +8% at
+  100, +6% at 300 and +5% at 1,000. The simulation assumes the acceptance rate moves about 30%
+  between generations, as in PR 3 (0.20, 0.24, 0.16).
+- Rejected: one round sized from the previous generation's rate × 1.2 (1.6–2.0 rounds but about
+  +30%). The waste comes from the rate guess, which a margin can't fix, rather than from counting
+  noise, which shrinks with population size.
+- **Default by dispatch mode:** `exact` for local runs and `measured` for `batch_remote`; users can
+  override every setting. PR 3's page runs locally, so its replay is unchanged.
+- **Validity:** keep the first missing passes in **proposal order**, never the closest, which
+  would quietly tighten ε. Weights come from sbi's `_calculate_new_log_weights` against the
+  previous population. Batch sizes depend only on counts already observed, as sbi's do.
+- **Implementation:**
+  - an `SMCABC` subclass overriding the private `_sample_next_population`, with the version
+    pinned to `sbi<0.28` ("sbi API churn" in Parked); an upstream option later;
+  - cap every batch at the remaining `num_simulations` budget, as sbi does;
+  - record rounds and surplus per generation in `SbiResult.populations`.
+- **Cluster saturation:** a round larger than the cluster runs in waves, with pods Pending until
+  capacity frees up or the autoscaler adds nodes, so `batch_timeout` must allow it. The surplus then
+  costs wall-clock too, which is what the cap is for.
+- **Tests:** a toy simulator, where `exact` and `measured` give the same population distribution
+  (moments over seeds); round counts; the budget; replay.
+
+### Second ForeverTree model (Oct 26)
+
+**Why:** the 1,000-step grass–shrub run (`examples/adaptive_fire.josh`: 16 damage settings, 10
+replicates each, exported at full precision) is stable at every setting:
+- it settles by about step 80;
+- damage sets the level of total cover (80–128% of a possible 200%);
+- fire feedback barely acts, because patches sit above the 30% fire threshold 75–97% of the time.
+
+A separate example would add little, so ForeverTree gains its role.
+
+**Revised Oct 27** ("Rebuild of PR 4 and PR 5"): the climate comes from synthetic files with three
+futures, the run becomes spin-up → survey → projection, and `observedPrecipChange` goes. The
+description below is the Oct 26 draft, which still has them.
+
+**Drafted for review (Oct 26):** `examples/sbi_forevertree/forevertree_fire.josh`, with one config
+per fire mode in `fire_modes/{scheduled,stochastic}/forevertreeFire.jshc` (the config name is
+`forevertreeFire`). `forevertree.josh` and the four Inference pages are unchanged. It is not yet
+wired into joshpy (no template, case module or registry); that follows the review. It runs with the
+Oct 22 dev jar; the browser bundle for demo.joshsim.org exports to `memory://editor/patches`
+instead of a file.
+
+**The run.** `steps.high = spinupYears + 10`. The simulation has a `state`: "spinup", then
+"observed" at step `spinupYears`. During the spin-up, `year.step = sample discrete uniform from 0
+count to 10 count`, the same draw for every patch; in the observed years, `year` runs 0–10 in order.
+Patches read `external X at meta.year`.
+- **Finding:** in the Oct 22 dev jar, an unadorned `external X` still reads by step index (Josh warns
+  that it is "interpreted as a zero-based JSHD index") and fails past the data's last step. `at
+  meta.year` reads the resampled year, so the model writes it explicitly.
+- `observedPrecipChange` scales precipitation in the observed years only (default 0%): the climate
+  scenario test (2) needs (below).
+- Josh quirks met: `%` parses as percent, not modulo (the schedule uses `floor`); `and` doesn't
+  short-circuit (the schedule guards its division); `n` and `p` are keywords.
+
+**Mechanisms**, per patch and year (parameters in brackets; d is dryness, the linear map of
+precipitation from 300 mm (d = 1) to 500 mm (d = 0), clamped):
+- **Growth**, as in forevertree.josh [`maxNewGrowth`, `minPrecipImpactPct`].
+- **Deaths**, removed at the next step's start (the two-trees `dead` slice). A juvenile (below
+  [`maturityHeight`]) dies with chance [`juvenileMortality`] + d × [`droughtMortality`], an adult
+  with [`adultMortality`]. In a fire, a juvenile dies with chance equal to the fuel cover that
+  burned, and an adult with [`adultFireMortality`] × that cover.
+- **Maturity (Oct 27): by age**, adult from [`maturityAge`] years (was height, [`maturityHeight`]).
+- **Births:** recruits ~ Binomial(adults, [`recruitment`] × (1 − d) × (1 − trees / [`maxTrees`])),
+  created at 0 m in `.end`. The run starts from [`initialTrees`] seedlings per patch.
+- **Fuel**, a cover fraction: fuel ← fuel + [`fuelGrowth`] × (1 − d) × (1 − fuel); 0 after a fire.
+- **Fire:** a patch burns if scheduled or if stochastic fire strikes; both may be on.
+  - *Scheduled:* every [`fireInterval`] years from step [`firstFire`] (0 turns it off). These are the
+    same steps in every run and every patch.
+  - *Stochastic:* a chance of [`fireChance`] × last year's fuel (0% turns it off).
+- **Exports:** year, observedYear, precipitation, nTrees, nAdults, nJuveniles, meanHeight,
+  heightSd, fuel, burned, deaths, recruits.
+
+**Behaviour at the defaults** (200-year spin-up, 2 replicates per mode; about 10 s a replicate
+locally):
+
+| | Scheduled (every 20 years) | Stochastic (10% at full fuel) |
+|---|---|---|
+| Fires per patch-year | 0.054 | 0.06 |
+| Patches occupied at the end, of 63 | 36–38 | 24–31 |
+| Trees at the end (adults) | 1,180 (980–1,010) | 750–830 (600–640) |
+| Landscape CV of trees, years 100–199 | 0.09 | 0.03 |
+| λ over the observed years: all trees, adults | 1.005, 1.01 | 1.00, 1.00 |
+| The same with `observedPrecipChange = -20 %` | 0.99, 1.00 | 0.98, 0.985 |
+
+- **Trees persist on the wetter half:** occupied patches average 460–500 mm against 290–355 mm for
+  the empty ones. There is no seed rain, so extinction is permanent and occupancy drifts down slowly
+  (45 → 38 between years 50 and 200 in one scheduled run).
+- **Fire regularity matters:** at the same fire frequency, the scheduled regime leaves more patches
+  occupied, because each 20-year gap lets juveniles mature. Stochastic fires can return within a
+  few years. At 10-year intervals, scheduled fire leaves 17–18 patches.
+- **Density dependence returns every persisting population to λ ≈ 1 after the spin-up.** A stability
+  target is met trivially unless the observed climate differs from the spin-up's. Under 20% less
+  rain, recruitment falls by about a third, but the adults barely move within 11 years: they
+  matured from earlier recruits.
+
+**What it enables:**
+- Test (2) gets its statistic: the juvenile:adult ratio over the observed years (decided Oct 26).
+- Patterns at more scales: occupancy, density, juveniles against adults, within-site height SD
+  (informative now that ages differ), and recruitment pulses.
+- Direct and inverse parameters in one model.
+- Long runs for timing on the cluster.
+- Fire both ways.
+
+**Open for review:**
+1. **Direct vs inverse.** Candidates for inverse: `maxNewGrowth`, `minPrecipImpactPct`,
+   `recruitment`, `juvenileMortality`, `droughtMortality`, `adultFireMortality`, and `fireChance`
+   in the stochastic mode. Direct: `spinupYears`, `observedPrecipChange`, `initialTrees`,
+   `maxTrees`, `maturityHeight`, `fuelGrowth`, `adultMortality`, `fireInterval` and `firstFire`.
+2. **Statistics for test (1):** occupancy of the surveyed cells, density where occupied, the
+   juvenile:adult ratio, mean height and within-site height SD.
+3. **Test (2)'s statistic: decided Oct 26, the juvenile:adult ratio**, keeping the 11-year
+   window (the Joshua tree test statistic most likely). The 11 years are too short for adults to
+   show a drying, but the ratio responds. Landscape ratio over steps 200–210, 2 replicates:
+   - stochastic fire: 0.27–0.33 at 0%; at −20% it falls from 0.26 to 0.19–0.21 within 5–10 years;
+   - scheduled fire: the 20-year cycle dominates. The window sits between fires at steps 190 and
+     210, so the ratio falls from 0.27 to 0.19 as the post-fire cohort matures, with or without
+     drying; −20% lowers it by a further 0.02–0.05. Open: whether test (2) uses the stochastic
+     mode, or aligns the window with the fire cycle.
+4. **Seed rain:** a small yearly chance of one recruit from outside would make occupancy
+   stationary. That is one direct parameter more.
+5. **Stochastic fire reads fuel only**; climate enters through fuel growth. A dry-year multiplier
+   would add one parameter.
+6. **Fire mortality is by stage** (juvenile or adult), not continuous in height.
+7. **Josh CSV bug exposure:** fuel can fall below 1e-6 only just above 300 mm, but run with
+   `--csv-precision=-1` once joshpy passes it.
+8. **The page plan:** a page introducing the model (both modes, the spin-up, the patterns), then
+   test (1) on a survey, then test (2) under a drying scenario.
+
+### Josh CSV export bug (Oct 26)
+
+Found in the 1,000-step grass–shrub run: 7 of 4,004,000 values were exported as 220–846% cover.
+- **Cause:**
+  - Josh #388 (Apr 13; on main via #390) replaced #373's BigDecimal rounding with string
+    truncation.
+  - `MapSerializeStrategy.formatNumeric` cuts the `getAsString()` string `--csv-precision`
+    characters (default 10) after the `.`. That drops the exponent of a value printed in
+    scientific notation: `3.3144869433E-7` becomes `3.3144869433`.
+  - With BigDecimal this hits |x| < 1e-6. With `--use-float-64` it hits |x| < 1e-3 and |x| ≥ 1e7.
+  - Unchanged in the Oct 22 dev jar and in prod.
+- **Opt-out:**
+  - `--csv-precision=-1` works for `run`, but the CSVs are 4× larger.
+  - There is none on the sandbox path (`MemoryExportFacade`: the browser and `runRemote` workers).
+  - There is none on Kubernetes (`cloud-img/run-entrypoint.sh` passes no precision flag).
+- **Reporting:** the user takes it to Josh, with three bottles: the minimal repro in both number
+  modes, and the seeded fire run.
+- **joshpy:**
+  - `RunConfig` and `JobConfig` have no `csv_precision`; add a passthrough, including to a
+    bottle's `run.sh`.
+  - `run_hash` ignores `use_float64`, so a float64 run and a BigDecimal run of one config collide.
+- **Before trusting Kubernetes runs** whose values can fall below 1e-6: the Josh fix has landed, or
+  the entrypoint takes a precision.
 
 ### PR 3: status
 
@@ -215,10 +965,13 @@ in it unused):
 - **`render-inference.sh` renders every page in order**, so a module change re-renders (and
   re-freezes) the case study too.
 - **Renders run under an ASCII locale.** Read any displayed file with `encoding="utf-8"`.
-- **Figure helpers draw and return `None`.** No other matplotlib call may be an expression statement
-  in a chunk.
-- **Build on `joshpy.inference`.** ForeverTree-specific code (model config, `observe`,
-  `statistics`, figures) stays in `forevertree_case.py`; generic workflow goes into the toolkit.
+- **Figures are folded ggplot2 chunks on the page** (`code-fold: true`), fed by a folded pandas
+  chunk; multi-panel figures are Quarto subfigures (`layout-ncol`, `fig-subcap`), since
+  patchwork isn't installed. `_sbi-setup.qmd` loads ggplot2 with the theme, named colours and a
+  UTF-8 `LC_CTYPE` (otherwise ρ, ε and arrows print as `<U+...>` under the ASCII render locale).
+  Python lists arrive in R as lists (`unlist` them); give manual scales named values.
+- **Build on `joshpy.inference`, with no wrappers.** The module holds only what is specific to
+  ForeverTree, with the study's arguments in `STUDY`; generic workflow goes into the toolkit.
   Any edit to `forevertree.josh`, including its measurement error, re-simulates every run.
 - **Smoke-test against a copy of the warm registry** (in a scratch directory) with small SMC
   settings: the prior runs replay, so only the searches simulate.
@@ -269,22 +1022,86 @@ in it unused):
   known candidates: a batch whose summaries all error yields silent NaN; summary closures serialize
   as unimportable paths. Both were fixed in #92 (see Behavior notes).
 
-### PR 4: Rejection filter on a model property, Hartig Fig. 5d (render about 30–40 min)
+### PR 4: status (rejection filter on a model property, Hartig option (d))
 
-- **Filter criteria:**
-  - F1: at least 90% of 10 replicates have a final-window annual gain in [1.2g\*, 1.4g\*].
-  - F2: the SD of the gain within the window is below s_max.
-- **Rejection sampling from the prior:** `mcabc`, `quantile=1.0`, with a placeholder `observed`.
-- **Report:** the share passing each criterion and both; a pairs plot; the edges of the accepted
-  region ("what would it take").
-- Say plainly that the result is not a posterior: no data entered it.
-- Note that the 10-replicate runs share hashes with PR 2's prior runs, which get topped up.
+**Superseded Oct 27:** rebuilt on the fire model ("Rebuild of PR 4 and PR 5"). The record below is
+the first-model version.
 
-### PR 5: Posterior probability of a model property (render about 5 min; reuses PR 3's runs)
+`docs/inference/rejection-filter.qmd` is written, registered (render script, render list, navbar,
+sidebar, references, roadmap) and rendered; the code is #94, the page #95. The first render took
+43 minutes (200 parameter sets topped up to 10 replicates; 3,935 `job_runs`); a warm re-render takes
+about 80 s and runs nothing.
 
-- P(passes | S_obs) = Σ wᵢ·passᵢ / Σ wᵢ over PR 3's final particles, with a Monte Carlo SE from the
-  ESS.
-- **Recovery checks:** a band excluding g\* gives ≈ 0; a band including it gives a higher value.
+**What was built:**
+- The property: $H_t$, the mean height of all 63 cells; the annual gain $g_t = H_t - H_{t-1}$;
+  over the final window (steps 6–10), its mean $\bar g$ and SD $s_g$
+  (`case.final_window_gain`). g\* and s\* are their means over the case study's 50 replicates at
+  the truth: 0.6234 and 0.0166 m/yr.
+- `case.gain_filter`: F1 $1.2g^* \le \bar g \le 1.4g^*$, F2 $s_g \le s^*$; 10 replicates; a
+  criterion passes when 90% of replicates meet it.
+- `spec.filter_prior(registry, cli, gain_filter, n=200)`: the case study's 200 prior draws (all 200
+  reused by `run_hash`). Provenance shows replicate 0 recorded by `forevertree_prior` and 1–9 by
+  `forevertree_filter`.
+
+**Results:**
+- F1 19, F2 139, both 5 of 200: P(passes) under the prior 0.025 ± 0.011.
+- F1 alone is a trade-off band (the mean-height ridge); F2 keeps its drought-tolerant end. Accepted
+  `maxNewGrowth` 0.915–1.175, `minPrecipImpactPct` 56.2–87.4 (truth 1.0, 40).
+- ForeverTree is multiplicative in `maxNewGrowth`, so the gain's CV depends on
+  `minPrecipImpactPct` alone; both criteria need a CV ≤ s\*/(1.2g\*), which puts the region's edge
+  at about 47–48% (all 200 draws), below the smallest accepted draw.
+- Replicates: CV between replicates 0.09% (mean gain) and 5.4% (its SD). They disagree on F1 for 2
+  draws (on the band's edges) and on F2 for 12 (within 15% of s\*). Requiring any, 90% or all
+  replicates accepts the same 5.
+- The page says plainly that this is not a posterior, and points to PR 5 for P(passes | S_obs).
+
+### PR 5: status (posterior probability of a model property, test (1)'s post-hoc check)
+
+**Superseded Oct 27:** rebuilt on the fire model. The record below is the first-model version;
+its lessons (the rule of three, controls, the top-up, two readings of the probability) carry over.
+
+`docs/inference/posterior-property.qmd` is written, registered (render script, render list, navbar,
+sidebar, references, roadmap) and rendered; the rejection-filter page now links to it. The first
+render ran 270 replicate simulations (30 particles topped up to 10 replicates, 7 minutes); a warm
+re-render takes about 2.5 minutes and runs nothing.
+
+**What was built (page only, no toolkit change):**
+- Replay PR 3's mean + CV search (0 new simulations), and `filter_prior` replays PR 4's 200 draws.
+- Top-up: `spec.run_at(registry, cli, params, "forevertree_posterior_property", replicates=10)`
+  per particle, with `params` from `result.to_dataframe()`. All 30 hashes are the particles'
+  (asserted); provenance shows replicate 0 recorded by `forevertree_smcabc` and 1–9 by
+  `forevertree_posterior_property`.
+- P = Σ wᵢ·passᵢ / Σ wᵢ, Monte Carlo SE sqrt(p(1 − p) / ESS), and the rule of three (3/ESS) as a
+  95% bound when no particle passes, or 1 − 3/ESS when all do [Hanley & Lippman-Hand 1983].
+
+**Results (ESS 27.6 of 30; criteria renamed Oct 26: F1 → `faster`, F2 → `steady`, R1 → `same_rate`,
+R2 → `same_swings`):**
+
+| Filter | Prior P (200 draws) | Posterior P |
+|--------|---------------------|-------------|
+| `faster`: 1.2–1.4 g\* | 0.095 | 0 (bound 0.11) |
+| `steady`: s_g ≤ s\* | 0.695 | 0.495 ± 0.095 |
+| both | 0.025 | 0 (bound 0.11) |
+| `same_rate`: 0.9–1.1 g\* | 0.115 | 1 (bound 0.89) |
+| `same_swings`: 0.8–1.2 s\* | 0.115 | 0.929 ± 0.049 |
+| both ("grows as at the truth"; 0.986 pooled) | 0.010 | 0.929 ± 0.049 |
+
+- None of the particles' 300 replicates reaches F1's band; the fastest particle (0.669 m/yr) is 11%
+  below its lower edge (0.748).
+- **The recovery check changed from the plan's "0.9–1.1 g\*, same F2".** s\* is the mean of the
+  truth's replicate SDs, so only 52% of the truth's 50 replicates meet F2, and the truth itself
+  would fail the 90% rule (the plan's version gave 0.495). The check's SD criterion is a band
+  around s\* instead; all 50 truth replicates meet R1 and R2.
+- The one particle failing R is the heaviest (weight 0.071, `minPrecipImpactPct` 36.7%, the
+  posterior's drought-sensitive edge): 2 of 10 replicates vary more than 20% above s\*.
+- F2's posterior P is a coin flip because its limit runs through the middle of the posterior.
+- Figures: particles over the prior draws (window gain against its SD, sized by weight, with F1's
+  band and F2's limit), and the prior and posterior predictive gain against both bands.
+
+**Log: a top-up helper (`study.top_up`).** Not yet. The loop is three lines, but each `run_at` is
+its own session (30 sessions for one top-up) and runs one job at a time. A batched `run_at` (one
+session, one dispatch, `batch_remote`-ready) is the toolkit change worth making when the Joshua
+tree posterior needs it; it would also serve the posterior predictive check on the SMC-ABC page.
 
 ## Parked
 
@@ -306,12 +1123,58 @@ in it unused):
   - The z-scored summaries closure (`LoadedStudy.abc_target`) has no importable path.
     `SbiStrategy.to_dict` records only its name (#92), so a strategy can't be rebuilt
     from saved config. Fixing that needs summaries given as a path plus arguments.
+
+  Logged in PR 4 (`forevertree_case.py` and the page):
+  - The landscape mean per replicate and step (`landscape_gains` on the page) and a step window
+    (`final_window_gain`) are hand-written SQL on `cell_data_current`.
+    `DiagnosticQueries.get_replicate_cv` builds the same per-replicate series internally but
+    doesn't return it.
+  - Lagged gains are `np.diff` over the window; the window is a constant (`WINDOW`), like
+    `FINAL_STEP`.
 - **Known-truth toolkit: follow-ups.** `joshpy.inference` (#93) is experimental. Not yet:
   - a distance other than sbi's `"l2"` (extending `SbiStrategy.distance` to accept a callable is
     a small, separate change);
   - summaries as an importable path plus arguments (see above);
-  - generic figures (the docs' figures stay in the example module);
-  - exporting it from `joshpy/__init__.py`, once PR 4 and PR 5 have used it.
+  - blessed plots (see below);
+  - exporting it from `joshpy/__init__.py`, once PR 4 and PR 5 have used it;
+  - `PropertyFilter` (#94) runs only on prior draws (`filter_prior`) or on runs that already hold
+    its replicates (`evaluate`). Topping up other runs, such as PR 5's particles, goes through
+    `run_at`.
+- **Blessed plots** (Oct 25 review, item 2). The candidate is S_sim against S_obs by generation: each
+  population's z-scored statistics closing in on S_obs, with the replicate cloud at the truth as
+  the floor, as a convergence signal for any study. If blessed, add it as a data method returning
+  a tidy table (like `DiagnosticQueries`), and leave the ggplot to the page, so joshpy carries no
+  plotting code. Wait for PR 5 to see whether a second page needs it.
+- **Patterns at more scales** (Oct 25 review, item 3). Mean and CV are two patterns at one scale:
+  across 8 sites, in the final year. Measured over the 200 prior simulations (Spearman ρ with
+  `maxNewGrowth`, `minPrecipImpactPct`):
+  - between-site CV: −0.14, −0.99 (drought sensitivity);
+  - year-to-year CV of the landscape's true growth (years 6–10): −0.11, −0.99, and 0.99 with the
+    between-site CV. The same drought response seen in time instead of space: a consistency check
+    across scales, not new information here;
+  - the same from annual surveys of the 8 sites (0.25 m error each year): −0.71, −0.34, mostly
+    measurement noise. Whether a temporal pattern is observable depends on the survey design;
+  - growth between two surveys (years 5 and 10): 0.95, 0.36, like the final mean height.
+  - Within-site CV (between trees in a cell) isn't exported; adding it edits the model and
+    re-simulates everything. By the model's equations it would be about 1.5% for every parameter
+    set (the per-tree noise, SD 5%, is the only difference between trees in a cell), so it would
+    test the model's structure (a held-out pattern) rather than constrain these two parameters,
+    unless the noise SD became a parameter.
+
+  ForeverTree is too simple for patterns at more scales to add information; the Joshua tree model
+  (stage structure, revisited plots) is where they should. Options: a short "patterns at other
+  scales" note in the case study's step 1, with these numbers computed on the page (no new runs);
+  or a temporal pattern as a second held-out check on the SMC-ABC page.
+- **Failures in filters and searches.** `filter_prior` and `load` raise if any run fails; searches
+  reject failed runs. For the Joshua tree runs: retry infrastructure failures (evicted pods,
+  staging errors), record model failures (out of memory when a population explodes) as missing,
+  and report where in the parameter box they fall.
+- **Refining a filter in waves** (needed only for test (2), if its accepted region is small).
+  Rejection from the prior is wasteful when the accepted region is small (PR 4: 5 of 200 draws,
+  2,000 replicate runs). SBI.md's design refines in waves. One
+  route through sbi: summaries that give each criterion's distance outside its bounds (0 inside),
+  `observed` all zeros, and SMC-ABC's tolerance shrinking to 0, which is the filter; it needs a
+  stopping rule at ε = 0 and the replicate share folded into the distance.
 - **A batch prior-sampling strategy** (random or Latin hypercube via `scipy.stats.qmc`). Revisit if
   the `mcabc` workaround gets in the way: placeholder `observed` for filters, or more parameters
   where a Latin hypercube matters.
@@ -320,13 +1183,22 @@ in it unused):
 - **Neural methods** (`method="npe"`, `"nle"`, …) and sbi's SBC/coverage diagnostics.
   - Later ABC generations are not prior draws.
   - NLE/NRE accept any proposal; NPE needs its sequential, proposal-corrected variants.
-- **Kubernetes run of the demo** (the old Phase 4). Measure per-Job overhead before choosing a scaling
-  step.
+- **A pilot on the cluster** (the old Phase 4). Measure the run time of a 1,000-year replicate and
+  the per-Job overhead, watch which failures occur, and count rounds per generation. These check
+  the batch policy's defaults and decide early stopping and failure handling ("Joshua tree
+  design").
+- **Cleanup once SBI is stable, wholesale:**
+  - Remove Optuna: `OptunaStrategy` and its helpers in `strategies.py`, the `study` field on
+    adaptive results in `jobs.py`, the adaptive-loop fixtures in `test_strategies.py`, the
+    references in `test_sweep.py`, the adaptive-sweep tutorial, and the optional dependency.
+  - Spin-up: `examples/spinup_spindown.josh` and the spin-up tutorial still use `start spinup`
+    blocks, which Josh #479 removed (Jul 20). Rewrite them to the plain-state recipe.
 - **Joshua tree prerequisites:**
-  - Fire scenarios are per-set data files, but the prior only feeds template variables; this needs a
-    file-parameter design.
+  - Fire: per patch, both modes from the jshc ("Second ForeverTree model"); no file primitive.
+  - Josh CSV exports: a fix, or a precision setting on Kubernetes ("Josh CSV export bug").
   - Fix outcome-group attribute names (`check_stability`, `check_data`, `group`) in the rules sheet.
-  - The stability check needs R > 1 replicates.
+    With the two-test design there are no four outcome groups; revisit the names.
+  - The replacement check needs R > 1 replicates (`PropertyFilter`, #94).
 - **Float rendering.** Every continuous draw gets a unique `run_hash` and full-precision
   `custom_tags`. Watch this at 1,000+ runs per generation.
 - **sbi API churn.** The extra is open-ended (`sbi>=0.27`). Replay needs the exact sbi and torch
@@ -335,16 +1207,74 @@ in it unused):
 
 ## Execution on Kubernetes
 
+**Set up and smoke-tested (Oct 27).**
+- **Setup:**
+  - `.devcontainer/targets/gke-test.json` is the shared GKE profile, linked into `~/.josh/targets`
+    by `.devcontainer/scripts/on_create/link_targets.sh` (as in josh-models). Branch
+    `chore/devcontainer-targets` off main, cherry-picked onto the model branch.
+  - The kubectl context comes from gcloud; MinIO keys come from `.env` (git-ignored), loaded with
+    `load_dotenv()`.
+- **Smoke test:** the first ForeverTree model with a `minio://` export, one parameter set, 2
+  replicates. It was staged, dispatched to `gke-test` as one indexed Job, polled and ingested: 693
+  rows per replicate, as locally. It took 126 s end to end; the Job itself took 115 s for 2/2, mostly
+  pod start-up, since a run takes about 2 s.
+- **Found:**
+  - **joshpy bug: staging ignores the profile's bucket.** `run_sweep` calls `stageToMinio` with no
+    `--minio-bucket`, so Josh falls back to `MINIO_BUCKET`, which `.env` doesn't set ("bucket name
+    must not be null"). `resolve_minio_creds(target)` already applies the profile-first order; pass
+    its bucket and endpoint (not the keys) to `StageToMinioConfig`. The smoke test set
+    `MINIO_BUCKET` from the profile instead.
+  - **Josh: the per-job credentials Secret is left behind.** The service account can create and
+    delete Secrets in `joshsim` but not get or list them. Josh's cleanup reads the Secret first, is
+    refused, and says so in stderr: "The Secret holds object-store credentials and will not be
+    garbage collected — delete it manually." Every dispatch leaves one `josh-creds-<job id>` holding
+    the MinIO keys (about 40 from the Oct 27 tests). Fix in RBAC (grant `get` on Secrets) or in
+    Josh (delete without the read).
+  - **Exports must be `minio://` on the cluster.** A custom tag can't switch the scheme: Josh's
+    `inspect-exports`, which joshpy uses to find outputs, rejects
+    `"{exportRoot}/…"` ("Unsupported target scheme: null"), and it takes no tags. A tag after the
+    scheme works (`minio://josh-batch-storage/{exportPrefix}/…`; checked locally with `file://`), and
+    isn't in `run_hash`. So the fire model exports to `minio://` everywhere, and local runs write
+    there too (they need the MinIO keys, which `.env` has).
+- **Implication for SMC-ABC:** at about 2 minutes of overhead per round, sbi's own loop (about 70
+  rounds for PR 3's search) would take over 2 hours of round trips. The `measured` batch policy
+  (about 10 rounds) is what makes the cluster worth it. Warm nodes with the image cached may start
+  faster; the pilot should measure.
+
+**The toolkit for the rebuild is #97 (Oct 27):**
+- **Contents:**
+  - `KnownTruthStudy(target=...)`, so every session dispatches its batches together;
+  - `run_at_each`, the batched `run_at`, topping up with `pool`;
+  - `ParameterSetsStrategy`;
+  - `JobConfig.custom_tags`;
+  - the batch policy;
+  - the staging fix.
+- **Found while testing it: every real no-wait dispatch was recorded as completed.**
+  - `batchRemote --no-wait` prints progress lines before its JSON. `run_sweep` parsed all of stdout
+    as JSON, failed, and fell through as a success, hidden under `quiet`. The fake CLI in the unit
+    tests printed pure JSON.
+  - Now: the last JSON line, read only after a real dispatch; without a job id, a failure.
+- **On `gke-test`** (the first model, `minio://` export):
+  - `load` took 158 s (truth, then 12 prior draws as one batch);
+  - the search took 199 s ("measured"; generation 1 in 2 rounds);
+  - the top-up of 6 particles to 3 replicates took 74 s, each Job 2 completions (`pool`);
+  - a local replay of `load` and the top-up ran nothing.
+  - About 75 s a round, mostly pod start-up.
+
+
 - **Current mapping:** one parameter set → one `batchRemote` → one indexed Job, with completions
   equal to `replicates`.
   - Each set is staged under its own MinIO prefix, with its own copy of the `.jshd` inputs.
   - With `batch_no_wait=True`, a batch of B sets is B Jobs dispatched together and then polled.
   - Rerunning reattaches to Jobs still running.
+- **Rounds per generation** come from the SMC-ABC batch policy (`measured` by default on
+  `batch_remote`).
 - **Replicates are a scientific setting, not the scaling lever.**
   - ABC uses `replicates=1` per set.
   - Model-property filters use R > 1 and summarize over the replicates.
 - **Scaling path:**
   1. **Now:** one Job per set.
-  2. **When staging dominates** (large climate `.jshd`): stage shared data once per session.
+  2. **When staging dominates** (large climate `.jshd`): stage shared data once per session. Not
+     expected for Joshua tree, whose runs are slow.
   3. **When Job overhead dominates** (thousands of sets per wave): a Josh-side multi-config indexed
      Job.

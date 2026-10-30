@@ -4,6 +4,52 @@ Oct 13, 2026 · @nick
 
 We map which parameter sets let Joshua trees replace themselves, then check which of those also reproduce today's surveyed stands. Every run is scored on both checks and stored, so the result is four groups of parameter sets, not one best fit. The method is plain filter-and-refine sampling in joshpy, proved first on the grass–shrub model.
 
+> **Update, Oct 25, 2026:** the fit and the replacement question are now two separate tests, not one
+> search with two checks. (1) Fit the I&M patterns with SMC-ABC, and check replacement post hoc on
+> the fitted parameter sets. (2) Only if no fitted set replaces, ask what replacement would take.
+> See "Joshua tree design" in [SBI_IMPLEMENTATION.md](SBI_IMPLEMENTATION.md). The "One run, two
+> checks" and "The search: filter in waves" sections below describe the earlier design.
+>
+> **Update, Oct 26, 2026:** (2) is its own SMC-ABC fit to an idealized stability target, run from
+> the prior whether or not (1) fits. The grass–shrub pilot is dropped: the 1,000-step run
+> (workplan step 2) is stable at every damage setting, so a second ForeverTree model with births,
+> deaths, fuel and fire takes its place.
+>
+> **Update, Oct 27, 2026:** (1)'s post-hoc check is a projection. Fit the present (the surveys'
+> juvenile:adult ratios among the patterns), then project under future climates, and ask how
+> probable it is that the projected ratio stays above a target fixed beforehand. The ForeverTree
+> demonstration does this on the second model, with three synthetic futures (`normal`, `hot_dry`,
+> `cool_wet`); see "Rebuild of PR 4 and PR 5" in SBI_IMPLEMENTATION.md.
+>
+> **Update, Oct 28, 2026:** the demonstration is built and rendered on the cluster. The method
+> recovers the controls (probability of meeting the target 1 under `normal` and `cool_wet`, 0
+> under `hot_dry`). Two findings bear on the Joshua tree test: the surveys' stage ratio barely
+> identifies recruitment or juvenile drought mortality when recruitment is density dependent
+> (densities and their spread between sites do), and a pooled ratio target can be met by a stand
+> that has already lost its dry edge, so pair it with the adults' trend.
+>
+> **Update, Oct 29, 2026:** the Oct 28 demonstration fails as a known-truth check. Its fit leaned
+> away from the truth, and its hypothesis came out the same whatever the survey said. The inference
+> is calibrated: the model's two parameters were not identifiable from a one-year count survey.
+> Findings that bear on the Joshua tree test:
+> - **Counted revisits barely reduce uncertainty;** they recount the same long-lived plants.
+> - **Marked-plot revisits do,** for vital rates every plant expresses every year (recruitment per
+>   adult, juvenile survival). The uncertainty shrinks with years of revisits, and the number of
+>   marked plants followed sets its floor.
+> - **Responses expressed only in rare conditions** (juvenile drought mortality) stay unidentified
+>   without long records spanning those conditions.
+> - **A fixed juvenile:adult ratio target measures turnover, not replacement:** it rewards poor
+>   juvenile survival.
+>
+> The demo now fits `recruitment` and `juvenileMortality` to marked plots revisited over 20 years.
+> See "Fire model review: identifiability and survey design (Oct 29)" in SBI_IMPLEMENTATION.md.
+>
+> **Oct 30:** the rebuilt demo works as a known-truth check. The posterior contains the truth for
+> both rates (`recruitment` 53%, 90% interval 41–67%, truth 50%; `juvenileMortality` 6.2%,
+> 2.4–11.2%, truth 5%), and the survey moves the probability that the stand keeps two-thirds of
+> its adults under `hot_dry` from 0.41 (prior) to 0.95 (posterior). The posterior is calibrated
+> but wide: 10 marked plots record a few hundred births and deaths.
+
 ## At a glance
 
 &#91;embedded content: One wave · two checks, four outcome groups\]

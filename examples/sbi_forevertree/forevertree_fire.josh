@@ -1,0 +1,263 @@
+# ForeverTree with births, deaths, fuel and fire: the second ForeverTree model.
+#
+# Trees grow as in forevertree.josh. They also die (a yearly chance, higher for
+# juveniles in dry years, and in fires), and adults recruit new trees in wet
+# years, up to a patch's capacity. A tree is an adult from maturityAge years of
+# age, whatever its height, so the juvenile:adult ratio tracks recruitment and
+# survival rather than how fast trees grow. Fuel is a cover % that grows in wet years
+# and burns. Each patch is simulated on its own: fire does not spread.
+#
+# The run has three parts, on the synthetic climate in climate/ (see
+# preprocess_climate.py):
+#   - a spin-up on resampled historical climate: each year draws one of the
+#     historicalYears years, the same year for every patch;
+#   - the present: the last presentYears historical years, in order. A survey
+#     records the final one (yearsFromSurvey = 0);
+#   - a projection: projectionYears years of one future (normal, hot_dry or
+#     cool_wet), chosen by which files are mapped to futureTemperature and
+#     futurePrecipitation. Fit runs set projectionYears = 0 and need no future.
+# All parameters come from forevertreeFire.jshc, which also selects the fire
+# mode: scheduled (fireInterval > 0), stochastic (fireChance > 0), both, or
+# none. fire_modes/ holds a config for each mode.
+#
+# A survey misses juveniles: each patch exports detectedJuveniles, the
+# juveniles a survey would count, each found with chance juvenileDetection.
+# Adults are always found. Marked plots follow plants between revisits: each
+# patch exports its age structure (below2 ... below13), from which the fates of
+# the plants marked at one visit can be read at the next.
+#
+# Outputs go to MinIO, so runs work the same locally (with MinIO keys in the
+# environment) and on a batch target; exportPrefix is a custom tag.
+#
+# From the repository root, with the hot_dry future:
+#   java -jar jar/joshsim-fat-dev.jar run examples/sbi_forevertree/forevertree_fire.josh Main \
+#     --data historicalTemperature.jshd=examples/sbi_forevertree/climate/historical_temperature.jshd \
+#     --data historicalPrecipitation.jshd=examples/sbi_forevertree/climate/historical_precipitation.jshd \
+#     --data futureTemperature.jshd=examples/sbi_forevertree/climate/hot_dry_temperature.jshd \
+#     --data futurePrecipitation.jshd=examples/sbi_forevertree/climate/hot_dry_precipitation.jshd \
+#     --data forevertreeFire.jshc=examples/sbi_forevertree/fire_modes/stochastic/forevertreeFire.jshc \
+#     --custom-tag run_hash=hot_dry --custom-tag exportPrefix=forevertree-fire
+
+start simulation Main
+
+  grid.size = 16000 m
+  grid.top_left =
+    36.73 degrees latitude,
+    -119.52 degrees longitude
+  grid.bottom_right =
+    35.80 degrees latitude,
+    -117.98 degrees longitude
+  grid.patch = "Default"
+
+  # Spin-up, present, projection.
+  steps.low = 0 count
+  steps.high =
+    config forevertreeFire.spinupYears
+    + config forevertreeFire.presentYears
+    + config forevertreeFire.projectionYears
+    - 1 count
+
+  spinupYears.init = config forevertreeFire.spinupYears
+  presentYears.init = config forevertreeFire.presentYears
+  historicalYears.init = config forevertreeFire.historicalYears
+  lastHistoricalYear.init = historicalYears - 1 count
+  state.init = "spinup"
+  state.step
+    :if(meta.stepCount == spinupYears) = "present"
+    :elif(meta.stepCount == spinupYears + presentYears) = "projection"
+  yearsFromSurvey.step = meta.stepCount - spinupYears - presentYears + 1 count
+
+  # The year of the climate file each step reads: a random historical year,
+  # the last presentYears historical years in order, then the future's years.
+  year.step
+    :if(current.state == "spinup") = sample discrete uniform from 0 count to lastHistoricalYear
+    :elif(current.state == "present") = lastHistoricalYear + yearsFromSurvey
+    :else = yearsFromSurvey - 1 count
+
+  # Growth
+  maxNewGrowth.init = config forevertreeFire.maxNewGrowth
+  minPrecipImpactPct.init = config forevertreeFire.minPrecipImpactPct
+
+  # Demography
+  initialTrees.init = config forevertreeFire.initialTrees
+  maxTrees.init = config forevertreeFire.maxTrees
+  maturityAge.init = config forevertreeFire.maturityAge
+  recruitment.init = config forevertreeFire.recruitment
+  adultMortality.init = config forevertreeFire.adultMortality
+  juvenileMortality.init = config forevertreeFire.juvenileMortality
+  droughtMortality.init = config forevertreeFire.droughtMortality
+
+  # Fuel and fire
+  fuelGrowth.init = config forevertreeFire.fuelGrowth
+  fireInterval.init = config forevertreeFire.fireInterval
+  firstFire.init = config forevertreeFire.firstFire
+  fireChance.init = config forevertreeFire.fireChance
+  adultFireMortality.init = config forevertreeFire.adultFireMortality
+
+  # Survey
+  juvenileDetection.init = config forevertreeFire.juvenileDetection
+
+  exportFiles.patch = "minio://josh-batch-storage/{exportPrefix}/forevertree_fire_{run_hash}_{replicate}.csv"
+
+end simulation
+
+start patch Default
+
+  ForeverTree.init = create meta.initialTrees of ForeverTree
+
+  # Climate of this patch in this step's climate year: historical, or the future.
+  temperature.step
+    :if(meta.state == "projection") = external futureTemperature at meta.year
+    :else = external historicalTemperature at meta.year
+  precipitation.step
+    :if(meta.state == "projection") = (external futurePrecipitation at meta.year) as mm
+    :else = (external historicalPrecipitation at meta.year) as mm
+  dryness.step = limit (
+    map precipitation from [300 mm, 500 mm] to [100%, 0%] linear
+  ) to [0%, 100%]
+
+  # Deaths: remove last year's dead trees first.
+  ForeverTree.start = prior.ForeverTree[prior.ForeverTree.dead == false]
+  nTrees.start = count(ForeverTree)
+  nAdults.start = count(ForeverTree[ForeverTree.age >= meta.maturityAge])
+  nJuveniles.start = nTrees - nAdults
+
+  # The age structure, for following marked plants between revisits: live trees
+  # younger than each age. A tree is age 1 the first year it is counted, so at a
+  # revisit k years on, the trees aged k + 1 or more were there at the last visit,
+  # and those aged k + 8 or more were adults then. Any revisit schedule (k = 1 to
+  # 5 years) can be read off these counts afterwards.
+  below2.start = count(ForeverTree[ForeverTree.age < 2 years])
+  below3.start = count(ForeverTree[ForeverTree.age < 3 years])
+  below4.start = count(ForeverTree[ForeverTree.age < 4 years])
+  below5.start = count(ForeverTree[ForeverTree.age < 5 years])
+  below6.start = count(ForeverTree[ForeverTree.age < 6 years])
+  below9.start = count(ForeverTree[ForeverTree.age < 9 years])
+  below10.start = count(ForeverTree[ForeverTree.age < 10 years])
+  below11.start = count(ForeverTree[ForeverTree.age < 11 years])
+  below12.start = count(ForeverTree[ForeverTree.age < 12 years])
+  below13.start = count(ForeverTree[ForeverTree.age < 13 years])
+
+  # Fire: scheduled every fireInterval years from step firstFire, or with a
+  # yearly chance proportional to last year's fuel (fireChance at full cover).
+  scheduledFire.step = {
+    const sinceFirst = meta.stepCount - meta.firstFire
+    const interval = limit meta.fireInterval to [1 count,]  # no division by zero when off
+    const onSchedule = floor(sinceFirst / interval) * interval == sinceFirst
+    return meta.fireInterval > 0 count and sinceFirst >= 0 count and onSchedule
+  }
+  stochasticFire.step =
+    (sample uniform from 0% to 100%) < meta.fireChance * prior.fuel / 100%
+  burned.step = scheduledFire or stochasticFire
+  fireIntensity.step = prior.fuel if burned else 0%  # what a tree's fire mortality scales with
+
+  # Fuel cover grows toward 100% in wet years; fire consumes it.
+  fuel.init = 50%
+  fuel.step = 0% if burned else limit (
+    prior.fuel + meta.fuelGrowth * (100% - dryness) * (100% - prior.fuel) / 100%
+  ) to [0%, 100%]
+
+  # Births: each adult recruits one tree with a chance that rises in wet years
+  # and falls as the patch fills. Recruits join at the end of the step.
+  openShare.end = limit (1 count - nTrees / meta.maxTrees) to [0 count, 1 count]
+  recruits.end =
+    sample binomial
+    with n of nAdults
+    p of meta.recruitment * (100% - dryness) * openShare / 100%
+  ForeverTree.end = prior.ForeverTree | create recruits of ForeverTree
+
+  export.year.step = meta.year
+  export.yearsFromSurvey.step = meta.yearsFromSurvey
+  export.precipitation.step = precipitation
+  export.nAdults.step = nAdults
+  export.nJuveniles.step = nJuveniles
+  export.below2.step = below2
+  export.below3.step = below3
+  export.below4.step = below4
+  export.below5.step = below5
+  export.below6.step = below6
+  export.below9.step = below9
+  export.below10.step = below10
+  export.below11.step = below11
+  export.below12.step = below12
+  export.below13.step = below13
+  export.detectedJuveniles.step =
+    sample binomial
+    with n of nJuveniles
+    p of meta.juvenileDetection
+  export.meanHeight.step = mean(ForeverTree.height) if count(ForeverTree) > 0 count else 0 m
+  export.fuel.step = fuel
+  export.burned.step = burned
+
+end patch
+
+start organism ForeverTree
+
+  dead.init = false
+  age.init = 0 year
+  age.step = prior.age + 1 year
+
+  height.init = 0 m  # the run starts from seedlings
+
+  # Growth, as in forevertree.josh.
+  clampedTemp.step =
+    limit here.temperature
+    to [270 K, 330 K]
+
+  temperatureImpact.step =
+    map clampedTemp
+    from [270 K, 330 K]
+    to [0%, 100%] quadratic(true)
+
+  precipImpact.step =
+    map here.precipitation
+    from [300 mm, 500 mm]
+    to [meta.minPrecipImpactPct, 100%] sigmoid
+
+  stochastic.step =
+    sample normal
+    with mean of 100% std of 5%
+
+  newGrowth.step =
+    meta.maxNewGrowth
+    * temperatureImpact
+    * precipImpact
+    * stochastic
+
+  height.step = prior.height + newGrowth
+
+  # Death. Juveniles (younger than maturityAge) die more often, and more in dry
+  # years. In a fire, juveniles die with a chance equal to the fire's
+  # intensity (the fuel that burned), adults with adultFireMortality of it.
+  isJuvenile.step = age < meta.maturityAge
+  deathChance.step =
+    meta.juvenileMortality + here.dryness * meta.droughtMortality / 100%
+    if isJuvenile else meta.adultMortality
+  fireDeathChance.step =
+    here.fireIntensity * (100% if isJuvenile else meta.adultFireMortality) / 100%
+  dead.end =
+    (sample uniform from 0% to 100%) < deathChance
+    or (sample uniform from 0% to 100%) < fireDeathChance
+
+end organism
+
+start unit mm
+
+  alias millimeter
+  alias millimeters
+  m = current / 1000
+
+end unit
+
+start unit K
+
+  alias Kelvin
+  alias Kelvins
+
+end unit
+
+start unit year
+
+  alias years
+
+end unit
