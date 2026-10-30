@@ -246,7 +246,7 @@ def statistics(survey: pd.DataFrame) -> dict[str, float]:
     so that an empty survey still has a finite log, and the rates get a
     pseudo-observation.
     """
-    intervals = survey.dropna(subset=["new"])
+    intervals = survey.dropna(subset=["new"]) if "new" in survey else survey.iloc[:0]
     wet, dry = survey[survey["x"] < 2], survey[survey["x"] > 3]
     out = {
         "log_ratio": float(
