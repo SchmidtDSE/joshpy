@@ -22,6 +22,7 @@ PAGES=(
   docs/inference/smc-abc.qmd
   docs/inference/fire-model.qmd
   docs/inference/rejection-filter.qmd
+  docs/inference/posterior-property.qmd
 )
 
 for page in "${PAGES[@]}"; do

@@ -34,6 +34,7 @@ project:
     - inference/smc-abc.qmd              # SMC-ABC; reuses forevertree.duckdb (needs sbi; frozen)
     - inference/fire-model.qmd           # Births and deaths; creates forevertree_fire.duckdb (needs sbi; frozen)
     - inference/rejection-filter.qmd     # What would it take; reuses forevertree_fire.duckdb (needs sbi; frozen)
+    - inference/posterior-property.qmd   # Posterior probability of the target; reuses forevertree_fire.duckdb (needs sbi; frozen)
     - templating.qmd
     - architecture.qmd
     - best-practices.qmd
@@ -112,6 +113,8 @@ website:
             href: inference/fire-model.qmd
           - text: "What Would It Take?"
             href: inference/rejection-filter.qmd
+          - text: "Posterior Probability of the Target"
+            href: inference/posterior-property.qmd
       - text: "Templating"
         href: templating.qmd
       - text: "Architecture"
@@ -177,6 +180,7 @@ website:
         - inference/smc-abc.qmd
         - inference/fire-model.qmd
         - inference/rejection-filter.qmd
+        - inference/posterior-property.qmd
 
     - title: "Templating"
       contents:

@@ -89,6 +89,13 @@ adds the entry to the page's own reference list.
 - @hanley1983: the rule of three, a 95% upper bound of about $3/n$ on a
   probability when none of $n$ draws passes.
 
+## Inference: Posterior probability of the target
+
+[Page](inference/posterior-property.qmd)
+
+- @hanley1983: the rule of three, applied to the posterior's effective sample
+  size.
+
 ## Adaptive Parameter Optimization
 
 [Tutorial](tutorials/adaptive-sweep.qmd)
