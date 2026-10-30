@@ -91,7 +91,8 @@ the present, from marked plots revisited over 20 years, and test the future.
    tests of their sufficiency, and an SMC-ABC fit.
 4. **[What would it take?](rejection-filter.qmd)**: option (d), a rejection
    filter on the projected stand, with no data.
-5. **Posterior probability of the target**: combining the two.
+5. **[Posterior probability of the target](posterior-property.qmd)**:
+   combining the two.
 
 ## References
 
