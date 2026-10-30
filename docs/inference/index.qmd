@@ -89,8 +89,8 @@ the present, from marked plots revisited over 20 years, and test the future.
 3. **[A model with births and deaths](fire-model.qmd)**: the model, three
    climate futures, marked plots, statistics from the model's equations and
    tests of their sufficiency, and an SMC-ABC fit.
-4. **What would it take?**: option (d), a rejection filter on the projected
-   stand, with no data.
+4. **[What would it take?](rejection-filter.qmd)**: option (d), a rejection
+   filter on the projected stand, with no data.
 5. **Posterior probability of the target**: combining the two.
 
 ## References
