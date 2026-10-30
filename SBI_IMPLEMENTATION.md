@@ -1,6 +1,6 @@
 # SBI Implementation for joshpy
 
-Oct 29, 2026 · @nick · joshpy 0.0.9.35 · sbi 0.27.0 with CPU-only torch 2.14.1
+Oct 30, 2026 · @nick · joshpy 0.0.9.35 · sbi 0.27.0 with CPU-only torch 2.14.1
 
 How joshpy runs the filter-and-refine search in [SBI.md](SBI.md). The machinery is proved on
 the ForeverTree demo (`examples/sbi_forevertree/`). It then scales to a second ForeverTree model
@@ -175,7 +175,7 @@ These findings apply to every page and experiment.
 - Commits end with the `Co-Authored-By` trailer; PR descriptions end with the Claude Code line.
 - Docs PRs stay drafts until the user has reviewed the render.
 
-### Where things stand (Oct 28)
+### Where things stand (Oct 30)
 
 Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94 → #97 → #98 → #99 → #95 → #96
 ("SBI stack n/14").
@@ -190,29 +190,30 @@ Merge order: #86 → #87 → #88 → #89 → #93 → #90 → #91 → #92 → #94
 | #92 | `fix/sbi-summaries` | Open. Callables saved only as loadable paths; summaries errors stop the search (Behavior notes) |
 | #94 | `feat/inference-property-filter` | Open. `PropertyFilter` and `KnownTruthStudy.filter_prior`; a replicate top-up no longer waits for files the earlier run never wrote; `to_dataframe()` gives the rendered parameter values |
 | #97 | `feat/inference-batch-remote` | Open. Known-truth studies on a batch target, `run_at_each`, `ParameterSetsStrategy`, `JobConfig.custom_tags`, the SMC-ABC batch policy, and batch fixes (staging bucket; no-wait job id; output steps loaded at ingest; a warning that seeds don't reach the target). Tested on `gke-test` |
-| #98 | `feat/forevertree-fire-model` | Open. The fire model, its synthetic climate, its case module and this plan |
-| #99 (page 1) | `docs/inference-fire-case` | **Draft, to be rebuilt** on the marked-plot design (Oct 29, below). Rendered Oct 28: "A Model with Births and Deaths" |
-| #95 (page 2) | `docs/inference-rejection-filter` | **Draft, to be rebuilt** (Oct 29). Rendered Oct 28: "What Would It Take?" |
-| #96 (page 3) | `docs/inference-posterior-property` | **Draft, to be rebuilt** (Oct 29). Rendered Oct 28: "Posterior Probability of Replacement" |
+| #98 | `feat/forevertree-fire-model` | Open. The fire model (marked-plot exports), its synthetic climate, its case module and this plan |
+| #99 (page 1) | `docs/inference-fire-case` | **Draft, rebuilt** on the marked-plot design and rendered on `gke-test` (Oct 29): "A Model with Births and Deaths" |
+| #95 (page 2) | `docs/inference-rejection-filter` | **Draft, rebuilt** and rendered (Oct 29): "What Would It Take?" |
+| #96 (page 3) | `docs/inference-posterior-property` | **Draft, rebuilt** and rendered (Oct 30): "Posterior Probability of the Target" |
 
 **Oct 29:** the user's review of the three rendered pages found that their fit and their hypothesis
 fail as a known-truth demonstration. The fire model's identifiability was diagnosed, and the
 demo adopts a new design: inverse parameters `recruitment` and `juvenileMortality`, and a
 marked-plot survey revisited over a 20-year present. See "Fire model review: identifiability and
-survey design (Oct 29)" below. The pages are rebuilt on it.
+survey design (Oct 29)" below. The pages were rebuilt on it and rendered on `gke-test` (Oct
+29–30); results under "The big run" there. All three await the user's review.
 
 ### Next phase: readiness (Oct 27)
 
 | Work | Ready? | Notes |
 |------|--------|-------|
-| Rebuild of PR 4 and PR 5 on the fire model | **Reviewed (Oct 29); to be redone** | The marked-plot design (Oct 29 section) replaces the fit and the hypothesis; prep checklist there |
+| Rebuild of PR 4 and PR 5 on the fire model | **Redone (Oct 29–30)**, awaiting review | The marked-plot design (Oct 29 section); results under "The big run" |
 | `csv_precision` passthrough; `use_float64` in `run_hash` | **Ready** | Small code PR ("Josh CSV export bug") |
 | SMC-ABC batch policy | **Done** (#97) | `SbiStrategy(batch_policy="exact" \| "measured")`, defaulting by dispatch mode |
 | Second ForeverTree model | **Done** (#98) | Spin-up → present → projection on the synthetic climate |
 | Parameter declarations (direct vs inverse) | Direction agreed | API to draft; the second model is its first user |
 | Field data (a study without a truth run) | Ready, small | Needed for Joshua tree, not for ForeverTree |
 | Test (2) as SMC-ABC on a stability target | Waits | The rebuilt #95 is its rejection version; the target is the projected ratio |
-| Pilot on the cluster | **Toolkit ready** (#97, tested on `gke-test`) | The rebuild is the pilot. Open: the credentials Secret each dispatch leaves behind. The CSV bug doesn't touch the fire model's counts. **Oct 29: `gke-test` jobs stayed `pending` for over an hour**; check the cluster before the big run |
+| Pilot on the cluster | **Toolkit ready** (#97, tested on `gke-test`) | The rebuild is the pilot. Open: the credentials Secret each dispatch leaves behind. The CSV bug doesn't touch the fire model's counts. The big run (Oct 29–30) ran there without failures; loading runs one at a time is now the slowest part |
 | Cleanup (Optuna, spin-up) | Parked | Wholesale, once SBI is stable |
 
 Nothing in the stack has merged yet, so new code PRs stack on #96 unless the lower PRs merge first.
@@ -358,15 +359,15 @@ This was checked: survivors never exceed the plants marked. The pilot assumed ev
 is refound and every new plant seen. Detection error applied to counts only, and it cost nothing.
 
 **Open before the big run:**
-1. **The hypothesis for pages 2–3.** The ratio target rewards poor juvenile survival. The
-   candidate is adults' λ under `hot_dry` (for example λ ≥ 0.99, keeping two-thirds of the adults
-   over 40 years). Under the old parameters, λ ≥ 0.99 under `hot_dry` gave a prior probability of
-   0.30 and a posterior probability of about 0.97. It is measured after the runs, so it does not
-   block the simulations.
-2. **Where the big run runs.** `gke-test` jobs stayed `pending` for over an hour on Oct 29, and up
-   to 200 dispatched pilot jobs may still be queued there. Check the cluster first. Locally, the
-   pilot's 230 runs took about 20 minutes at 5 in parallel, outside joshpy, which runs one
-   simulation at a time locally.
+1. **The hypothesis for pages 2–3.** *Resolved: λ ≥ 0.99 (below).* The ratio target rewards
+   poor juvenile survival. The candidate is adults' λ under `hot_dry` (for example λ ≥ 0.99,
+   keeping two-thirds of the adults over 40 years). Under the old parameters, λ ≥ 0.99 under
+   `hot_dry` gave a prior probability of 0.30 and a posterior probability of about 0.97. It is
+   measured after the runs, so it does not block the simulations.
+2. **Where the big run runs.** *Resolved: `gke-test`, which ran it without failures.* `gke-test`
+   jobs stayed `pending` for over an hour on Oct 29, and up to 200 dispatched pilot jobs may
+   still be queued there. Check the cluster first. Locally, the pilot's 230 runs took about 20
+   minutes at 5 in parallel, outside joshpy, which runs one simulation at a time locally.
 3. **Detection on marked plots:** whether new juveniles are found at 90%. The pilot found detection
    cost nothing on counts.
 
@@ -394,6 +395,53 @@ is refound and every new plant seen. Detection error applied to counts only, and
 - **Cost:** the same simulation counts as Oct 28 (200 prior draws, a search of about 600, a
   filter of 2,000, 900 projections). Runs are about 5% longer (220 steps to the survey, against
   210).
+
+**Decided (Oct 29): the target is adults' λ ≥ 0.99 over the 40 projected years** (two-thirds of
+the adults kept), measured by `case.projected` on the whole landscape. The case module has
+`TARGET_LAMBDA = 0.99` and no ratio target. In the pilot under `hot_dry`, the truth's λ was 0.9934
+and 62% of draws passed in every replicate.
+
+**The big run (Oct 29), page 1.** Rendered on `gke-test` into a fresh `forevertree_fire.duckdb`
+(the Oct 28 registry is kept as `forevertree_fire.oct28.duckdb`). About 800 simulations in about
+2.5 hours: 3 futures × 10 replicates of the truth projected, the truth, 200 prior draws, 30 truth
+replicates, and 540 new SMC-ABC runs (5 rounds, 108 minutes). The first attempt stopped on a
+single-visit survey (`statistics` had no `new` column to drop); fixed in the case module.
+- **Truth under the futures:** λ 1.000 (`normal`), 0.993 (`hot_dry`, range 0.992–0.996), 1.003
+  (`cool_wet`); every replicate meets the target. Juveniles per adult: 0.41, 0.21, 0.48.
+- **Leave-one-out widths** (`recruitment`, `juvenileMortality`; floor 0.34, 0.33): `r_hat` alone
+  0.62 / 0.96, `jm_hat` alone 0.98 / 0.70, both 0.66 / 0.74, with `log_ratio` (compared) 0.64 /
+  0.67, all five 0.67 / 0.69, counts only 0.80 / 0.82. Coverage 0.89–0.94. Necessity and
+  sufficiency both hold; the stage ratio adds to `juvenileMortality`, the densities add nothing.
+  Wider than the pilot's 0.55 / 0.64, which came from its own 200 draws: with 200 simulations,
+  the widths vary from one set of draws to the next.
+- **Effort** (widths): every 3 years over 4 / 7 / 13 / 19 years 0.80 / 0.73 / 0.66 / 0.64 and
+  0.82 / 0.80 / 0.71 / 0.67; every 5 / 2 / 1 years over 20 years 0.69 / 0.57 / 0.56 and 0.75 /
+  0.65 / 0.66. Counts only: one year 0.90 / 0.86, 20 yearly counts 0.80 / 0.81.
+- **Truth replicates:** survey spread 0.23 / 0.18 / 0.37 prior SDs (`r_hat`, `jm_hat`,
+  `log_ratio`). Rejection ABC (k = 20) over the 30 surveys: means 51.2% and 6.7%, every range
+  covers the truth.
+- **SMC-ABC:** ε 1.56 → 0.78 → 0.39; the third generation carried 7 over (largest distance 0.45;
+  60% of the truth's replicate surveys within it). Posterior `recruitment` 53.3% (90%: 41.0–67.0),
+  `juvenileMortality` 6.2% (2.4–11.2), truth inside both; ESS 22.9 of 30.
+- **Page 2** (rejection filter, `hot_dry`; 2,000 projections, 1 h 40 min on `gke-test`: 40 minutes
+  to simulate, an hour to load): 81 of 200 draws pass (P = 0.405), 199 meet the target in at
+  least one replicate, 46 in all 10. A draw's median λ: 0.978–0.996 (5–95%), median 0.993; the
+  replicates' SD is 0.0046, as large as most draws' distance from the target. The accepted region
+  is `recruitment` above about 30% with `juvenileMortality` below about 10%, or above 50% up to
+  about 15%. The projected ratio follows `juvenileMortality` (ρ 0.59), not λ (0.10). 32 draws
+  have a replicate whose landscape loses every adult (λ = 0), so the figure uses medians and
+  each draw's share of replicates meeting the target.
+- **Page 3** (900 projections, about an hour): P(target | survey) = 1 / 0.953 / 1 under `normal`
+  / `hot_dry` / `cool_wet` (ESS 22.9; P = 1 means at least 0.87). Under `hot_dry`, one particle
+  (52%, 8.2%; weight 0.047) meets the target in 8 of 10 replicates; 20 particles in all 10.
+  Posterior λ under `hot_dry` 0.9946 (90%: 0.9900–0.9991), against the truth's 0.993. **The
+  survey moves the `hot_dry` answer from 0.41 to 0.95**: the hypothesis now depends on the fit,
+  which the Oct 28 pages failed to show. No future is a negative control: the truth meets the
+  target under all three.
+- **Mistake to avoid:** a plain-Python `study.search` against the rendered registry proposed new
+  runs from generation 2 and began simulating them locally (35 runs) before it was stopped. The
+  stray session was removed with `drop_run`. Inspect a search through the rendered page or a
+  read-only query.
 
 ### Rebuild of PR 4 and PR 5 on the fire model (Oct 27)
 

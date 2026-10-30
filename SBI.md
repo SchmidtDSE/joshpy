@@ -43,6 +43,12 @@ We map which parameter sets let Joshua trees replace themselves, then check whic
 >
 > The demo now fits `recruitment` and `juvenileMortality` to marked plots revisited over 20 years.
 > See "Fire model review: identifiability and survey design (Oct 29)" in SBI_IMPLEMENTATION.md.
+>
+> **Oct 30:** the rebuilt demo works as a known-truth check. The posterior contains the truth for
+> both rates (`recruitment` 53%, 90% interval 41–67%, truth 50%; `juvenileMortality` 6.2%,
+> 2.4–11.2%, truth 5%), and the survey moves the probability that the stand keeps two-thirds of
+> its adults under `hot_dry` from 0.41 (prior) to 0.95 (posterior). The posterior is calibrated
+> but wide: 10 marked plots record a few hundred births and deaths.
 
 ## At a glance
 
