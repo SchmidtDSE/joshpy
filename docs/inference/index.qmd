@@ -94,6 +94,15 @@ the present, from marked plots revisited over 20 years, and test the future.
 5. **[Posterior probability of the target](posterior-property.qmd)**:
    combining the two.
 
+The last page steps back from fitting to ask which of the second model's
+inputs the outcome depends on at all:
+
+6. **[One input at a time](local-sensitivity.qmd)**: a local sensitivity
+   analysis around a direct parameterization. It covers life history, fire,
+   climate and initial conditions, a fire pulse, and three management
+   interventions, with the outcome's uncertainty split by source
+   [@dietze2017].
+
 ## References
 
 ::: {#refs}

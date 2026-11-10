@@ -1,0 +1,66 @@
+# The sensitivity model (forevertree_sa.josh). Every input is a template variable: the baseline,
+# a direct parameterization, is forevertree_sa_case.BASELINE, and each run overrides only what it
+# perturbs. At the baseline it is the fire-model case study's configuration
+# (forevertree_fire.jshc.j2 at its truth), with the knobs below at their neutral values.
+# Rates are yearly.
+
+# --- The run ---
+# Years of spin-up on resampled historical climate.
+spinupYears = {{ spinupYears }} count
+# Years of the present: the last historical years, in order. The last one is year 0 of the projection.
+presentYears = {{ presentYears }} count
+# Years projected under the future mapped as futureTemperature and futurePrecipitation.
+projectionYears = {{ projectionYears }} count
+# Years in the historical climate files, and in the future's.
+historicalYears = {{ historicalYears }} count
+futureYears = {{ futureYears }} count
+
+# --- The projection's climate ---
+# Rain, as % of the future's (100 %: unchanged).
+rainScale = {{ rainScale }} %
+# Added to the future's temperature.
+temperatureOffset = {{ temperatureOffset }} K
+# 1: each projected year draws one of the future's years at random; 0: the future's years in order.
+resampleWeather = {{ resampleWeather }} count
+
+# --- Growth, as in forevertree.josh ---
+maxNewGrowth = {{ maxNewGrowth }} m
+minPrecipImpactPct = {{ minPrecipImpactPct }} %
+
+# --- Demography ---
+# Seedlings in each patch at the start of the run.
+initialTrees = {{ initialTrees }} count
+# Most trees a patch holds; recruitment falls to zero as a patch fills.
+maxTrees = {{ maxTrees }} count
+# Age at which a tree is an adult: it recruits, and survives better.
+maturityAge = {{ maturityAge }} years
+# Chance that an adult recruits one tree, in a wet year (500 mm or more) in an empty patch.
+recruitment = {{ recruitment }} %
+# Chance that an adult dies.
+adultMortality = {{ adultMortality }} %
+# Chance that a juvenile dies, in a wet year.
+juvenileMortality = {{ juvenileMortality }} %
+# Added to a juvenile's chance of dying in a dry year (300 mm or less); linear in between.
+droughtMortality = {{ droughtMortality }} %
+
+# --- Fuel and fire ---
+# Fuel cover at the start of the run.
+initialFuel = {{ initialFuel }} %
+# Share of the missing fuel cover that grows back in a wet year (less in drier years).
+fuelGrowth = {{ fuelGrowth }} %
+# Scheduled fire: every fireInterval years from step firstFire, in every patch (0: off).
+fireInterval = {{ fireInterval }} count
+firstFire = {{ firstFire }} count
+# Stochastic fire: the yearly chance of fire at full fuel cover, proportional to fuel (0 %: off).
+fireChance = {{ fireChance }} %
+# Chance that a fire kills an adult, at full fuel cover. Juveniles die at the fuel cover itself.
+adultFireMortality = {{ adultFireMortality }} %
+
+# --- Management, in the projection only (0: off) ---
+# Fuel treatment every fuelTreatmentInterval years, removing fuelReduction of the fuel.
+fuelTreatmentInterval = {{ fuelTreatmentInterval }} count
+fuelReduction = {{ fuelReduction }} %
+# Seedlings planted in a patch the year after it burns, as many as its open space allows.
+plantingDensity = {{ plantingDensity }} count
+# Cut in a juvenile's yearly chance of dying (not in fires).
+juvenileProtection = {{ juvenileProtection }} %

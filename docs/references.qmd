@@ -30,6 +30,8 @@ adds the entry to the page's own reference list.
   weights, as implemented in sbi.
 - @wood2010: synthetic likelihood, a parametric likelihood approximation.
 - @wilkinson2013: the tolerance read as an explicit model-error term.
+- @dietze2017: splitting a prediction's uncertainty by source, for the local
+  sensitivity page.
 
 ## Inference: ForeverTree case study
 
@@ -77,6 +79,22 @@ adds the entry to the page's own reference list.
   data.
 - @joyce2008: approximate sufficiency: adding statistics that leave the
   posterior unchanged.
+
+## Inference: One input at a time
+
+[Page](inference/local-sensitivity.qmd)
+
+- @dietze2017: predictive variance as sensitivity squared times uncertainty,
+  summed over initial conditions, drivers and parameters, plus process error;
+  and the stability that decides whether initial conditions are forgotten.
+- @malchow2026: sensitivity, uncertainty analysis and calibration in one
+  framework; one-at-a-time response curves early, global analysis later; and
+  sensitivities scaled by uncertainty read as uncertainty attribution.
+- @saltelli2010: the case against one-at-a-time designs, which can't see
+  interactions.
+- @tenbroeke2016: sensitivity analysis methods for agent-based models.
+- @hartig2011: stochastic simulation models, whose outputs vary between
+  replicates of one parameter set.
 
 ## Inference: What would it take?
 

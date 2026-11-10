@@ -1,0 +1,966 @@
+---
+title: "One Input at a Time"
+description: "A local sensitivity analysis of the fire model around a direct parameterization: which inputs drive the outcome's uncertainty, how life history reaches the outcome, how a fire changes it, and what management could do"
+execute:
+  warning: false
+---
+
+{{< include _sbi-setup.qmd >}}
+
+<!-- The prose quotes results through inline values. After the first render, read the figures
+and add the interpretation they support. -->
+
+## Introduction
+
+The [fire-model page](fire-model.qmd) fitted the fire model to a survey. This page
+takes a step that belongs before any fit: a **sensitivity analysis**. Before
+asking which parameter values the data support, ask which inputs the outcome
+depends on at all, and by how much. Here the outcome is the stand keeping at
+least two-thirds of its adults over 40 years.
+
+The analysis is **local**. It starts from one set of input values, a direct
+parameterization: every input set from what is known or assumed, with no fit.
+It moves one input at a time, a little each way, and watches the outcome. In
+@malchow2026's terms, this is a semi-local, one-at-a-time (OAT) analysis.
+They recommend it early in a project, as response curves that check the model,
+before a global analysis varies everything together.
+
+It asks three questions:
+
+1. **Which uncertain inputs matter most for the outcome?** The inputs are life
+   history, the fire regime, the climate, and the initial conditions, including
+   how long the model spins up. Whether the stand forgets its initial conditions
+   is measured, not assumed.
+2. **How does a fire change the answer?** The same analysis is repeated with
+   one fire that burns every patch at the start of the projection.
+3. **What could management do?** Three interventions are written into the
+   model as rules: fuel treatment, planting after a fire, and protecting
+   juveniles. Each is tested at two doses, with and without the fire.
+
+In an agent-based model, a disturbance or an intervention is not a parameter
+to be estimated. It is a rule, written in the model's own terms: *a year after
+a patch burns, plant ten seedlings*. The model then works out its consequences
+plant by plant. This page shows how such rules are added and compared.
+
+::: {.callout-note}
+## Runtime
+
+The first render runs 58 settings with 30 replicates each: 1,740 simulations of
+260 years. Set `JOSH_BATCH_TARGET` to a batch target profile, such as
+`gke-test`, to run them on a cluster, as on the
+[fire-model page](fire-model.qmd):
+
+```bash
+JOSH_BATCH_TARGET=gke-test pixi run docs-inference docs/inference/local-sensitivity.qmd
+```
+
+The runs are stored in this page's registry, `forevertree_sa.duckdb`, so a
+later render replays them without a target.
+:::
+
+```{python}
+import sys
+
+from dotenv import find_dotenv, load_dotenv
+
+_ = load_dotenv(find_dotenv(usecwd=True))  # MinIO keys from the repository's .env, if any
+sys.path.insert(0, "../../examples/sbi_forevertree")
+import forevertree_sa_case as sa
+import numpy as np
+import pandas as pd
+
+from joshpy.cli import JoshCLI
+from joshpy.jar import JarMode
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry("forevertree_sa.duckdb")  # this page's own registry
+cli = JoshCLI(josh_jar=JarMode.DEV)
+```
+
+## Sensitivity Times Uncertainty
+
+@dietze2017 splits the uncertainty of a prediction $Y$ into the inputs it comes
+from. To first order, and ignoring covariances,
+
+$$
+\mathrm{Var}[Y] \approx
+\underbrace{\Big(\tfrac{\partial Y}{\partial Y_0}\Big)^2 \mathrm{Var}[Y_0]}_{\text{initial conditions}}
++ \underbrace{\Big(\tfrac{\partial Y}{\partial X}\Big)^2 \mathrm{Var}[X]}_{\text{drivers}}
++ \underbrace{\Big(\tfrac{\partial Y}{\partial \theta}\Big)^2 \mathrm{Var}[\theta]}_{\text{parameters}}
++ \underbrace{\mathrm{Var}[\varepsilon]}_{\text{process}}.
+$$
+
+Each input contributes its **sensitivity** squared times its **uncertainty**.
+An input matters if the outcome responds strongly to it, or if it is poorly
+known. Knowing only one of the two is not enough, and the two call for different
+work: a sensitive input calls for scrutiny of the process, a poorly known one
+for data. The last term, process error, is the outcome's spread between
+replicates at fixed inputs: here, the weather, the fires and the births and
+deaths that the model draws at random.
+
+Sensitivity is a property of the model; uncertainty is a property of what we
+know. @malchow2026 ask that the two be kept apart. This page reports both: an
+**elasticity** (the % change in the outcome for a 1% change in an input) as the
+sensitivity, and a **contribution** (sensitivity squared times uncertainty) as
+its share of the outcome's uncertainty.
+
+## The Baseline
+
+The model is the fire model of the [fire-model page](fire-model.qmd#the-model),
+run 40 years into the `normal` future. The baseline sets every input to a value
+we can state. The two vital rates that page fitted, `recruitment` and
+`juvenileMortality`, take their true values, 50% and 5%; every other input
+takes the fire model's fixed value:
+
+```{python}
+#| echo: false
+#| output: asis
+sa.show_source("BASELINE")
+```
+
+The model is a copy of the fire model, `forevertree_sa.josh`, with the knobs
+this page turns. At their baseline values the knobs do nothing, so the
+copy is the fire model with the same configuration (the test
+`tests/test_forevertree_sa.py` checks that the configurations match). The
+copy keeps the inference pages' runs intact, since a run's `run_hash` includes
+its model's source.
+
+One difference from the fire pages: in the projection, each year draws one of
+the future's 40 years at random (`resampleWeather`), so that replicates differ
+in their weather. The fire pages project one fixed sequence of years, so their
+replicates share every dry spell. One setting below keeps the fixed sequence,
+to show how much of the outcome's spread the weather sequence accounts for.
+
+::: {.callout-note collapse="true"}
+## View Simulation File (forevertree_sa.josh)
+
+```{python}
+#| echo: false
+print((sa.HERE / "forevertree_sa.josh").read_text(encoding="utf-8"))
+```
+:::
+
+### Rules, not parameters
+
+The knobs are ordinary Josh. The projection's climate is the future's, scaled:
+
+```josh
+precipitation.step
+  :if(meta.state == "projection") = ((external futurePrecipitation at meta.year) as mm) * meta.rainScale / 100%
+  :else = (external historicalPrecipitation at meta.year) as mm
+```
+
+A management intervention is a rule about when, where and on what it acts.
+Planting after a fire acts the year after a patch burns, with as many
+seedlings as its open space allows:
+
+```josh
+planted.end = {
+  const room = limit (meta.maxTrees - nTrees - recruits) to [0 count,]
+  const wanted = meta.plantingDensity if meta.state == "projection" and prior.burned else 0 count
+  return wanted if wanted < room else room
+}
+newPlants.end = recruits + planted
+ForeverTree.end = prior.ForeverTree | create newPlants of ForeverTree
+```
+
+A fuel treatment removes part of the fuel every few years. Fewer fires start,
+and those that do burn less intensely, since a fire's intensity is the fuel it
+burns:
+
+```josh
+kept = 100% - meta.fuelReduction if fuelTreated else 100%
+```
+
+Protecting juveniles (shelters, watering, exclosures) cuts their yearly chance
+of dying, but not of dying in a fire:
+
+```josh
+deathChance.step =
+  (meta.juvenileMortality + here.dryness * meta.droughtMortality / 100%) * (100% - protection) / 100%
+  if isJuvenile else meta.adultMortality
+```
+
+The fire pulse needs no new rule. The fire model's scheduled fire, set to burn
+once in the first projected year, burns every patch.
+
+### Sites and the outcome
+
+Patches don't interact (seeds don't disperse, fires don't spread), so each
+patch is its own stand. The page follows three **sites**, columns of 7 patches
+along the gradient from the wet west to the dry margin of the stand, and the
+whole landscape:
+
+```{python}
+pd.Series(sa.SITES, name="column (x)")
+```
+
+The **outcome** is the share of a site's adults still alive after 40
+projected years, $A_{40} / A_0$. The management target of the fire pages,
+adult λ ≥ 0.99, is a share of at least 0.99⁴⁰ ≈ 67%. Below the outcome sits a
+chain of life history. With $A_y$ adults in year $y$, new plants $T_y$ and new
+adults $N_y$, the adults next year are the survivors plus the new adults:
+
+$$
+A_{y+1} = s\,A_y + N_{y+1}, \qquad
+\lambda \approx s + \frac{N}{A} = s + \frac{T}{A}\cdot m .
+$$
+
+So the adults' growth factor λ is about **adult survival** $s$ plus the
+**new plants per adult** $T/A$ times their **survival to maturity** $m$,
+from a few years earlier. `sa.chain` measures each link for each replicate and
+site:
+
+```{python}
+#| echo: false
+#| output: asis
+sa.show_source(sa.chain)
+```
+
+## The Design
+
+Each input moves one standard deviation of its uncertainty each way, with
+everything else at the baseline.
+
+The model is invented, so no input's uncertainty is known. The uncertainties
+are **illustrative**: each input gets a narrow, medium or wide spread, one
+standard deviation of 10%, 25% or 50% of its baseline. The spreads are mixed
+within each group on purpose, to show how sensitivity and uncertainty combine.
+A sensitive input known well can contribute as much as an insensitive one known
+poorly [@malchow2026]. The spreads decide the contributions, not the
+elasticities. Temperature has a baseline offset of 0, so it moves 1 K.
+
+```{python}
+#| echo: false
+pd.DataFrame(
+    [
+        {
+            "input": f.name,
+            "group": f.group,
+            "baseline": f.baseline,
+            "spread": f.spread or "1 K",
+            "±1 SD": f.sd,
+            "unit": f.unit,
+        }
+        for f in sa.FACTORS
+    ]
+).set_index("input")
+```
+
+Beyond the ±1 SD steps, the design adds:
+
+- **Spin-up lengths** of 50, 100 and 400 years, beside the baseline's 200.
+- **The fixed weather sequence**.
+- **The fire pulse**, alone and with seven inputs moved ±1 SD.
+- **Each intervention** at two doses, with and without the pulse.
+
+```{python}
+plan = sa.design()
+plan.groupby("branch", sort=False).size().rename("settings")
+```
+
+### Estimates from replicates
+
+The model is stochastic, so each setting runs 30 independent replicates and is
+summarized by their mean. For an input $x$ with baseline $x_0$ and illustrative
+uncertainty $\sigma$, with means $\bar Y_-$ and $\bar Y_+$ at $x_0 \mp \sigma$:
+
+- the **effect** of a 1-SD change is the central difference
+  $(\bar Y_+ - \bar Y_-)/2$. Its standard error comes from both settings'
+  replicate variances, $\tfrac12\sqrt{s_+^2/n_+ + s_-^2/n_-}$;
+- the **elasticity** is $\frac{\bar Y_+ - \bar Y_-}{2\sigma}\cdot\frac{x_0}{\bar Y_0}$;
+- the **contribution** is the effect squared, less its standard error squared.
+  Replicate noise inflates a squared difference by about that much, so an
+  input with no effect would otherwise seem to contribute;
+- the **curvature** $(\bar Y_+ + \bar Y_- - 2\bar Y_0)/|\bar Y_+ - \bar Y_-|$ is
+  near 0 where the response is straight across ±1 SD. Far from 0, it bends or
+  crosses a threshold, and the linear terms above don't hold there.
+
+```{python}
+#| echo: false
+#| output: asis
+sa.show_source(sa.oat_table)
+```
+
+An effect within about two standard errors of zero can't be told from noise.
+Standard errors shrink as one over the square root of the replicates: four
+times the replicates halve them. Josh can't yet give two settings the same
+random numbers, so each difference carries both settings' noise. Sharing them
+(common random numbers) would shrink these standard errors without more runs.
+
+## Running It
+
+`sa.run_settings` runs a list of settings as one batch, reusing any run the
+registry already holds. It is the same machinery as the fire pages'
+`KnownTruthStudy.run_at_each`, for any of the model's variables:
+
+```{python}
+#| echo: false
+#| output: asis
+sa.show_source(sa.run_settings)
+```
+
+The initial conditions and spin-up run first, with every step loaded. The
+baseline is among them, and a run is loaded into the registry only once, with
+the steps it first ran with.
+
+```{python}
+def run_branch(branches, experiment, output_steps=None):
+    """Run some branches of the design as one batch: their settings, with run_hashes."""
+    rows = plan[plan["branch"].isin(branches)]
+    hashes = sa.run_settings(
+        registry, cli, list(rows["overrides"]), experiment, output_steps=output_steps
+    )
+    return rows.assign(run_hash=hashes)
+
+
+initial = plan[plan["branch"] == "ic"]
+runs = pd.concat(
+    [
+        run_branch(["ic"], "forevertree_sa_initial", output_steps=sa.all_steps(initial["overrides"])),
+        run_branch(["oat", "weather"], "forevertree_sa_oat"),
+        run_branch(["pulse"], "forevertree_sa_pulse"),
+        run_branch(["intervention"], "forevertree_sa_interventions"),
+    ],
+    ignore_index=True,
+)
+run_hash = runs.set_index("label")["run_hash"]
+measured = sa.measure(registry, runs)  # the chain, by setting, replicate and site
+print(f"{runs['run_hash'].nunique()} runs, {len(measured)} replicate-sites")
+```
+
+## The Baseline and Its Noise
+
+How the baseline's adults change over the projection, and how much its
+replicates differ:
+
+```{python}
+outcome = "retained"
+baseline = measured[measured["label"] == "baseline"].groupby("site", observed=True)[outcome]
+noise = pd.DataFrame({"mean": baseline.mean(), "replicate SD": baseline.std()})
+noise["SE of an effect"] = noise["replicate SD"] / np.sqrt(2 * sa.REPLICATES)
+fixed = sa.process_variance(measured, outcome, "fixed weather")
+noise["share from the weather sequence"] = 1 - fixed / noise["replicate SD"] ** 2
+noise.round(3)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+def relative_adults(labels):
+    """Adults relative to year 0, per replicate: median and central 90% by setting, site, year."""
+    years = sa.trajectories(registry, run_hash[list(labels)])
+    years["setting"] = years["run_hash"].map({run_hash[label]: name for label, name in labels.items()})
+    start = years.loc[years["years"] == 0, ["run_hash", "replicate", "site", "adults"]]
+    years = years.merge(start.rename(columns={"adults": "start"}))
+    years["relative"] = years["adults"] / years["start"].where(years["start"] > 0)
+    bands = (
+        years.dropna(subset=["relative"])
+        .groupby(["setting", "site", "years"], observed=True)["relative"]
+        .quantile([0.05, 0.5, 0.95])
+        .unstack()
+        .rename(columns={0.05: "low", 0.5: "median", 0.95: "high"})
+        .reset_index()
+    )
+    bands["site"] = bands["site"].astype(str)
+    return bands
+
+
+trajectory = relative_adults({"baseline": "no pulse", "pulse": "fire pulse in year 1"})
+target_path = pd.DataFrame({"years": np.arange(sa.PROJECTION_YEARS + 1)})
+target_path["relative"] = sa.TARGET_LAMBDA ** target_path["years"]
+sites = sa.SITE_ORDER
+noise_floor = 2 * noise.loc["landscape", "SE of an effect"]
+```
+
+```{r}
+#| label: fig-baseline
+#| fig-cap: "Adults relative to year 0 at each site: the median (line) and central 90% (band) of 30 replicates, without and with a fire that burns every patch in projection year 1. The dashed line is the target's path, 1% fewer a year."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 8
+#| fig-height: 5
+setting_colours <- c("no pulse" = blue, "fire pulse in year 1" = orange)
+trajectory <- transform(py$trajectory, site = factor(site, py$sites))
+ggplot(trajectory, aes(years, median, colour = setting, fill = setting)) +
+  geom_ribbon(aes(ymin = low, ymax = high), alpha = 0.18, colour = NA) +
+  geom_line(linewidth = 0.8) +
+  geom_line(aes(years, relative), py$target_path, inherit.aes = FALSE, linetype = "dashed") +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  scale_colour_manual(NULL, values = setting_colours) +
+  scale_fill_manual(NULL, values = setting_colours) +
+  facet_wrap(~site, nrow = 1) +
+  labs(x = "years since the present", y = "adults / adults at year 0") +
+  theme(legend.position = "top")
+```
+
+The replicates' spread is the process error, the last term of Dietze's sum.
+It also sets how small an effect this design can see. Over the landscape, an
+effect needs to exceed about `r sprintf("%.1f", 100 * py$noise_floor)`
+percentage points of the adults retained to stand out from the noise of 30
+replicates.
+
+## What the Outcome Is Sensitive To
+
+Each input's effect on the adults retained after 40 years, for a 1-SD change,
+at each site:
+
+```{python}
+effects = sa.oat_table(measured, outcome)
+effects["detectable"] = effects["effect"].abs() > 2 * effects["se"]
+landscape = effects[effects["site"] == "landscape"].set_index("factor")
+order = landscape["effect"].abs().sort_values(ascending=False).index.tolist()
+(100 * effects.pivot(index="factor", columns="site", values="effect")).loc[order].round(1)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+effect_points = effects.assign(
+    site=effects["site"].astype(str),
+    label=effects["factor"].map({f.name: f.label for f in sa.FACTORS}),
+    effect=100 * effects["effect"],
+    se=100 * effects["se"],
+)
+label_order = [sa.FACTOR[name].label for name in order]
+group_colours_order = ["initial conditions", "climate", "life history", "fire", "process"]
+```
+
+```{r}
+#| label: fig-effects
+#| fig-cap: "The change in adults retained after 40 years for a 1-SD increase in each input, at each site, with ±2 standard errors. Points inside the dotted band around zero can't be told from noise."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 8
+#| fig-height: 5.5
+group_colours <- c(
+  "initial conditions" = muted, climate = aqua, "life history" = blue, fire = orange, process = shade
+)
+points <- transform(
+  py$effect_points,
+  site = factor(site, py$sites), label = factor(label, rev(py$label_order))
+)
+ggplot(points, aes(effect, label, colour = group)) +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_errorbar(aes(xmin = effect - 2 * se, xmax = effect + 2 * se), width = 0, orientation = "y") +
+  geom_point(size = 2) +
+  scale_colour_manual(NULL, values = group_colours) +
+  facet_wrap(~site, nrow = 1) +
+  labs(x = "change in adults retained (percentage points) for +1 SD", y = NULL) +
+  theme(legend.position = "top")
+```
+
+The elasticities give the sensitivity without the spread: the %
+change in adults retained for a 1% change in the input. The curvature flags
+inputs whose response bends or crosses a threshold within ±1 SD:
+
+```{python}
+elasticity = effects.pivot(index="factor", columns="site", values="elasticity").loc[order]
+bends = effects[effects["detectable"] & (effects["curvature"].abs() > 0.5)]
+print("bends within ±1 SD:", sorted(set(bends["factor"])) or "none")
+elasticity.round(2)
+```
+
+## How Life History Reaches the Outcome
+
+An input reaches the outcome through the chain: new plants per adult, their
+survival to maturity, and adult survival, which together set λ. The same
+one-at-a-time effects, on every link, as a % of the link's baseline value:
+
+```{python}
+links = pd.concat(
+    [sa.oat_table(measured, name).assign(link=label) for name, label in sa.OUTCOMES.items()],
+    ignore_index=True,
+)
+links["relative"] = 100 * links["effect"] / links["baseline"]
+links["detectable"] = links["effect"].abs() > 2 * links["se"]
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+heat = links.assign(
+    site=links["site"].astype(str),
+    label=links["factor"].map({f.name: f.label for f in sa.FACTORS}),
+    text=np.where(links["detectable"], links["relative"].round(1).astype(str), ""),
+)
+link_order = list(sa.OUTCOMES.values())
+```
+
+```{r}
+#| label: fig-chain
+#| fig-cap: "How a 1-SD increase in each input changes each link of the chain, as a % of the link's baseline value. Numbers mark effects more than 2 standard errors from zero."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 9
+#| fig-height: 7
+heat <- transform(
+  py$heat,
+  site = factor(site, py$sites),
+  label = factor(label, py$label_order),
+  link = factor(link, py$link_order)
+)
+limit <- max(abs(heat$relative), na.rm = TRUE)
+ggplot(heat, aes(label, link, fill = relative)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = text), subset(heat, !is.na(text) & text != ""), size = 2.6) +
+  scale_fill_gradient2("% change", low = orange, mid = "white", high = blue, limits = c(-limit, limit)) +
+  facet_wrap(~site, ncol = 2) +
+  labs(x = NULL, y = NULL) +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1), panel.grid = element_blank())
+```
+
+Read a column from the bottom up. Recruitment should move new plants per
+adult first, juvenile mortality survival to maturity, and adult mortality
+adult survival. How far each change carries up to λ and the adults retained is
+the model's answer to which life-history traits matter. An input that moves a
+link without reaching the outcome is buffered somewhere above it. In this
+model, the obvious candidate is a patch's capacity, which caps new plants as a
+patch fills.
+
+## Initial Conditions and Spin-up
+
+Every run starts from 10 seedlings per patch and 50% fuel, and spins up for
+200 years before the present. If the stand forgets where it started,
+the outcome won't depend on any of these. That is Dietze's stability: when
+$|\partial f / \partial Y| < 1$, a difference in the initial state shrinks
+year by year. Rather than assume it, follow each perturbed start against the
+baseline from step 0:
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+labels = ["baseline", "initialTrees-", "initialTrees+", "initialFuel-", "initialFuel+"]
+start = sa.trajectories(registry, run_hash[labels], from_start=True)
+start["setting"] = start["run_hash"].map({run_hash[label]: label for label in labels})
+by_year = start.groupby(["setting", "site", "years"], observed=True)["adults"].agg(
+    ["mean", "var", "count"]
+)
+base = by_year.loc["baseline"]
+drift = []
+for label in labels[1:]:
+    other = by_year.loc[label]
+    drift.append(
+        pd.DataFrame(
+            {
+                "setting": label,
+                "difference": 100 * (other["mean"] - base["mean"]) / base["mean"],
+                "se": 100 * np.sqrt(other["var"] / other["count"] + base["var"] / base["count"])
+                / base["mean"],
+            }
+        ).reset_index()
+    )
+drift = pd.concat(drift, ignore_index=True)
+drift["site"] = drift["site"].astype(str)
+at_present = drift[drift["years"] == 0].set_index(["setting", "site"])[["difference", "se"]]
+remembered = at_present[at_present["difference"].abs() > 2 * at_present["se"]]
+```
+
+```{r}
+#| label: fig-drift
+#| fig-cap: "Adults in each perturbed start, as a % difference from the baseline, from step 0 to the end of the projection, with ±2 standard errors. Year 0 is the end of the present; the spin-up and present come before it."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 8
+#| fig-height: 5.5
+drift_colours <- c(
+  "initialTrees-" = "#9fc3ec", "initialTrees+" = blue,
+  "initialFuel-" = "#f5b08f", "initialFuel+" = orange
+)
+drift <- transform(py$drift, site = factor(site, py$sites))
+ggplot(drift, aes(years, difference, colour = setting, fill = setting)) +
+  geom_ribbon(aes(ymin = difference - 2 * se, ymax = difference + 2 * se), alpha = 0.12, colour = NA) +
+  geom_line(linewidth = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dotted") +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_colour_manual(NULL, values = drift_colours) +
+  scale_fill_manual(NULL, values = drift_colours) +
+  facet_wrap(~site, ncol = 2, scales = "free_y") +
+  labs(x = "years since the present", y = "adults, % difference from the baseline") +
+  theme(legend.position = "top")
+```
+
+At the start of the projection, `r nrow(py$remembered)` of the 16 perturbed
+starts and sites still differ from the baseline by more than two standard
+errors.
+
+The spin-up length asks the same question from the other end. If 200 years
+are enough, a longer spin-up changes nothing, and a shorter one shows how fast
+the model forgets:
+
+```{python}
+spinups = {50: "spinupYears=50", 100: "spinupYears=100", 200: "baseline", 400: "spinupYears=400"}
+spin = pd.concat(
+    [
+        sa.summarize(measured[measured["label"] == label], name)
+        .assign(spinup=years, measure=name)
+        .reset_index()
+        for years, label in spinups.items()
+        for name in ["adults_at_start", "retained"]
+    ],
+    ignore_index=True,
+)
+spin["se"] = np.sqrt(spin["var"] / spin["n"])
+spin.pivot_table(index=["measure", "site"], columns="spinup", values="mean", observed=True).round(3)
+```
+
+```{r}
+#| label: fig-spinup
+#| fig-cap: "Adults at the start of the projection (left) and adults retained after 40 years (right) against the spin-up's length, with ±2 standard errors. The baseline spins up for 200 years."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 8
+#| fig-height: 3.6
+spin <- transform(
+  py$spin,
+  site = factor(as.character(site), py$sites),
+  measure = factor(measure, c("adults_at_start", "retained"), c("adults at year 0", "adults retained after 40 years"))
+)
+ggplot(spin, aes(spinup, mean, colour = site)) +
+  geom_errorbar(aes(ymin = mean - 2 * se, ymax = mean + 2 * se), width = 0) +
+  geom_line() +
+  geom_point() +
+  scale_x_log10(breaks = c(50, 100, 200, 400)) +
+  scale_colour_manual(NULL, values = c(wet = blue, mid = aqua, margin = orange, landscape = ink)) +
+  facet_wrap(~measure, scales = "free_y") +
+  labs(x = "spin-up (years)", y = NULL) +
+  theme(legend.position = "top")
+```
+
+## Where the Uncertainty Comes From
+
+Each input's contribution, its effect squared less its noise, summed by group,
+beside the process error. Together they approximate the outcome's variance
+under the illustrative spreads, and each group's share is Dietze's partition:
+
+```{python}
+parts = (
+    effects.assign(contribution=effects["contribution"].clip(lower=0))
+    .groupby(["site", "group"], observed=True)["contribution"]
+    .sum()
+    .unstack()
+)
+parts["process"] = sa.process_variance(measured, outcome)
+shares = parts.div(parts.sum(axis=1), axis=0)
+shares.round(3)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+share_bars = shares.stack().rename("share").reset_index()
+share_bars.columns = ["site", "group", "share"]
+share_bars["site"] = share_bars["site"].astype(str)
+by_input = effects.assign(contribution=effects["contribution"].clip(lower=0))
+by_input["share"] = by_input["contribution"] / by_input["site"].map(parts.sum(axis=1)).astype(float)
+top = by_input.sort_values("share", ascending=False).groupby("site", observed=True).head(3)
+top_landscape = sa.FACTOR[top[top["site"] == "landscape"]["factor"].iloc[0]].label
+top_margin = sa.FACTOR[top[top["site"] == "margin"]["factor"].iloc[0]].label
+process_landscape = shares.loc["landscape", "process"]
+```
+
+```{r}
+#| label: fig-partition
+#| fig-cap: "Where the uncertainty in adults retained after 40 years comes from, at each site, under the illustrative input spreads: each group's summed contributions and the process error, as shares of their total."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 7
+#| fig-height: 3.2
+bars <- transform(
+  py$share_bars,
+  site = factor(site, rev(py$sites)),
+  group = factor(group, py$group_colours_order)
+)
+ggplot(bars, aes(share, site, fill = group)) +
+  geom_col(width = 0.7) +
+  scale_fill_manual(NULL, values = group_colours) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(x = "share of the outcome's variance", y = NULL) +
+  theme(legend.position = "top")
+```
+
+The largest single contribution over the landscape is from
+`r py$top_landscape`, and at the dry margin from `r py$top_margin`. Process
+error is `r sprintf("%.0f%%", 100 * py$process_landscape)` of the landscape's
+total. The three largest contributions at each site:
+
+```{python}
+top[["site", "factor", "group", "share", "elasticity"]].round(3)
+```
+
+These shares rest on the illustrative spreads. Halve an input's SD and its
+contribution falls to about a quarter, while its elasticity doesn't change. To
+separate the two, give every input the same spread, 25% of its baseline. Each
+contribution then follows from the same runs: while the response is straight,
+it grows with the SD squared. With equal spreads, inputs rank by sensitivity
+alone:
+
+```{python}
+#| echo: false
+#| output: asis
+sa.show_source(sa.rescaled)
+```
+
+```{python}
+equal = effects.assign(contribution=sa.rescaled(effects, 0.25).clip(lower=0))
+equal_total = equal.groupby("site", observed=True)["contribution"].sum() + parts["process"]
+equal["share"] = equal["contribution"] / equal["site"].map(equal_total).astype(float)
+spreads = (
+    by_input[by_input["site"] == "landscape"]
+    .set_index("factor")[["share"]]
+    .rename(columns={"share": "share (as spread)"})
+    .join(equal[equal["site"] == "landscape"].set_index("factor")["share"].rename("share (all 25%)"))
+)
+spreads.insert(0, "spread", [sa.FACTOR[name].spread or "1 K" for name in spreads.index])
+spreads.sort_values("share (as spread)", ascending=False).round(3)
+```
+
+An input that ranks higher with equal spreads than as spread is sensitive but
+given a narrow spread. If its uncertainty were wider than assumed, the outcome
+would follow it closely, so it deserves checking first. An input that ranks
+lower is one whose wide spread, not its sensitivity, earns its share; data
+would shrink that share quickly. `temperatureOffset` has no share of a zero
+baseline, so it is left out of the second column.
+
+## Response to a Fire
+
+The pulse burns every patch in the first projected year. Juveniles die at the
+fire's intensity, the fuel that burns, and adults at a fifth of it. How much
+the pulse costs the adults retained, at each site:
+
+```{python}
+sa.compare(measured, "baseline", "pulse", outcome).round(3)
+```
+
+Does a fire change what matters? The same one-at-a-time effects, after the
+pulse, beside those without it:
+
+```{python}
+pulse_effects = sa.oat_table(measured, outcome, prefix="pulse ", baseline="pulse")
+fire = effects.merge(
+    pulse_effects[["factor", "site", "effect", "se"]], on=["factor", "site"], suffixes=("", "_pulse")
+)
+fire["interaction"] = fire["effect_pulse"] - fire["effect"]
+fire["interaction_se"] = np.sqrt(fire["se"] ** 2 + fire["se_pulse"] ** 2)
+fire["detectable"] = fire["interaction"].abs() > 2 * fire["interaction_se"]
+(100 * fire.pivot(index="factor", columns="site", values="interaction")).round(1)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+dumbbell = pd.concat(
+    [
+        fire[["factor", "site", "effect", "se"]].assign(setting="no pulse"),
+        fire[["factor", "site", "effect_pulse", "se_pulse"]]
+        .rename(columns={"effect_pulse": "effect", "se_pulse": "se"})
+        .assign(setting="fire pulse in year 1"),
+    ],
+    ignore_index=True,
+)
+dumbbell["effect"] *= 100
+dumbbell["se"] *= 100
+dumbbell["site"] = dumbbell["site"].astype(str)
+dumbbell["label"] = dumbbell["factor"].map({f.name: f.label for f in sa.FACTORS})
+pulse_order = [sa.FACTOR[name].label for name in order if name in sa.PULSE_FACTORS]
+changed = sorted(set(fire.loc[fire["detectable"], "factor"]))
+```
+
+```{r}
+#| label: fig-fire
+#| fig-cap: "The change in adults retained for a 1-SD increase in each input, without and with a fire in projection year 1, with ±2 standard errors. Where the two differ, the input and the fire interact."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 8
+#| fig-height: 4.5
+dumbbell <- transform(
+  py$dumbbell,
+  site = factor(site, py$sites), label = factor(label, rev(py$pulse_order))
+)
+ggplot(dumbbell, aes(effect, label, colour = setting)) +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_errorbar(aes(xmin = effect - 2 * se, xmax = effect + 2 * se), width = 0, orientation = "y",
+                 position = position_dodge(width = 0.5)) +
+  geom_point(size = 2, position = position_dodge(width = 0.5)) +
+  scale_colour_manual(NULL, values = setting_colours) +
+  facet_wrap(~site, nrow = 1) +
+  labs(x = "change in adults retained (percentage points) for +1 SD", y = NULL) +
+  theme(legend.position = "top")
+```
+
+Inputs whose effect the fire changes by more than two standard errors at some
+site: `r if (length(py$changed)) paste(py$changed, collapse = ", ") else "none"`.
+An interaction is what a one-at-a-time design otherwise can't see. Here it is
+designed in, for one disturbance and seven inputs.
+
+## Management Interventions
+
+Each intervention at two doses, as the change in adults retained from the
+same setting without it. To put the effects on a common scale, each is also
+given as the change in `recruitment`, in percentage points, that would retain
+as many adults. This uses the local slope with respect to recruitment, with or
+without the pulse as the intervention is.
+
+```{python}
+def dose(overrides):
+    """An intervention's dose, in words."""
+    if overrides.get("fuelReduction"):
+        return f"{overrides['fuelReduction']:.0f}% of fuel every {overrides['fuelTreatmentInterval']} years"
+    if overrides.get("plantingDensity"):
+        return f"{overrides['plantingDensity']} seedlings per patch after a fire"
+    return f"{overrides['juvenileProtection']:.0f}% fewer juvenile deaths"
+
+
+per_point = {
+    pulse: table.set_index(["factor", "site"]).loc["recruitment", "effect"]
+    / sa.FACTOR["recruitment"].sd
+    for pulse, table in [(False, effects), (True, pulse_effects)]
+}
+rows = []
+for intervention, doses in sa.INTERVENTIONS.items():
+    for level, overrides in enumerate(doses, start=1):
+        for pulse in (False, True):
+            prefix = "pulse " if pulse else ""
+            label = f"{prefix}{intervention} {level}"
+            for site, d in sa.compare(measured, "pulse" if pulse else "baseline", label, outcome).iterrows():
+                rows.append(
+                    {
+                        "intervention": intervention,
+                        "dose": dose(overrides),
+                        "fire pulse": pulse,
+                        "site": site,
+                        "effect": d["difference"],
+                        "se": d["se"],
+                        "as recruitment (points)": d["difference"] / per_point[pulse][site],
+                    }
+                )
+managed = pd.DataFrame(rows)
+managed[managed["site"].isin(["margin", "landscape"])].round(3)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+managed_points = managed.assign(
+    effect=100 * managed["effect"],
+    se=100 * managed["se"],
+    site=managed["site"].astype(str),
+    setting=np.where(managed["fire pulse"], "fire pulse in year 1", "no pulse"),
+)
+dose_order = [dose(overrides) for doses in sa.INTERVENTIONS.values() for overrides in doses]
+```
+
+```{r}
+#| label: fig-interventions
+#| fig-cap: "The change in adults retained after 40 years from each intervention, at two doses, without and with a fire in projection year 1, with ±2 standard errors."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 8
+#| fig-height: 4.8
+points <- transform(
+  py$managed_points,
+  site = factor(site, py$sites), dose = factor(dose, rev(py$dose_order))
+)
+ggplot(points, aes(effect, dose, colour = setting)) +
+  geom_vline(xintercept = 0, linetype = "dotted") +
+  geom_errorbar(aes(xmin = effect - 2 * se, xmax = effect + 2 * se), width = 0, orientation = "y",
+                 position = position_dodge(width = 0.5)) +
+  geom_point(size = 2, position = position_dodge(width = 0.5)) +
+  scale_colour_manual(NULL, values = setting_colours) +
+  facet_wrap(~site, nrow = 1) +
+  labs(x = "change in adults retained (percentage points)", y = NULL) +
+  theme(legend.position = "top")
+```
+
+The interventions differ in when they act, not only in how much:
+
+- **Planting after a fire** acts only where fires burn. Its plants become
+  adults only after `maturityAge` years, if they survive, so over 40 years it
+  depends on the fire coming early.
+- **Fuel treatment** acts on the fires themselves, both how often they start
+  and how many they kill.
+- **Juvenile protection** acts every year on survival to maturity, the middle
+  link of the chain.
+
+Comparing each with the life-history effects above shows which trait an
+intervention stands in for. The "as recruitment" column is a local
+comparison: it holds only for changes small enough for the slope to hold.
+
+## What Deserves Scrutiny
+
+One table, for the dry margin and the landscape, collects what each input does
+to the outcome:
+
+- its **elasticity** (sensitivity);
+- its **share** of the outcome's variance under its illustrative spread;
+- whether its response **bends** within ±1 SD;
+- whether a **fire changes** its effect.
+
+```{python}
+summary = (
+    by_input[by_input["site"].isin(["margin", "landscape"])]
+    .pivot(index="factor", columns="site", values=["elasticity", "share"])
+)
+summary.columns = [f"{measure} ({site})" for measure, site in summary.columns]
+summary["bends"] = summary.index.isin(bends["factor"])
+summary["fire changes it"] = summary.index.isin(changed)
+summary.sort_values("share (landscape)", ascending=False).round(3)
+```
+
+Inputs high in the table with large elasticities are where the model's
+process deserves scrutiny first: how the rule is written, and whether it holds
+in the field. Inputs whose share comes mostly from a wide spread call for data
+instead. Inputs that bend near the baseline, or that the fire
+changes, are where a local analysis is least trustworthy and a global one
+should look first.
+
+The design can't see some things, because they are fixed in the model's
+structure rather than set by an input. They deserve the same scrutiny:
+
+- **Temperature reaches only height.** Height affects neither survival nor
+  maturity, so warming can't change the outcome in this model. The
+  `temperatureOffset` row tests exactly that.
+- **Patches are independent.** Seeds don't disperse and fires don't spread, so
+  an empty patch stays empty. Recolonization and fire spread would change how a
+  pulse plays out.
+- **Maturity is by age, not size.** Drought slows growth but not maturity.
+- **A fire's intensity is the fuel it burns**, the same for every plant in the
+  patch.
+
+## Limits and Next Steps
+
+- **One at a time.** Moving inputs singly misses their interactions
+  [@saltelli2010]. This page adds one, the fire, by design. A global analysis
+  varies every input at once over its uncertainty. Examples are Morris
+  screening, Sobol' indices, or a Latin hypercube with regression. That
+  sample can also serve as the reference table of the
+  [inference pages](fire-model.qmd) [@malchow2026; @tenbroeke2016].
+- **Linear terms.** Effects squared add up to a variance only for responses
+  that are close to straight across ±1 SD. The curvature column shows where
+  that fails.
+- **Illustrative uncertainties.** The shares change with every spread. For a
+  real stand, the spreads would come from measurements, the literature or a
+  fit. The [fire-model page](fire-model.qmd)'s posterior is one source for the
+  two vital rates it fitted. In the terms of @dietze2017, the analysis is
+  iterative: data shrink the uncertainties, and the partition shows where the
+  next data are worth most.
+- **Replicates, not shared random numbers.** Each effect carries both its
+  settings' noise. If Josh gains common random numbers, the same design would
+  give smaller standard errors from the same runs.
+- **One future.** The projection uses the `normal` future, and the rain
+  perturbation stands in for a small drying. A scenario such as `hot_dry`
+  is not an uncertain input to be weighted. It is a condition, so the same
+  analysis would be repeated under it, not averaged over it [@malchow2026].
+- **A few sites.** Three columns and the landscape show how the answer changes
+  along the gradient. More sites, or sites chosen from field plots, would come
+  next.
+
+```{python}
+#| include: false
+registry.close()
+```
+
+## References
+
+::: {#refs}
+:::
