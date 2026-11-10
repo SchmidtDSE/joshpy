@@ -1,0 +1,8 @@
+# Generated files. GitHub collapses them in pull-request diffs and leaves them out of the
+# repository's language statistics.
+#
+# Quarto's freezes of executed pages (re-render a page to update its freeze).
+docs/_freeze/** linguist-generated=true
+# The API reference and its inventory, built by quartodoc (scripts/render-docs.sh).
+docs/reference/*.qmd linguist-generated=true
+docs/objects.json linguist-generated=true

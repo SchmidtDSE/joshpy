@@ -1,5 +1,6 @@
 """Unit tests for the strategies module."""
 
+import functools
 import unittest
 from pathlib import Path
 
@@ -7,8 +8,11 @@ from joshpy.strategies import (
     SweepStrategy,
     CartesianStrategy,
     OptunaStrategy,
+    ParameterSetsStrategy,
     strategy_from_dict,
     sample_params_from_trial,
+    _callable_name,
+    _callable_path,
     _load_objective_from_path,
 )
 from joshpy.jobs import ConfigSweepParameter, FileSweepParameter
@@ -184,6 +188,26 @@ class TestOptunaStrategy(unittest.TestCase):
         self.assertEqual(strategy.sampler, "random")
 
 
+class TestParameterSetsStrategy(unittest.TestCase):
+    """ParameterSetsStrategy runs given sets as one batch (end to end in test_inference.py)."""
+
+    def test_is_adaptive_and_does_not_expand(self):
+        strategy = ParameterSetsStrategy(sets=[{"x": 1.0}])
+        self.assertTrue(strategy.is_adaptive)
+        with self.assertRaises(NotImplementedError):
+            list(strategy.expand([], []))
+
+    def test_needs_a_set(self):
+        with self.assertRaises(ValueError):
+            ParameterSetsStrategy(sets=[])
+
+    def test_round_trip(self):
+        strategy = ParameterSetsStrategy(sets=[{"x": 1.0, "y": 2}, {"x": 1.5, "y": 2}])
+        restored = strategy_from_dict(strategy.to_dict())
+        self.assertIsInstance(restored, ParameterSetsStrategy)
+        self.assertEqual(restored.sets, strategy.sets)
+
+
 class TestStrategyFromDict(unittest.TestCase):
     """Tests for strategy_from_dict factory."""
 
@@ -228,6 +252,72 @@ class TestLoadObjectiveFromPath(unittest.TestCase):
         """ImportError should propagate for non-existent module."""
         with self.assertRaises(ImportError):
             _load_objective_from_path("nonexistent_module_xyz:func")
+
+    def test_loads_attribute_of_a_class(self):
+        """A dotted name resolves through a module-level class."""
+        self.assertIs(_load_objective_from_path(f"{__name__}:_Objectives.static"), _Objectives.static)
+
+
+def _module_objective(registry, run_hash, job):
+    return 0.0
+
+
+class _Objectives:
+    @staticmethod
+    def static(registry, run_hash, job):
+        return 0.0
+
+    def method(self, registry, run_hash, job):
+        return 0.0
+
+
+class _CallableObjective:
+    def __call__(self, registry, run_hash, job):
+        return 0.0
+
+
+class TestCallablePath(unittest.TestCase):
+    """A callable is saved as a path only when that path loads it back."""
+
+    def test_importable_callables_round_trip(self):
+        for fn, path in [
+            (_module_objective, f"{__name__}:_module_objective"),
+            (_Objectives.static, f"{__name__}:_Objectives.static"),
+            (Path.cwd, "pathlib:Path.cwd"),  # a classmethod, rebound on each access
+        ]:
+            with self.subTest(path=path):
+                self.assertEqual(_callable_path(fn), path)
+                self.assertEqual(_load_objective_from_path(path), fn)
+
+    def test_unimportable_callables_have_no_path(self):
+        def _module_objective(registry, run_hash, job):  # shadows the module-level name
+            return 1.0
+
+        def in_main(registry, run_hash, job):
+            return 0.0
+
+        in_main.__module__ = "__main__"
+        for label, fn, name in [
+            ("lambda", lambda r, h, j: 0.0, "<lambda>"),
+            ("closure", _module_objective, "<locals>._module_objective"),
+            ("bound method", _Objectives().method, f"{__name__}:_Objectives.method"),
+            ("partial", functools.partial(_module_objective), "functools.partial("),
+            ("callable instance", _CallableObjective(), "_CallableObjective instance"),
+            ("defined in __main__", in_main, "__main__:"),
+        ]:
+            with self.subTest(label):
+                self.assertIsNone(_callable_path(fn))
+                self.assertIn(name, _callable_name(fn))
+
+    def test_optuna_names_an_unimportable_objective(self):
+        data = OptunaStrategy(objective=lambda r, h, j: 0.0).to_dict()
+        self.assertNotIn("objective", data)
+        self.assertIn("<lambda>", data["objective_not_importable"])
+        self.assertIsNone(OptunaStrategy.from_dict(data).objective)
+
+    def test_optuna_saves_an_importable_objective(self):
+        data = OptunaStrategy(objective=_module_objective).to_dict()
+        self.assertEqual(data["objective"], f"{__name__}:_module_objective")
 
 
 class TestYamlRoundTrip(unittest.TestCase):
@@ -558,89 +648,535 @@ class TestRunAdaptiveSweepValidation(unittest.TestCase):
         self.assertIn("requires OptunaStrategy", str(ctx.exception))
 
 
-class TestCreateSingleJob(unittest.TestCase):
-    """Tests for _create_single_job helper."""
+def _cli_result(exit_code=0, stderr=""):
+    from joshpy.cli import CLIResult
 
-    def test_creates_job_with_config_params(self):
-        """Should create ExpandedJob with config parameters."""
-        from joshpy.strategies import _create_single_job
-        from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
-        from pathlib import Path
+    return CLIResult(exit_code=exit_code, stdout="", stderr=stderr, command=[])
+
+
+class _AdaptiveContextCase(unittest.TestCase):
+    """Fixture: a tiny model, an in-memory registry and a fake CLI."""
+
+    def setUp(self):
         import tempfile
-        import os
+        from unittest.mock import MagicMock
 
-        # Create temp josh file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".josh", delete=False) as f:
-            f.write("start simulation Main\nend simulation\n")
-            josh_path = Path(f.name)
+        from joshpy.registry import RunRegistry
 
+        self.tmp = Path(tempfile.mkdtemp())
+        self.josh_path = self.tmp / "model.josh"
+        self.josh_path.write_text("start simulation Main\nend simulation\n")
+        self.registry = RunRegistry(":memory:")
+        self.cli = MagicMock()
+        self.cli.run.return_value = _cli_result()
+        self.contexts = []
+
+    def tearDown(self):
+        import shutil
+
+        for ctx in self.contexts:
+            ctx.cleanup()
+        self.registry.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def make_config(self, **overrides):
+        from joshpy.jobs import JobConfig, SweepConfig
+
+        kwargs = dict(
+            template_string="maxGrowth = {{ x }} meters",
+            source_path=self.josh_path,
+            simulation="Main",
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2, 3])],
+                strategy=OptunaStrategy(n_trials=1, objective="math:sin"),
+            ),
+        )
+        kwargs.update(overrides)
+        return JobConfig(**kwargs)
+
+    def make_context(self, config=None, **overrides):
+        from joshpy.strategies import AdaptiveContext
+
+        config = config or self.make_config()
+        session_id = self.registry.create_session(config=config)
+        kwargs = dict(
+            cli=self.cli,
+            config=config,
+            registry=self.registry,
+            session_id=session_id,
+            quiet=True,
+            stop_on_failure=False,
+        )
+        kwargs.update(overrides)
+        ctx = AdaptiveContext(**kwargs)
+        self.contexts.append(ctx)
+        return ctx
+
+    def patch_loading(self, return_value=1, side_effect=None):
+        from unittest.mock import patch
+
+        patcher = patch(
+            "joshpy.sweep.load_job_results",
+            return_value=return_value,
+            side_effect=side_effect,
+        )
+        mock = patcher.start()
+        self.addCleanup(patcher.stop)
+        return mock
+
+
+class TestAdaptiveContextExpansion(_AdaptiveContextCase):
+    """evaluate() expands rows exactly like a batch sweep."""
+
+    def test_expands_config_params(self):
+        self.patch_loading()
+        config = self.make_config(replicates=3)
+        batch = self.make_context(config).evaluate([{"x": 42}])
+
+        job = batch.jobs[0]
+        self.assertEqual(job.parameters, {"x": 42})
+        self.assertEqual(job.simulation, "Main")
+        self.assertEqual(job.replicates, 3)
+        self.assertIn("maxGrowth = 42 meters", job.config_content)
+        self.assertEqual(job.custom_tags["x"], "42")
+        self.assertTrue(job.config_path.exists())
+
+    def test_expands_file_params(self):
+        from joshpy.jobs import SweepConfig
+
+        self.patch_loading()
+        data_path = self.tmp / "climate_a.jshd"
+        data_path.write_text("test data")
+        config = self.make_config(
+            template_string="# config",
+            sweep=SweepConfig(
+                file_parameters=[FileSweepParameter(name="climate", paths=[str(data_path)])],
+                strategy=OptunaStrategy(n_trials=1, objective="math:sin"),
+            ),
+        )
+        batch = self.make_context(config).evaluate(
+            [{"climate": {"path": data_path, "label": data_path.stem}}]
+        )
+
+        job = batch.jobs[0]
+        self.assertEqual(job.file_mappings["climate"], data_path)
+        self.assertEqual(job.custom_tags["climate"], data_path.stem)
+
+    def test_run_hash_matches_batch_expansion(self):
+        """Adaptive and batch sweeps hash the same spec identically (seed included)."""
+        from joshpy.jobs import JobExpander, SweepConfig
+
+        self.patch_loading()
+        config = self.make_config(seed=7)
+        batch = self.make_context(config).evaluate([{"x": 2}])
+
+        batch_config = self.make_config(
+            seed=7,
+            config_name="sweep_config",
+            sweep=SweepConfig(config_parameters=[ConfigSweepParameter(name="x", values=[2])]),
+        )
+        job_set = JobExpander().expand(batch_config)
         try:
+            self.assertEqual(batch.jobs[0].run_hash, job_set.jobs[0].run_hash)
+        finally:
+            job_set.cleanup()
+
+    def test_seed_changes_run_hash(self):
+        self.patch_loading()
+        a = self.make_context(self.make_config(seed=1)).evaluate([{"x": 2}])
+        b = self.make_context(self.make_config(seed=2)).evaluate([{"x": 2}])
+        self.assertNotEqual(a.jobs[0].run_hash, b.jobs[0].run_hash)
+
+    def test_config_name_defaults_to_template_stem(self):
+        self.patch_loading()
+        template = self.tmp / "adaptive_config.jshc.j2"
+        template.write_text("maxGrowth = {{ x }} meters")
+        config = self.make_config(template_string=None, template_path=template)
+        batch = self.make_context(config).evaluate([{"x": 1}])
+        self.assertEqual(batch.jobs[0].config_name, "adaptive_config.jshc")
+
+    def test_explicit_config_name_wins(self):
+        self.patch_loading()
+        template = self.tmp / "adaptive_config.jshc.j2"
+        template.write_text("maxGrowth = {{ x }} meters")
+        config = self.make_config(
+            template_string=None, template_path=template, config_name="forevertree"
+        )
+        batch = self.make_context(config).evaluate([{"x": 1}])
+        self.assertEqual(batch.jobs[0].config_name, "forevertree.jshc")
+
+    def test_jobs_get_sweep_labels(self):
+        self.patch_loading()
+        batch = self.make_context(self.make_config(label="exp")).evaluate([{"x": 1}])
+        job = batch.jobs[0]
+        self.assertEqual(job.custom_tags["label"], f"exp_{job.run_hash}")
+
+    def test_batches_share_one_source_path(self):
+        self.patch_loading()
+        ctx = self.make_context()
+        first = ctx.evaluate([{"x": 1}])
+        second = ctx.evaluate([{"x": 2}])
+        self.assertEqual(first.jobs[0].source_path, second.jobs[0].source_path)
+        self.assertEqual(len(ctx.job_set()), 2)
+        self.assertEqual(ctx.job_set().temp_dir, ctx.work_dir)
+
+
+class TestAdaptiveContextEvaluate(_AdaptiveContextCase):
+    """evaluate() registers, runs, loads and scores each batch."""
+
+    def test_registers_each_job_with_attributes(self):
+        self.patch_loading()
+        batch = self.make_context().evaluate(
+            [{"x": 1}, {"x": 2}], attributes={"generation": 0}
+        )
+        for run_hash in batch.run_hashes:
+            self.assertIsNotNone(self.registry.get_config_by_hash(run_hash))
+            self.assertEqual(self.registry.get_attributes(run_hash)["generation"], 0)
+
+    def test_values_follow_row_order(self):
+        self.patch_loading()
+        batch = self.make_context().evaluate(
+            [{"x": 3}, {"x": 1}, {"x": 2}],
+            score=lambda registry, run_hash, job: job.parameters["x"] * 10,
+        )
+        self.assertEqual(batch.values, [30, 10, 20])
+        self.assertEqual(batch.failures, [])
+
+    def test_duplicate_rows_run_once(self):
+        self.patch_loading()
+        batch = self.make_context().evaluate([{"x": 1}, {"x": 1}, {"x": 2}])
+        self.assertEqual(self.cli.run.call_count, 2)
+        self.assertEqual(len(batch), 3)
+        self.assertEqual(batch.jobs[0].run_hash, batch.jobs[1].run_hash)
+
+    def test_records_runs_and_counts(self):
+        self.patch_loading()
+        ctx = self.make_context()
+        batch = ctx.evaluate([{"x": 1}, {"x": 2}])
+        self.assertEqual(ctx.succeeded, 2)
+        self.assertEqual(set(batch.run_ids), set(batch.run_hashes))
+        self.assertEqual(ctx.run_ids, batch.run_ids)
+        for run_hash in batch.run_hashes:
+            self.assertEqual(len(self.registry.get_runs_for_hash(run_hash)), 1)
+
+    def _fail_when_x_is(self, value):
+        def run(run_config, **kwargs):
+            failing = run_config.custom_tags.get("x") == str(value)
+            return _cli_result(exit_code=1 if failing else 0, stderr="boom" if failing else "")
+
+        self.cli.run.side_effect = run
+
+    def test_failed_run_is_reported_not_scored(self):
+        load = self.patch_loading()
+        self._fail_when_x_is(2)
+        ctx = self.make_context()
+        batch = ctx.evaluate(
+            [{"x": 1}, {"x": 2}], score=lambda registry, run_hash, job: 1.0
+        )
+        self.assertEqual(batch.values, [1.0, None])
+        self.assertEqual(batch.failures, [1])
+        self.assertEqual((ctx.succeeded, ctx.failed), (1, 1))
+        self.assertEqual(load.call_count, 1)
+
+    def test_stop_on_failure_raises_after_batch(self):
+        from joshpy.strategies import SweepExecutionError
+
+        load = self.patch_loading()
+        self._fail_when_x_is(2)
+        ctx = self.make_context(stop_on_failure=True)
+        ctx.evaluate([{"x": 3}])  # one earlier evaluation, for global numbering
+
+        with self.assertRaises(SweepExecutionError) as raised:
+            ctx.evaluate([{"x": 1}, {"x": 2}, {"x": 4}])
+
+        self.assertEqual(self.cli.run.call_count, 4)  # the whole batch ran
+        self.assertEqual(load.call_count, 3)  # successes were still loaded
+        self.assertEqual(raised.exception.trial_num, 2)
+        self.assertEqual(raised.exception.succeeded_before, 2)
+
+    def test_loading_error_is_reported(self):
+        self.patch_loading(side_effect=RuntimeError("no csv"))
+        batch = self.make_context().evaluate(
+            [{"x": 1}], score=lambda registry, run_hash, job: 1.0
+        )
+        self.assertIsNone(batch.values[0])
+        self.assertIn("no csv", batch.errors[0])
+        self.assertEqual(batch.failures, [0])
+
+    def test_score_error_is_reported(self):
+        self.patch_loading()
+
+        def bad_score(registry, run_hash, job):
+            raise ValueError("bad metric")
+
+        batch = self.make_context().evaluate([{"x": 1}], score=bad_score)
+        self.assertEqual(batch.errors[0], "objective_error: bad metric")
+
+    def test_empty_batch(self):
+        batch = self.make_context().evaluate([])
+        self.assertEqual(len(batch), 0)
+        self.cli.run.assert_not_called()
+
+
+class TestAdaptiveContextResume(_AdaptiveContextCase):
+    """The registry is the run store: completed runs are reused, submitted
+    no-wait jobs reattached, everything else run."""
+
+    def loading_writes_cell_data(self, fail_first=0):
+        """Patch loading with an idempotent fake that writes one row per replicate."""
+        calls = {"n": 0}
+
+        def load(cli, job, registry, export_paths, *, run_id, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= fail_first:
+                raise RuntimeError("csv not there yet")
+            loaded = registry.loaded_replicates(job.run_hash)
+            rows = 0
+            for rep in range(job.replicates):
+                if rep not in loaded:
+                    registry.conn.execute(
+                        "INSERT INTO cell_data (run_id, run_hash, step, replicate) "
+                        "VALUES (?, ?, 0, ?)",
+                        [run_id, job.run_hash, rep],
+                    )
+                    rows += 1
+            return rows
+
+        return self.patch_loading(side_effect=load)
+
+    @staticmethod
+    def score(registry, run_hash, job):
+        return job.parameters["x"] * 10
+
+    def test_completed_run_is_reused(self):
+        self.loading_writes_cell_data()
+        ctx = self.make_context()
+        first = ctx.evaluate([{"x": 1}], score=self.score)
+        second = ctx.evaluate([{"x": 1}, {"x": 2}], score=self.score)
+
+        self.assertEqual(first.sources, ["ran"])
+        self.assertEqual(second.sources, ["reused", "ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+        self.assertEqual(second.values, [10, 20])
+        self.assertEqual(second.rows_loaded, [0, 1])
+        self.assertEqual(second.run_ids[first.run_hashes[0]], first.run_ids[first.run_hashes[0]])
+
+    def test_reused_after_restart_in_new_session(self):
+        self.loading_writes_cell_data()
+        self.make_context().evaluate([{"x": 1}])
+        batch = self.make_context().evaluate([{"x": 1}], score=self.score)
+        self.assertEqual(batch.sources, ["reused"])
+        self.assertEqual(self.cli.run.call_count, 1)
+        self.assertEqual(batch.values, [10])
+
+    def test_completed_but_unloaded_run_is_loaded_not_rerun(self):
+        self.loading_writes_cell_data(fail_first=1)
+        ctx = self.make_context()
+        first = ctx.evaluate([{"x": 1}], score=self.score)
+        self.assertIn(0, first.errors)  # loading failed the first time
+
+        second = ctx.evaluate([{"x": 1}], score=self.score)
+        self.assertEqual(second.sources, ["reused"])
+        self.assertEqual(self.cli.run.call_count, 1)
+        self.assertEqual(second.values, [10])
+
+    def test_run_with_fewer_replicates_is_rerun_without_reloading_it(self):
+        load = self.loading_writes_cell_data()
+        first = self.make_context().evaluate([{"x": 1}])
+        old_run_id = first.run_ids[first.run_hashes[0]]
+
+        more = self.make_context(self.make_config(replicates=3)).evaluate([{"x": 1}])
+        self.assertEqual(more.run_hashes, first.run_hashes)  # replicates aren't hashed
+        self.assertEqual(more.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+        # The first run is loaded once, after it ran: no attempt to load the
+        # replicates it never wrote.
+        loaded_from = [call.kwargs["run_id"] for call in load.call_args_list]
+        self.assertEqual(loaded_from.count(old_run_id), 1)
+        self.assertEqual(self.registry.loaded_replicates(more.run_hashes[0]), {0, 1, 2})
+        kept = self.registry.conn.execute(
+            "SELECT run_id FROM cell_data WHERE replicate = 0"
+        ).fetchall()
+        self.assertEqual(kept, [(old_run_id,)])
+
+    def test_failed_run_is_rerun(self):
+        self.loading_writes_cell_data()
+        self.cli.run.side_effect = [_cli_result(exit_code=1, stderr="boom"), _cli_result()]
+        ctx = self.make_context()
+        ctx.evaluate([{"x": 1}])
+        batch = ctx.evaluate([{"x": 1}])
+        self.assertEqual(batch.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+
+    def test_bad_run_is_rerun(self):
+        self.loading_writes_cell_data()
+        ctx = self.make_context()
+        first = ctx.evaluate([{"x": 1}])
+        self.registry.mark_run(first.run_hashes[0], "bad", reason="wrong inputs")
+        batch = ctx.evaluate([{"x": 1}])
+        self.assertEqual(batch.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+
+    def test_reuse_can_be_disabled(self):
+        self.loading_writes_cell_data()
+        ctx = self.make_context(reuse_runs=False)
+        ctx.evaluate([{"x": 1}])
+        batch = ctx.evaluate([{"x": 1}])
+        self.assertEqual(batch.sources, ["ran"])
+        self.assertEqual(self.cli.run.call_count, 2)
+
+    def test_submitted_job_is_reattached(self):
+        from unittest.mock import MagicMock
+
+        from joshpy.jobs import JobExpander
+        from joshpy.registry import RegistryCallback
+        from joshpy.sweep import register_job
+
+        self.loading_writes_cell_data()
+        self.cli.inspect_exports.return_value = MagicMock(export_files={}, debug_files={})
+        self.cli.poll_batch.return_value = _cli_result()
+        ctx = self.make_context(batch_remote=True, target="gke-test", poll_interval=0)
+
+        # A no-wait dispatch from an earlier (crashed) process.
+        job = JobExpander().expand(
+            ctx._config_for_expansion(), output_dir=ctx.work_dir, combinations=[{"x": 1}]
+        ).jobs[0]
+        register_job(self.registry, ctx.session_id, job)
+        submitted_run = RegistryCallback(self.registry, ctx.session_id).record_dispatch(
+            job, batch_job_id="job-9", target="gke-test"
+        )
+
+        batch = ctx.evaluate([{"x": 1}], score=self.score)
+
+        self.assertEqual(batch.sources, ["reattached"])
+        self.assertEqual(batch.values, [10])
+        self.cli.batch_remote.assert_not_called()
+        self.cli.stage_to_minio.assert_not_called()
+        self.assertEqual(self.cli.poll_batch.call_args.args[0].job_id, "job-9")
+        run = self.registry.get_run(submitted_run)
+        self.assertEqual(run.exit_code, 0)
+        self.assertIsNotNone(run.completed_at)
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_seeded_optuna_rerun_reuses_completed_trials(self):
+        """A seeded study replays its proposals; completed trials are not rerun."""
+        from joshpy.jobs import JobConfig, SweepConfig
+        from joshpy.strategies import run_adaptive_sweep
+
+        self.loading_writes_cell_data()
+
+        def run(n_trials):
             config = JobConfig(
                 template_string="maxGrowth = {{ x }} meters",
-                source_path=josh_path,
-                simulation="Main",
-                replicates=3,
+                source_path=self.josh_path,
                 sweep=SweepConfig(
-                    config_parameters=[ConfigSweepParameter(name="x", values=[1, 2, 3])],
-                    strategy=OptunaStrategy(n_trials=10, objective="math:sin"),
-                ),
-            )
-
-            params = {"x": 42}
-            job = _create_single_job(config, params, trial_num=5)
-
-            self.assertEqual(job.parameters, {"x": 42})
-            self.assertEqual(job.simulation, "Main")
-            self.assertEqual(job.replicates, 3)
-            self.assertIn("maxGrowth = 42 meters", job.config_content)
-            self.assertIn("x", job.custom_tags)
-            self.assertEqual(job.custom_tags["x"], "42")
-            self.assertIsNotNone(job.run_hash)
-            self.assertTrue(job.config_path.exists())
-        finally:
-            os.unlink(josh_path)
-
-    def test_creates_job_with_file_params(self):
-        """Should create ExpandedJob with file parameters in file_mappings."""
-        from joshpy.strategies import _create_single_job
-        from joshpy.jobs import JobConfig, SweepConfig, FileSweepParameter
-        from pathlib import Path
-        import tempfile
-        import os
-
-        # Create temp josh file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".josh", delete=False) as f:
-            f.write("start simulation Main\nend simulation\n")
-            josh_path = Path(f.name)
-
-        # Create temp data file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jshd", delete=False) as f:
-            f.write("test data")
-            data_path = Path(f.name)
-
-        try:
-            config = JobConfig(
-                template_string="# config",
-                source_path=josh_path,
-                simulation="Main",
-                sweep=SweepConfig(
-                    file_parameters=[
-                        FileSweepParameter(name="climate", paths=[str(data_path)])
+                    config_parameters=[
+                        ConfigSweepParameter(name="x", values=list(range(1, 50)))
                     ],
-                    strategy=OptunaStrategy(n_trials=10, objective="math:sin"),
+                    strategy=OptunaStrategy(n_trials=n_trials, seed=11),
                 ),
             )
+            session_id = self.registry.create_session(config=config)
+            result = run_adaptive_sweep(
+                self.cli, config, registry=self.registry, session_id=session_id,
+                objective=self.score, quiet=True,
+            )
+            result.job_set.cleanup()
+            return result
 
-            params = {"climate": {"path": data_path, "label": data_path.stem}}
-            job = _create_single_job(config, params, trial_num=0)
+        interrupted = run(4)
+        runs_before = self.cli.run.call_count
+        resumed = run(6)
 
-            self.assertIn("climate", job.file_mappings)
-            self.assertEqual(job.file_mappings["climate"], data_path)
-            self.assertIn("climate", job.custom_tags)
-            self.assertEqual(job.custom_tags["climate"], data_path.stem)
+        first_params = [t.params for t in interrupted.study.trials]
+        self.assertEqual([t.params for t in resumed.study.trials[:4]], first_params)
+        new_hashes = {
+            job.run_hash for job, _ in resumed.job_results[4:]
+        } - {job.run_hash for job, _ in interrupted.job_results}
+        self.assertEqual(self.cli.run.call_count - runs_before, len(new_hashes))
+
+
+class _RecordingStrategy(SweepStrategy):
+    """Minimal adaptive strategy: evaluates fixed batches, returns the context."""
+
+    def __init__(self, batches):
+        self.batches = batches
+
+    @property
+    def is_adaptive(self):
+        return True
+
+    def expand(self, config_params, file_params, compound_params=None):
+        raise RuntimeError("adaptive")
+
+    def run_adaptive(self, ctx):
+        from joshpy.jobs import AdaptiveSweepResult
+
+        for batch in self.batches:
+            ctx.evaluate(batch)
+        return AdaptiveSweepResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+        )
+
+    def to_dict(self):
+        return {"type": "recording"}
+
+    @classmethod
+    def from_dict(cls, data):
+        return cls([])
+
+
+class TestRunAdaptiveSweepDispatch(_AdaptiveContextCase):
+    """run_adaptive_sweep hands any adaptive strategy a context."""
+
+    def test_non_optuna_strategy_runs_its_own_loop(self):
+        from joshpy.jobs import JobConfig, SweepConfig
+        from joshpy.strategies import run_adaptive_sweep
+
+        self.patch_loading()
+        config = JobConfig(
+            template_string="maxGrowth = {{ x }} meters",
+            source_path=self.josh_path,
+            sweep=SweepConfig(strategy=_RecordingStrategy([[{"x": 1}, {"x": 2}], [{"x": 3}]])),
+        )
+        session_id = self.registry.create_session(config=config)
+        result = run_adaptive_sweep(
+            self.cli, config, registry=self.registry, session_id=session_id, quiet=True
+        )
+        try:
+            self.assertEqual(result.succeeded, 3)
+            self.assertEqual(len(result.job_set), 3)
+            self.assertEqual(self.registry.get_session(session_id).status, "completed")
         finally:
-            os.unlink(josh_path)
-            os.unlink(data_path)
+            result.job_set.cleanup()
+
+    def test_strategy_error_marks_session_failed(self):
+        from joshpy.jobs import JobConfig, SweepConfig
+        from joshpy.strategies import run_adaptive_sweep
+
+        class Exploding(_RecordingStrategy):
+            def run_adaptive(self, ctx):
+                raise RuntimeError("strategy blew up")
+
+        config = JobConfig(
+            template_string="# config",
+            source_path=self.josh_path,
+            sweep=SweepConfig(strategy=Exploding([])),
+        )
+        session_id = self.registry.create_session(config=config)
+        with self.assertRaises(RuntimeError):
+            run_adaptive_sweep(
+                self.cli, config, registry=self.registry, session_id=session_id, quiet=True
+            )
+        self.assertEqual(self.registry.get_session(session_id).status, "failed")
+
+    def test_non_adaptive_strategy_has_no_loop(self):
+        with self.assertRaises(NotImplementedError):
+            CartesianStrategy().run_adaptive(None)
 
 
 class TestSweepExecutionError(unittest.TestCase):
@@ -961,12 +1497,12 @@ class TestStopOnFailureBehavior(unittest.TestCase):
             )
 
             # Mock CLI to fail
+            from joshpy.cli import CLIResult
+
             mock_cli = MagicMock()
-            mock_result = MagicMock()
-            mock_result.success = False
-            mock_result.exit_code = 1
-            mock_result.stderr = "Test error message"
-            mock_cli.run.return_value = mock_result
+            mock_cli.run.return_value = CLIResult(
+                exit_code=1, stdout="", stderr="Test error message", command=[]
+            )
             mock_cli.inspect_exports.return_value = MagicMock(patch=None)
 
             # Mock registry
@@ -1018,12 +1554,12 @@ class TestStopOnFailureBehavior(unittest.TestCase):
             )
 
             # Mock CLI to fail
+            from joshpy.cli import CLIResult
+
             mock_cli = MagicMock()
-            mock_result = MagicMock()
-            mock_result.success = False
-            mock_result.exit_code = 1
-            mock_result.stderr = "Test error"
-            mock_cli.run.return_value = mock_result
+            mock_cli.run.return_value = CLIResult(
+                exit_code=1, stdout="", stderr="Test error", command=[]
+            )
             mock_cli.inspect_exports.return_value = MagicMock(patch=None)
 
             # Mock registry - need to return proper values for _store_study_outcomes

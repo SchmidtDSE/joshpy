@@ -29,9 +29,17 @@ project:
     - tutorials/multi-session-sweeps.qmd    # ProjectCatalog for sweeps
     - tutorials/remote-execution.qmd     # Josh Cloud execution
     - tutorials/low-level-components.qmd # Advanced: manual component usage
+    - inference/index.qmd                # Inference landing page (no code)
+    - inference/forevertree.qmd          # Case study; creates forevertree.duckdb (needs sbi; frozen)
+    - inference/smc-abc.qmd              # SMC-ABC; reuses forevertree.duckdb (needs sbi; frozen)
+    - inference/fire-model.qmd           # Births and deaths; creates forevertree_fire.duckdb (needs sbi; frozen)
+    - inference/rejection-filter.qmd     # What would it take; reuses forevertree_fire.duckdb (needs sbi; frozen)
+    - inference/posterior-property.qmd   # Posterior probability of the target; reuses forevertree_fire.duckdb (needs sbi; frozen)
+    - inference/local-sensitivity.qmd    # One input at a time; creates forevertree_sa.duckdb (frozen)
     - templating.qmd
     - architecture.qmd
     - best-practices.qmd
+    - references.qmd                     # Bibliography, by tutorial (references.bib)
     - reference/
 
 website:
@@ -94,14 +102,32 @@ website:
             href: tutorials/switching-versions.qmd
           - text: "Remote Execution"
             href: tutorials/remote-execution.qmd
+      - text: "Inference"
+        menu:
+          - text: "Overview"
+            href: inference/index.qmd
+          - text: "ForeverTree Case Study"
+            href: inference/forevertree.qmd
+          - text: "SMC-ABC on a Simulated Survey"
+            href: inference/smc-abc.qmd
+          - text: "A Model with Births and Deaths"
+            href: inference/fire-model.qmd
+          - text: "What Would It Take?"
+            href: inference/rejection-filter.qmd
+          - text: "Posterior Probability of the Target"
+            href: inference/posterior-property.qmd
+          - text: "One Input at a Time"
+            href: inference/local-sensitivity.qmd
       - text: "Templating"
         href: templating.qmd
       - text: "Architecture"
         href: architecture.qmd
       - text: "Best Practices"
         href: best-practices.qmd
-      - text: "Reference"
+      - text: "API Reference"
         href: reference/index.qmd
+      - text: "References"
+        href: references.qmd
     right:
       - icon: github
         href: https://github.com/SchmidtDSE/joshpy
@@ -150,6 +176,16 @@ website:
             - tutorials/switching-versions.qmd
             - tutorials/remote-execution.qmd
     
+    - title: "Inference"
+      contents:
+        - inference/index.qmd
+        - inference/forevertree.qmd
+        - inference/smc-abc.qmd
+        - inference/fire-model.qmd
+        - inference/rejection-filter.qmd
+        - inference/posterior-property.qmd
+        - inference/local-sensitivity.qmd
+
     - title: "Templating"
       contents:
         - templating.qmd
@@ -161,6 +197,10 @@ website:
     - title: "Best Practices"
       contents:
         - best-practices.qmd
+
+    - title: "References"
+      contents:
+        - references.qmd
     
     - title: "API Reference"
       contents:
@@ -200,10 +240,23 @@ website:
           contents:
             - reference/strategies.SweepStrategy.qmd
             - reference/strategies.CartesianStrategy.qmd
+            - reference/strategies.ParameterSetsStrategy.qmd
             - reference/strategies.OptunaStrategy.qmd
+            - reference/strategies.SbiStrategy.qmd
+            - reference/strategies.SbiResult.qmd
             - reference/strategies.strategy_from_dict.qmd
             - reference/strategies.run_adaptive_sweep.qmd
+            - reference/strategies.AdaptiveContext.qmd
+            - reference/strategies.BatchResult.qmd
             - reference/strategies.sample_params_from_trial.qmd
+        - section: "Inference (experimental)"
+          contents:
+            - reference/inference.KnownTruthStudy.qmd
+            - reference/inference.LoadedStudy.qmd
+            - reference/inference.PropertyFilter.qmd
+            - reference/inference.prior_interval.qmd
+            - reference/inference.weighted_quantile.qmd
+            - reference/inference.effective_sample_size.qmd
         - section: "Registry"
           contents:
             - reference/registry.RunRegistry.qmd
@@ -257,6 +310,10 @@ format:
 execute:
   freeze: true
 
+# Site-wide bibliography: cite with [@key] in any page (see references.qmd)
+bibliography: references.bib
+link-citations: true
+
 # Quartodoc API reference generation
 quartodoc:
   package: joshpy
@@ -307,10 +364,25 @@ quartodoc:
       contents:
         - strategies.SweepStrategy
         - strategies.CartesianStrategy
+        - strategies.ParameterSetsStrategy
         - strategies.OptunaStrategy
+        - strategies.SbiStrategy
+        - strategies.SbiResult
         - strategies.strategy_from_dict
         - strategies.run_adaptive_sweep
+        - strategies.AdaptiveContext
+        - strategies.BatchResult
         - strategies.sample_params_from_trial
+    
+    - title: Inference Module (experimental)
+      desc: Known-truth studies for testing an inference setup on simulated data, and rejection filters on a model property
+      contents:
+        - inference.KnownTruthStudy
+        - inference.LoadedStudy
+        - inference.PropertyFilter
+        - inference.prior_interval
+        - inference.weighted_quantile
+        - inference.effective_sample_size
     
     - title: Registry Module
       desc: DuckDB-backed experiment tracking

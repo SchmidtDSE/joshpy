@@ -2,10 +2,17 @@
 
 This module defines the strategy pattern for parameter sweep expansion:
 - `CartesianStrategy`: Full cartesian product of all parameters (default)
+- `ParameterSetsStrategy`: Exactly the parameter sets listed, as one batch
 - `OptunaStrategy`: Bayesian optimization using Optuna (requires [adaptive] extra)
+- `SbiStrategy`: Approximate Bayesian computation with sbi (requires [sbi] extra)
 
 The strategy pattern enables different approaches to parameter space exploration
 without changing the SweepConfig interface.
+
+Non-adaptive strategies yield every combination from `expand()`. Adaptive
+strategies implement `run_adaptive(ctx)`: they own their search loop and call
+`ctx.evaluate(rows)` on an `AdaptiveContext`, which expands, registers, runs,
+loads and scores each batch of proposed parameter sets.
 
 Example usage:
     from joshpy.strategies import CartesianStrategy, OptunaStrategy
@@ -34,12 +41,17 @@ Example usage:
 
 from __future__ import annotations
 
+import functools
 import importlib
 import itertools
 import re
+import shutil
+import sys
+import tempfile
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +61,7 @@ if TYPE_CHECKING:
         ConfigSweepParameter,
         ExpandedJob,
         FileSweepParameter,
+        JobSet,
     )
     from joshpy.registry import RunRegistry
 
@@ -334,9 +347,33 @@ class SweepStrategy(ABC):
 
     Subclasses must implement:
     - `is_adaptive` property
-    - `expand()` method (for non-adaptive) or indicate adaptive behavior
+    - `expand()` method (for non-adaptive) or `run_adaptive()` (for adaptive)
     - `to_dict()` and `from_dict()` for serialization
     """
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> Any:
+        """Run this strategy's search loop (adaptive strategies only).
+
+        The strategy owns its loop and its own state. It proposes parameter
+        sets and calls ``ctx.evaluate(params, score=...)`` for each batch;
+        joshpy expands, registers, runs, loads and scores them. Called by
+        :func:`run_adaptive_sweep`, which manages session status.
+
+        Args:
+            ctx: The AdaptiveContext for this run.
+
+        Returns:
+            A result object for the run. It should expose ``job_results``,
+            ``succeeded``, ``failed``, ``run_ids`` and ``job_set`` (see
+            :class:`~joshpy.jobs.AdaptiveSweepResult`) so SweepManager can
+            load results after the run.
+
+        Raises:
+            NotImplementedError: For non-adaptive strategies.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} is not adaptive; expand() it and use run_sweep()."
+        )
 
     @property
     @abstractmethod
@@ -566,7 +603,8 @@ def _load_objective_from_path(path: str) -> ObjectiveFn:
     """Load function from 'module.submodule:function_name' format.
 
     Args:
-        path: Import path in "module:function" format.
+        path: Import path in "module:function" format, or "module:Class.attribute"
+            for a function on a module-level class (e.g. a staticmethod).
 
     Returns:
         The loaded callable.
@@ -583,11 +621,105 @@ def _load_objective_from_path(path: str) -> ObjectiveFn:
     if ":" not in path:
         raise ValueError(f"Invalid objective path '{path}'. Expected 'module:function' format.")
     module_path, func_name = path.rsplit(":", 1)
-    module = importlib.import_module(module_path)
-    fn = getattr(module, func_name)
+    fn: Any = importlib.import_module(module_path)
+    for attribute in func_name.split("."):
+        fn = getattr(fn, attribute)
     if not callable(fn):
         raise ValueError(f"{path} is not callable")
-    return fn  # type: ignore[return-value]
+    return fn  # type: ignore[no-any-return]
+
+
+def _callable_path(fn: Any) -> str | None:
+    """The "module:qualname" path that loads *fn* back, or None if there is none.
+
+    A path is returned only when importing it would give back *fn* itself: a
+    module-level function, or a function on a module-level class. Lambdas,
+    nested functions and closures, bound methods, partials and callable
+    instances have no such path, and neither does anything defined in
+    ``__main__`` (a script, notebook or docs page), which another process
+    cannot import.
+    """
+    module_name = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if not module_name or not qualname or module_name == "__main__" or "<" in qualname:
+        return None
+    target: Any = sys.modules.get(module_name)
+    try:
+        for attribute in qualname.split("."):
+            target = getattr(target, attribute)
+        same = target is fn or bool(target == fn)  # == matches classmethods, rebound each access
+    except Exception:
+        return None
+    return f"{module_name}:{qualname}" if same else None
+
+
+def _callable_name(fn: Any) -> str:
+    """A readable "module:qualname" name for *fn*, for provenance only."""
+    if isinstance(fn, functools.partial):
+        return f"functools.partial({_callable_name(fn.func)})"
+    module_name = getattr(fn, "__module__", None) or type(fn).__module__
+    qualname = getattr(fn, "__qualname__", None) or f"{type(fn).__qualname__} instance"
+    return f"{module_name}:{qualname}"
+
+
+@register_strategy("parameter_sets")
+@dataclass
+class ParameterSetsStrategy(SweepStrategy):
+    """Run exactly the parameter sets listed, as one batch.
+
+    A sweep crosses its parameters' values; this runs the sets given, as
+    :meth:`AdaptiveContext.evaluate` runs one batch. Runs the registry already
+    holds with every replicate are reused, the rest run together (on a batch
+    target with ``batch_no_wait=True``: dispatched together, then polled), and
+    every run is loaded. Each run's parameters are recorded as given, so a set
+    taken from an earlier search reproduces that search's ``run_hash``.
+
+    Attributes:
+        sets: One ``{parameter: value}`` dict per run.
+
+    Example:
+        SweepConfig(strategy=ParameterSetsStrategy(sets=[{"a": 1.0, "b": 2.0}, {"a": 1.5, "b": 2.0}]))
+    """
+
+    sets: list[dict[str, Any]]
+
+    def __post_init__(self) -> None:
+        if not self.sets:
+            raise ValueError("sets must list at least one parameter set")
+
+    @property
+    def is_adaptive(self) -> bool:
+        return True  # runs through AdaptiveContext.evaluate, which reuses and batches runs
+
+    def expand(
+        self,
+        config_params: list[ConfigSweepParameter],
+        file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        raise NotImplementedError(
+            "ParameterSetsStrategy runs as one batch through SweepManager.run()"
+        )
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> Any:
+        """Evaluate every set as one batch."""
+        from joshpy.jobs import AdaptiveSweepResult
+
+        ctx.evaluate(self.sets)
+        return AdaptiveSweepResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": "parameter_sets", "sets": [dict(row) for row in self.sets]}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ParameterSetsStrategy:
+        return cls(sets=[dict(row) for row in data["sets"]])
 
 
 @register_strategy("optuna")
@@ -608,6 +740,9 @@ class OptunaStrategy(SweepStrategy):
         direction: Optimization direction ("minimize" or "maximize").
         sampler: Sampling algorithm ("tpe", "gp", "cmaes", "random").
         objective: Objective function (callable or "module:function" path).
+        seed: Optional sampler seed. A seeded study proposes the same trials
+            given the same results, so rerunning an interrupted sweep against
+            the same registry reuses its completed runs.
 
     Examples:
         >>> # Define objective function
@@ -633,6 +768,7 @@ class OptunaStrategy(SweepStrategy):
     direction: str = "minimize"  # "minimize" or "maximize"
     sampler: str = "tpe"  # "tpe", "gp", "cmaes", "random"
     objective: ObjectiveFn | str | None = None
+    seed: int | None = None  # sampler seed; with stored results, replays reach the same state
 
     # Resolved objective (populated during validation or get_objective)
     _objective_fn: ObjectiveFn | None = field(default=None, repr=False, compare=False)
@@ -729,33 +865,38 @@ class OptunaStrategy(SweepStrategy):
         _check_optuna()
         import optuna
 
+        seed = self.seed
         if self.sampler == "tpe":
-            return optuna.samplers.TPESampler()
+            return optuna.samplers.TPESampler(seed=seed)
         elif self.sampler == "gp":
             # GP sampler requires optuna-integration or specific setup
             # Fall back to TPE with a warning
             try:
                 from optuna_integration import BoTorchSampler
 
-                return BoTorchSampler()
+                return BoTorchSampler(seed=seed)
             except ImportError:
                 import warnings
 
                 warnings.warn(
                     "GP sampler requires optuna-integration[botorch]. Falling back to TPE."
                 )
-                return optuna.samplers.TPESampler()
+                return optuna.samplers.TPESampler(seed=seed)
         elif self.sampler == "cmaes":
-            return optuna.samplers.CmaEsSampler()
+            return optuna.samplers.CmaEsSampler(seed=seed)
         elif self.sampler == "random":
-            return optuna.samplers.RandomSampler()
+            return optuna.samplers.RandomSampler(seed=seed)
         else:
-            return optuna.samplers.TPESampler()
+            return optuna.samplers.TPESampler(seed=seed)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for serialization.
 
-        Note: Callable objectives cannot be serialized - only string paths.
+        A callable objective is saved as its "module:qualname" path when that
+        path loads it back. Otherwise (a lambda, closure, bound method, or a
+        function defined in ``__main__``) its name is kept under
+        ``objective_not_importable``, for provenance only, and ``from_dict``
+        leaves the objective to be provided at runtime.
         """
         result: dict[str, Any] = {
             "type": "optuna",
@@ -763,15 +904,17 @@ class OptunaStrategy(SweepStrategy):
             "direction": self.direction,
             "sampler": self.sampler,
         }
+        if self.seed is not None:
+            result["seed"] = self.seed
 
-        # Only serialize objective if it's a string path
         if isinstance(self.objective, str):
             result["objective"] = self.objective
         elif self.objective is not None:
-            # Callable - try to get qualified name
-            if hasattr(self.objective, "__module__") and hasattr(self.objective, "__name__"):
-                result["objective"] = f"{self.objective.__module__}:{self.objective.__name__}"
-            # Otherwise skip - user will need to provide at runtime
+            path = _callable_path(self.objective)
+            if path is not None:
+                result["objective"] = path
+            else:
+                result["objective_not_importable"] = _callable_name(self.objective)
 
         return result
 
@@ -783,6 +926,96 @@ class OptunaStrategy(SweepStrategy):
             direction=data.get("direction", "minimize"),
             sampler=data.get("sampler", "tpe"),
             objective=data.get("objective"),
+            seed=data.get("seed"),
+        )
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> Any:
+        """Run the Optuna ask/tell loop, one trial per ``ctx.evaluate`` batch.
+
+        Each trial samples parameters, evaluates them as a batch of one, and
+        reports the objective back to the study. Failed runs, and runs whose
+        results could not be loaded or scored, are reported as ``inf``.
+
+        Args:
+            ctx: The AdaptiveContext for this run.
+
+        Returns:
+            AdaptiveSweepResult with trial outcomes and best params.
+        """
+        from joshpy.jobs import AdaptiveSweepResult
+
+        obj_fn = ctx.objective or self.get_objective()
+        study = self.create_study()
+        sweep = ctx.config.sweep
+        n_trials = self.n_trials
+
+        if not ctx.quiet:
+            print(f"Running adaptive sweep with {n_trials} trials")
+            print(f"  Direction: {self.direction}")
+            print(f"  Sampler: {self.sampler}")
+
+        for trial_num in range(n_trials):
+            trial = study.ask()
+            params = sample_params_from_trial(
+                trial,
+                sweep.config_parameters,
+                sweep.file_parameters,
+                sweep.compound_parameters,
+            )
+
+            if not ctx.quiet:
+                display_params = {
+                    k: v["label"] if isinstance(v, dict) and "label" in v else v
+                    for k, v in params.items()
+                }
+                print(f"[{trial_num + 1}/{n_trials}] Params: {display_params}")
+
+            batch = ctx.evaluate([params], score=obj_fn)
+            job, result = batch.jobs[0], batch.results[0]
+
+            # Set user attrs BEFORE tell() since the trial is finished after tell()
+            trial.set_user_attr("run_hash", job.run_hash)
+
+            if not result.success:
+                trial.set_user_attr("error", f"exit_code={result.exit_code}")
+                study.tell(trial, float("inf"))
+                if not ctx.quiet:
+                    print(f"  [FAIL] exit_code={result.exit_code}")
+                    if result.stderr:
+                        print(f"\n  STDERR:\n{result.stderr}")
+                continue
+
+            if 0 in batch.errors:
+                trial.set_user_attr("error", batch.errors[0])
+                study.tell(trial, float("inf"))
+                continue
+
+            metric = batch.values[0]
+            trial.set_user_attr("metric", metric)
+            trial.set_user_attr("rows_loaded", batch.rows_loaded[0])
+            study.tell(trial, metric)
+
+            if not ctx.quiet:
+                print(f"  [OK] metric={metric:.4f} (rows={batch.rows_loaded[0]})")
+
+        _store_study_outcomes(ctx.registry, ctx.session_id, study)
+
+        if not ctx.quiet:
+            print("\nAdaptive sweep complete:")
+            print(f"  Trials: {n_trials} ({ctx.succeeded} succeeded, {ctx.failed} failed)")
+            if study.best_trial is not None:
+                print(f"  Best value: {study.best_value}")
+                print(f"  Best params: {study.best_params}")
+
+        return AdaptiveSweepResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+            study=study,
+            best_params=study.best_params if study.best_trial else None,
+            best_value=study.best_value if study.best_trial else None,
         )
 
 
@@ -843,6 +1076,1513 @@ def sample_params_from_trial(
     return params
 
 
+# Summary-statistics function for SbiStrategy:
+# (registry, run_hash, job) -> {"summary_name": value, ...}
+SummaryFn = Callable[["RunRegistry", str, "ExpandedJob"], dict[str, float]]
+
+_SBI_METHODS = ("smcabc", "mcabc")
+_SBI_PRIOR_KINDS = ("uniform", "normal")
+_SBI_BATCH_POLICIES = ("exact", "measured")
+# Options that make sbi return something other than the simulated particles
+# (a KDE object, or regression-adjusted parameters that were never run).
+_SBI_UNSUPPORTED_KWARGS = ("kde", "kde_kwargs", "kde_sample_weights", "lra", "lra_with_weights",
+                           "sass", "sass_fraction", "sass_expansion_degree", "return_summary")
+
+
+def _check_sbi() -> None:
+    """Raise ImportError if sbi (and torch) are not available."""
+    try:
+        import sbi  # noqa: F401
+        import torch  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "sbi is required for SbiStrategy. Install with: pip install joshpy[sbi] "
+            "(for CPU-only torch, first: pip install torch "
+            "--index-url https://download.pytorch.org/whl/cpu)"
+        ) from None
+
+
+def _sbi_param_value(value: float) -> float:
+    """Normalize an sbi draw (a float32) to its shortest round-tripping decimal.
+
+    The rendered ``.jshc`` then reads ``1.0372891`` rather than the float64
+    expansion of the float32, and the same draw always renders (and hashes)
+    the same way, which replay-based resume relies on.
+    """
+    import numpy as np
+
+    return float(np.format_float_positional(np.float32(value), unique=True, trim="-"))
+
+
+@functools.lru_cache(maxsize=1)
+def _measured_smcabc() -> type:
+    """sbi's SMCABC under the ``measured`` batch policy (built on first use: sbi is optional).
+
+    Overrides the private ``SMCABC._sample_next_population`` of sbi 0.27
+    (pinned ``<0.28`` for that reason); everything else is sbi's.
+    """
+    import math
+
+    import torch
+    from sbi.inference import SMCABC
+
+    class MeasuredSMCABC(SMCABC):  # type: ignore[misc, valid-type]
+        """SMCABC whose rounds are sized from measured acceptance rates.
+
+        A generation needs ``num_particles`` runs within its tolerance. sbi
+        proposes as many runs as are still missing, which takes many rounds.
+        Here round 1 proposes ``first_round_fraction`` of missing / rate, with
+        rate the previous generation's acceptance rate. Generation 1 has no
+        measured rate (the initial population's share within the new tolerance
+        underestimates it several-fold, since proposals now come from the kept
+        particles), so its round 1 proposes as many as are missing, as sbi does.
+        Later rounds propose ``round_margin`` x missing / this generation's
+        measured rate. No round proposes fewer than sbi would, or more than
+        ``max_batch`` or the remaining budget. Passes beyond those still
+        missing are dropped in proposal order, never by distance, so the
+        population has sbi's distribution. ``generation_log`` records each
+        generation's rounds, simulations, passes and surplus (passes dropped).
+        """
+
+        def __init__(
+            self,
+            *args: Any,
+            first_round_fraction: float,
+            round_margin: float,
+            max_batch: int | None,
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self.first_round_fraction = first_round_fraction
+            self.round_margin = round_margin
+            self.max_batch = max_batch
+            self.generation_log: list[dict[str, int]] = []
+            self._previous_rate: float | None = None  # None until generation 1 is measured
+
+        def _sample_next_population(
+            self,
+            particles: Any,
+            log_weights: Any,
+            distances: Any,
+            epsilon: float,
+            x: Any,
+            num_iid_samples: int,
+            use_last_pop_samples: bool = True,
+        ) -> tuple[Any, Any, Any, Any]:
+            """sbi's _sample_next_population, with rounds sized as the class describes."""
+            num_particles = particles.shape[0]
+            new_particles, new_log_weights, new_distances, new_x = [], [], [], []
+            num_accepted = passes = simulated = rounds = 0
+            while num_accepted < num_particles:
+                missing = num_particles - num_accepted
+                if rounds == 0 and self._previous_rate is None:
+                    wanted = missing  # no rate measured yet: propose as sbi would
+                elif rounds == 0:
+                    wanted = self.first_round_fraction * missing / self._previous_rate
+                else:
+                    wanted = self.round_margin * missing / (max(passes, 1) / simulated)
+                num_batch = max(missing, math.ceil(wanted))
+                if self.max_batch is not None:
+                    num_batch = min(num_batch, self.max_batch)
+                num_batch = min(num_batch, self.num_simulations - self.simulation_counter)
+
+                particle_candidates = self._sample_and_perturb(
+                    particles, torch.exp(log_weights), num_samples=num_batch
+                )
+                candidates_repeated = particle_candidates.repeat_interleave(
+                    num_iid_samples, dim=0
+                )
+                x_candidates = self._simulate_with_budget(candidates_repeated)
+                x_candidates = x_candidates.reshape((num_batch, num_iid_samples, -1))
+                if not self.distance.requires_iid_data:
+                    x_candidates = x_candidates.squeeze(1)
+
+                dists = self.distance(self.x_o, x_candidates)
+                accepted = torch.nonzero(dists <= epsilon).flatten()
+                kept = accepted[:missing]  # the first passes, in proposal order
+                passes += len(accepted)
+                simulated += num_batch
+                rounds += 1
+                if len(kept) > 0:
+                    new_particles.append(particle_candidates[kept])
+                    new_log_weights.append(
+                        self._calculate_new_log_weights(
+                            particle_candidates[kept], particles, log_weights
+                        )
+                    )
+                    new_distances.append(dists[kept])
+                    new_x.append(x_candidates[kept])
+                    num_accepted += len(kept)
+
+                # Out of budget with particles missing: fill up from the previous
+                # population, or return it, exactly as sbi does.
+                if (
+                    self.simulation_counter >= self.num_simulations
+                    and num_accepted < num_particles
+                ):
+                    if use_last_pop_samples:
+                        num_remaining = num_particles - num_accepted
+                        new_particles.append(particles[:num_remaining, :])
+                        new_log_weights = [
+                            self._calculate_new_log_weights(
+                                torch.cat(new_particles), particles, log_weights
+                            )
+                        ]
+                        new_distances.append(distances[:num_remaining])
+                        new_x.append(x[:num_remaining])
+                    else:
+                        new_particles = [particles]
+                        new_log_weights = [log_weights]
+                        new_distances = [distances]
+                        new_x = [x]
+                    break
+
+            self._previous_rate = max(passes, 1) / max(simulated, 1)
+            self.generation_log.append(
+                {
+                    "rounds": rounds,
+                    "simulations": simulated,
+                    "passes": passes,
+                    "surplus": passes - num_accepted,  # num_accepted counts kept passes only
+                }
+            )
+
+            new_particles_t = torch.cat(new_particles)
+            new_log_weights_t = torch.cat(new_log_weights)
+            new_distances_t = torch.cat(new_distances)
+            new_x_t = torch.cat(new_x)
+            new_log_weights_t -= torch.logsumexp(new_log_weights_t, dim=0)
+            sort_idx = torch.argsort(new_distances_t)
+            return (
+                new_particles_t[sort_idx],
+                new_log_weights_t[sort_idx],
+                new_distances_t[sort_idx],
+                new_x_t[sort_idx],
+            )
+
+    return MeasuredSMCABC
+
+
+def _count_generation_simulations(
+    populations: list[dict[str, Any]],
+    call_of: dict[str, int],
+    call_sizes: list[int],
+) -> None:
+    """Add ``simulations``, ``rounds`` and ``carried_over`` to each population, in place.
+
+    sbi simulates generations in order, each over one or more simulator calls,
+    and a generation ends with the call that accepted its last particle. So a
+    generation's calls run from the call after the previous generation's last
+    one to the latest call among its own new particles; the final generation
+    also owns any calls after that (a budget that ran out mid-generation).
+    Particles from earlier calls were carried over from the previous population.
+    """
+    boundary = -1  # last simulator call of the previous generation
+    for i, pop in enumerate(populations):
+        calls = [call_of.get(h, -1) if h is not None else -1 for h in pop["run_hashes"]]
+        new = [c for c in calls if c > boundary]
+        last = len(call_sizes) - 1 if i == len(populations) - 1 else max(new, default=boundary)
+        pop["simulations"] = sum(call_sizes[boundary + 1 : last + 1])
+        pop["rounds"] = last - boundary  # simulator calls: one batch of proposals each
+        pop["carried_over"] = len(calls) - len(new)
+        boundary = last
+
+
+@dataclass
+class SbiResult:
+    """Results from an SbiStrategy run.
+
+    Attributes:
+        job_results: (ExpandedJob, CLIResult) for every simulation, in order.
+        succeeded: Number of simulations that ran successfully.
+        failed: Number of simulations that failed.
+        run_ids: run_hash -> run_id of its latest execution.
+        job_set: The evaluated jobs (one per run_hash), owning the work dir.
+        method: The sbi method that ran ("smcabc" or "mcabc").
+        param_names: Parameter order of ``samples`` columns.
+        samples: Accepted parameter sets of the final population, a
+            ``torch.Tensor`` of shape ``[N, len(param_names)]``.
+        weights: Normalized importance weights of ``samples`` (uniform for
+            MCABC), a ``torch.Tensor`` of shape ``[N]``.
+        run_hashes: The run each sample came from (registry join key).
+        populations: Per generation: ``generation``, ``epsilon`` (the target
+            tolerance), ``run_hashes``, ``weights``, ``distances``,
+            ``simulations`` (simulator evaluations the generation used, reused
+            runs included), ``rounds`` (the batches they ran in), ``surplus``
+            (passes dropped because a round accepted more than were missing,
+            under the ``"measured"`` batch policy) and ``carried_over``
+            (particles taken from the previous population: sbi fills the last
+            population this way when the budget runs out mid-generation, so
+            their distances may exceed ``epsilon``). One population for MCABC.
+        observed: The observed summary statistics.
+        summary: sbi's raw ``return_summary`` dictionary.
+        load_errors: run_hash -> message, for runs that succeeded but whose
+            results could not be loaded. Their summaries were NaN, so sbi
+            never accepted them; they are not counted in ``failed``.
+
+    Examples:
+        >>> result = manager.run()
+        >>> df = result.to_dataframe()   # one row per accepted particle
+        >>> df.groupby("run_hash").weight.sum()
+    """
+
+    job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
+    succeeded: int = 0
+    failed: int = 0
+    run_ids: dict[str, str] = field(default_factory=dict)
+    job_set: Any = None  # JobSet
+    method: str = "smcabc"
+    param_names: list[str] = field(default_factory=list)
+    samples: Any = None  # torch.Tensor
+    weights: Any = None  # torch.Tensor
+    run_hashes: list[str | None] = field(default_factory=list)
+    populations: list[dict[str, Any]] = field(default_factory=list)
+    observed: dict[str, float] = field(default_factory=dict)
+    summary: dict[str, Any] = field(default_factory=dict)
+    load_errors: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def is_adaptive(self) -> bool:
+        """True - this result came from an adaptive strategy."""
+        return True
+
+    def to_dataframe(self) -> Any:
+        """Final population as a DataFrame: one column per parameter, plus
+        ``weight`` and ``run_hash``.
+
+        Parameter values are those the runs were rendered with (each float32
+        draw's shortest decimal, as in ``job.parameters``), so running a
+        particle's parameters again reproduces its ``run_hash``.
+        """
+        import pandas as pd
+
+        if self.samples is None:
+            return pd.DataFrame(columns=[*self.param_names, "weight", "run_hash"])
+        df = pd.DataFrame(
+            [[_sbi_param_value(v) for v in row] for row in self.samples.tolist()],
+            columns=self.param_names,
+        )
+        df["weight"] = self.weights.tolist()
+        df["run_hash"] = self.run_hashes
+        return df
+
+    def __iter__(self) -> Iterator[tuple[ExpandedJob, Any]]:
+        """Iterate over (job, result) tuples."""
+        return iter(self.job_results)
+
+    def __len__(self) -> int:
+        """Return total number of job results."""
+        return len(self.job_results)
+
+
+@register_strategy("sbi")
+@dataclass
+class SbiStrategy(SweepStrategy):
+    """Approximate Bayesian computation with the sbi package.
+
+    The search is sbi's own: rejection ABC (``"mcabc"``) or sequential Monte
+    Carlo ABC (``"smcabc"``, Toni et al. 2009; Beaumont et al. 2009). joshpy
+    supplies the simulator: each batch of parameter sets sbi proposes becomes
+    one :meth:`AdaptiveContext.evaluate` call, so every simulation is
+    registered, run in the configured mode (local, remote, batch remote),
+    loaded, and summarized with ``summaries``. joshpy implements no statistics.
+
+    Requires the ``sbi`` extra (``pip install joshpy[sbi]``).
+
+    Attributes:
+        prior: Parameter -> distribution, in the order sbi sees them, e.g.
+            ``{"maxNewGrowth": {"uniform": [0.2, 2.0]}}``. Supported:
+            ``{"uniform": [low, high]}`` and ``{"normal": [mean, std]}``.
+            Parameter names are the template variables.
+        summaries: ``(registry, run_hash, job) -> dict[str, float]``, or a
+            ``"module:function"`` path. Returns the summary statistics of one
+            run; its keys must cover ``observed``. Return NaN statistics to
+            reject a run. An exception stops the search once its batch has
+            finished (it usually means a bug); after a fix, a rerun reuses
+            the completed runs.
+        observed: Observed summary statistics (dict), a ``"module:function"``
+            path returning that dict, or a path to a JSON file. Its key order
+            fixes the order of the summary vector.
+        method: ``"smcabc"`` (default) or ``"mcabc"``.
+        method_kwargs: Passed to the sbi call, e.g. for SMC-ABC
+            ``num_particles``, ``num_initial_pop``, ``num_simulations``,
+            ``epsilon_decay``; for MC-ABC ``num_simulations`` and ``quantile``
+            or ``eps``. KDE/LRA/SASS options are not supported (they return
+            parameters that were never simulated).
+        distance: sbi distance name (default ``"l2"``). Standardize your
+            summaries so no single statistic dominates.
+        seed: Seeds torch and numpy before sbi runs. With the same seed, sbi
+            and torch versions, rerunning an interrupted sweep against the same
+            registry replays the same proposals and reuses completed runs.
+        batch_policy: How SMC-ABC sizes each generation's rounds of proposals
+            (a generation needs ``num_particles`` runs within its tolerance;
+            each round is one batch, and its runs execute together).
+            ``"exact"`` is sbi's own loop: it proposes as many runs as are still
+            missing, so it never overshoots but takes many rounds (18-29 per
+            generation at 20% acceptance). ``"measured"`` sizes rounds from
+            measured acceptance rates: about two rounds per generation, for
+            5-15% more simulations. ``None`` (the default) picks ``"measured"``
+            on a batch target, where each round costs pod start-up and polling,
+            and ``"exact"`` otherwise. Both give a population of the same
+            distribution, but not the same proposals, so a search replays only
+            under the policy it ran with.
+        first_round_fraction: ``"measured"``: round 1 proposes this share of
+            what the previous generation's acceptance rate says is needed.
+        round_margin: ``"measured"``: later rounds propose this multiple of what
+            this generation's measured rate says is needed.
+        max_batch: ``"measured"``: the most runs one round may propose (e.g. the
+            target's capacity); ``None`` for no cap.
+
+    Examples:
+        >>> strategy = SbiStrategy(
+        ...     prior={
+        ...         "maxNewGrowth": {"uniform": [0.2, 2.0]},
+        ...         "minPrecipImpactPct": {"uniform": [0.0, 100.0]},
+        ...     },
+        ...     summaries="my_project.summaries:final_height",
+        ...     observed={"mean_height": 7.1, "height_cv": 0.31},
+        ...     method_kwargs={"num_particles": 50, "num_initial_pop": 100,
+        ...                    "num_simulations": 600, "epsilon_decay": 0.5},
+        ... )
+        >>> config = JobConfig(..., sweep=SweepConfig(strategy=strategy))
+        >>> result = SweepManager.builder(config).with_registry("abc.duckdb").build().run()
+        >>> result.to_dataframe()
+    """
+
+    prior: dict[str, dict[str, list[float]]] = field(default_factory=dict)
+    summaries: SummaryFn | str | None = None
+    observed: dict[str, float] | str | None = None
+    method: str = "smcabc"
+    method_kwargs: dict[str, Any] = field(default_factory=dict)
+    distance: str = "l2"
+    seed: int = 0
+    batch_policy: str | None = None
+    first_round_fraction: float = 0.7
+    round_margin: float = 1.1
+    max_batch: int | None = None
+
+    _summaries_fn: SummaryFn | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Validate the method, prior spec and sbi options."""
+        if self.method not in _SBI_METHODS:
+            raise ValueError(f"Invalid method '{self.method}'. Must be one of: {_SBI_METHODS}")
+        if not self.prior:
+            raise ValueError("SbiStrategy needs a prior with at least one parameter")
+        for name, spec in self.prior.items():
+            if not isinstance(spec, dict) or len(spec) != 1:
+                raise ValueError(
+                    f"Prior for '{name}' must be a one-key dict like "
+                    "{'uniform': [low, high]} or {'normal': [mean, std]}"
+                )
+            ((kind, args),) = spec.items()
+            if kind not in _SBI_PRIOR_KINDS:
+                raise ValueError(
+                    f"Unsupported prior '{kind}' for '{name}'. Supported: {_SBI_PRIOR_KINDS}"
+                )
+            if len(args) != 2:
+                raise ValueError(f"Prior '{kind}' for '{name}' takes two numbers, got {args}")
+            a, b = (float(v) for v in args)
+            if kind == "uniform" and not a < b:
+                raise ValueError(f"Uniform prior for '{name}' needs low < high, got {args}")
+            if kind == "normal" and not b > 0:
+                raise ValueError(f"Normal prior for '{name}' needs std > 0, got {args}")
+        if self.batch_policy is not None and self.batch_policy not in _SBI_BATCH_POLICIES:
+            raise ValueError(
+                f"Invalid batch_policy {self.batch_policy!r}. Must be one of: "
+                f"{_SBI_BATCH_POLICIES}, or None to choose by dispatch mode"
+            )
+        if not 0 < self.first_round_fraction <= 1:
+            raise ValueError(
+                f"first_round_fraction must be in (0, 1], got {self.first_round_fraction}"
+            )
+        if self.round_margin < 1:
+            raise ValueError(f"round_margin must be at least 1, got {self.round_margin}")
+        if self.max_batch is not None and self.max_batch < 1:
+            raise ValueError(f"max_batch must be at least 1, got {self.max_batch}")
+        unsupported = sorted(set(self.method_kwargs) & set(_SBI_UNSUPPORTED_KWARGS))
+        if unsupported:
+            raise ValueError(
+                f"Unsupported sbi options {unsupported}: SbiStrategy returns the simulated "
+                "particles; fit a KDE or regression adjustment on result.samples instead."
+            )
+        if callable(self.summaries) and not isinstance(self.summaries, str):
+            self._summaries_fn = self.summaries
+
+    @property
+    def is_adaptive(self) -> bool:
+        """SbiStrategy is adaptive - sbi proposes parameters from results."""
+        return True
+
+    @property
+    def param_names(self) -> list[str]:
+        """Parameter names, in the order of sbi's parameter vector."""
+        return list(self.prior)
+
+    def expand(
+        self,
+        config_params: list[ConfigSweepParameter],
+        file_params: list[FileSweepParameter],
+        compound_params: list[CompoundSweepParameter] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Not supported: sbi proposes parameters as the run progresses.
+
+        Raises:
+            RuntimeError: Always - use run_adaptive_sweep() or SweepManager.run().
+        """
+        raise RuntimeError(
+            "SbiStrategy is adaptive - use run_adaptive_sweep() or SweepManager.run() "
+            "instead of expand()."
+        )
+
+    def get_summaries(self) -> SummaryFn:
+        """The summary-statistics function, resolving a "module:function" path."""
+        if self._summaries_fn is None and isinstance(self.summaries, str):
+            self._summaries_fn = _load_objective_from_path(self.summaries)  # type: ignore[assignment]
+        if self._summaries_fn is None:
+            raise ValueError(
+                "No summaries function configured for SbiStrategy. Provide summaries= "
+                "in the constructor or pass objective= to SweepManager.run()."
+            )
+        return self._summaries_fn
+
+    def get_observed(self) -> dict[str, float]:
+        """The observed summary statistics, resolving a path or "module:function"."""
+        observed: Any = self.observed
+        if isinstance(observed, str):
+            if ":" in observed and not Path(observed).exists():
+                observed_fn: Callable[[], Any] = _load_objective_from_path(observed)  # type: ignore[assignment]
+                observed = observed_fn()
+            else:
+                import json
+
+                observed = json.loads(Path(observed).read_text())
+        if not isinstance(observed, dict) or not observed:
+            raise ValueError("SbiStrategy needs observed summary statistics (a non-empty dict)")
+        return {str(k): float(v) for k, v in observed.items()}
+
+    def build_prior(self) -> Any:
+        """The prior as a torch distribution sbi accepts.
+
+        All-uniform priors become ``sbi.utils.BoxUniform``; mixed priors become
+        ``sbi.utils.MultipleIndependent`` of per-parameter distributions.
+        """
+        _check_sbi()
+        import torch
+        from sbi.utils import BoxUniform, MultipleIndependent
+
+        specs = [next(iter(spec.items())) for spec in self.prior.values()]
+        if all(kind == "uniform" for kind, _ in specs):
+            low = torch.tensor([float(a) for _, (a, _) in specs])
+            high = torch.tensor([float(b) for _, (_, b) in specs])
+            return BoxUniform(low=low, high=high)
+
+        dists: list[Any] = []
+        for kind, (a, b) in specs:
+            a_t, b_t = torch.tensor([float(a)]), torch.tensor([float(b)])
+            if kind == "uniform":
+                dists.append(torch.distributions.Uniform(a_t, b_t))
+            else:
+                dists.append(torch.distributions.Normal(a_t, b_t))
+        return MultipleIndependent(dists)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dict for serialization.
+
+        A callable ``summaries`` is saved as its "module:qualname" path when
+        that path loads it back. Otherwise (a lambda, closure, bound method,
+        or a function defined in ``__main__``) its name is kept under
+        ``summaries_not_importable``, for provenance only, and ``from_dict``
+        leaves ``summaries`` unset.
+        """
+        result: dict[str, Any] = {
+            "type": "sbi",
+            "method": self.method,
+            "prior": self.prior,
+            "distance": self.distance,
+            "seed": self.seed,
+        }
+        if self.method_kwargs:
+            result["method_kwargs"] = self.method_kwargs
+        if self.batch_policy is not None:
+            result["batch_policy"] = self.batch_policy
+        if self.first_round_fraction != 0.7:
+            result["first_round_fraction"] = self.first_round_fraction
+        if self.round_margin != 1.1:
+            result["round_margin"] = self.round_margin
+        if self.max_batch is not None:
+            result["max_batch"] = self.max_batch
+        if isinstance(self.summaries, str):
+            result["summaries"] = self.summaries
+        elif self.summaries is not None:
+            path = _callable_path(self.summaries)
+            if path is not None:
+                result["summaries"] = path
+            else:
+                result["summaries_not_importable"] = _callable_name(self.summaries)
+        if self.observed is not None:
+            result["observed"] = self.observed
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SbiStrategy:
+        """Create from dict (YAML/JSON deserialization)."""
+        return cls(
+            prior=data.get("prior", {}),
+            summaries=data.get("summaries"),
+            observed=data.get("observed"),
+            method=data.get("method", "smcabc"),
+            method_kwargs=data.get("method_kwargs", {}),
+            distance=data.get("distance", "l2"),
+            seed=data.get("seed", 0),
+            batch_policy=data.get("batch_policy"),
+            first_round_fraction=data.get("first_round_fraction", 0.7),
+            round_margin=data.get("round_margin", 1.1),
+            max_batch=data.get("max_batch"),
+        )
+
+    def run_adaptive(self, ctx: AdaptiveContext) -> SbiResult:
+        """Run sbi with joshpy as the simulator.
+
+        Each simulator call (one batch of proposals) is one ``ctx.evaluate``.
+        A run that fails, or whose results cannot be loaded, returns NaN
+        summaries, which sbi never accepts; load errors are reported in
+        ``SbiResult.load_errors`` and a warning. An exception from
+        ``summaries``, or SMC-ABC's initial population having fewer than
+        ``num_particles`` usable runs, stops the search. Afterwards each
+        population member gets ``sbi_generation``, ``sbi_weight``,
+        ``sbi_distance`` and ``sbi_accepted`` run attributes, and the session
+        metadata gets the settings, versions and per-generation populations.
+
+        Args:
+            ctx: The AdaptiveContext for this run.
+
+        Returns:
+            SbiResult with the final population.
+        """
+        _check_sbi()
+        import numpy as np
+        import torch
+        from sbi.inference import MCABC, SMCABC
+
+        summaries_fn = ctx.objective or self.get_summaries()
+        observed = self.get_observed()
+        keys = list(observed)
+        names = self.param_names
+        prior = self.build_prior()
+        x_o = torch.tensor([[observed[k] for k in keys]], dtype=torch.float32)
+        policy = self.resolved_batch_policy(batch_remote=ctx.batch_remote)
+        settings = self._session_settings(observed, policy)
+        self._warn_on_shared_seed(ctx)
+        self._warn_on_version_drift(ctx, settings)
+        ctx.registry.update_session_metadata(ctx.session_id, sbi=settings)
+
+        hash_by_theta: dict[tuple[float, ...], str] = {}
+        call_of: dict[str, int] = {}  # run_hash -> simulator call that ran it
+        call_sizes: list[int] = []
+        n_calls = 0
+
+        load_errors: dict[str, str] = {}  # run_hash -> why its results could not be loaded
+
+        def simulator(theta: Any) -> Any:
+            nonlocal n_calls
+            rows = [
+                {name: _sbi_param_value(v) for name, v in zip(names, row, strict=True)}
+                for row in theta.tolist()
+            ]
+            batch = ctx.evaluate(rows, score=summaries_fn, attributes={"sbi_call": n_calls})
+            call_sizes.append(len(rows))
+            if batch.score_exceptions:
+                i, error = next(iter(batch.score_exceptions.items()))
+                raise RuntimeError(
+                    f"summaries raised for {len(batch.score_exceptions)} of {len(rows)} runs "
+                    f"in this batch, first for {batch.jobs[i].run_hash}: {error!r}. This "
+                    "usually means a bug in the summaries function: fix it and rerun, and "
+                    "completed runs are reused. To reject a run instead, return NaN statistics."
+                ) from error
+
+            failed = set(batch.failures)
+            x = []
+            for i, (row, job) in enumerate(zip(rows, batch.jobs, strict=True)):
+                hash_by_theta[tuple(row[n] for n in names)] = job.run_hash
+                call_of[job.run_hash] = n_calls
+                if i in failed:
+                    if i in batch.errors:
+                        load_errors[job.run_hash] = batch.errors[i]
+                    x.append([float("nan")] * len(keys))
+                    continue
+                value = batch.values[i]
+                if value is None:
+                    raise ValueError(
+                        f"summaries returned None for {job.run_hash}; return a dict of "
+                        "statistics (NaN statistics reject a run)"
+                    )
+                missing = [k for k in keys if k not in value]
+                if missing:
+                    raise ValueError(
+                        f"summaries returned {sorted(value)} for {job.run_hash}, "
+                        f"missing observed statistics {missing}"
+                    )
+                x.append([float(value[k]) for k in keys])
+            x_batch = torch.tensor(x, dtype=torch.float32)
+
+            # sbi keeps the initial population's num_particles closest runs, sorting NaN
+            # last, so with too few usable runs it would keep runs without statistics and
+            # replace the non-finite tolerance with 1e8.
+            needed = self.method_kwargs.get("num_particles")
+            if self.method == "smcabc" and n_calls == 0 and needed is not None:
+                usable = int(torch.isfinite(x_batch).all(dim=1).sum())
+                if usable < needed:
+                    crashed = sum(not result.success for result in batch.results)
+                    unloaded = len(batch.errors)
+                    raise RuntimeError(
+                        f"Only {usable} of {len(rows)} initial SMC-ABC simulations have "
+                        f"finite summaries, fewer than num_particles={needed} ({crashed} "
+                        f"failed, {unloaded} could not be loaded, "
+                        f"{len(rows) - usable - crashed - unloaded} returned non-finite "
+                        "statistics). Check those runs, or raise num_initial_pop."
+                    )
+            n_calls += 1
+            return x_batch
+
+        def lookup(particles: Any) -> list[str | None]:
+            return [
+                hash_by_theta.get(tuple(_sbi_param_value(v) for v in row))
+                for row in particles.tolist()
+            ]
+
+        torch.manual_seed(self.seed)
+        np.random.seed(self.seed)
+
+        common = dict(
+            simulator=simulator,
+            prior=prior,
+            distance=self.distance,
+            simulation_batch_size=None,  # each proposal round is one batch
+            num_workers=1,  # parallelism lives in Josh, not in sbi processes
+            show_progress_bars=False,
+        )
+        populations: list[dict[str, Any]] = []
+        generation_log: list[dict[str, int]] = []  # "measured" only: rounds and surplus
+        if self.method == "smcabc":
+            if policy == "measured":
+                smcabc = _measured_smcabc()(
+                    **common,
+                    first_round_fraction=self.first_round_fraction,
+                    round_margin=self.round_margin,
+                    max_batch=self.max_batch,
+                )
+            else:
+                smcabc = SMCABC(**common)
+            samples, summary = smcabc(x_o=x_o, return_summary=True, **self.method_kwargs)
+            generation_log = list(getattr(smcabc, "generation_log", []))
+            for t, (particles, log_w, eps, dists) in enumerate(
+                zip(
+                    summary["particles"],
+                    summary["weights"],
+                    summary["epsilons"],
+                    summary["distances"],
+                    strict=True,
+                )
+            ):
+                w = log_w.exp()
+                populations.append(
+                    {
+                        "generation": t,
+                        "epsilon": float(eps),
+                        "run_hashes": lookup(particles),
+                        "weights": (w / w.sum()).tolist(),
+                        "distances": dists.tolist(),
+                    }
+                )
+        else:
+            samples, summary = MCABC(**common)(
+                x_o=x_o, return_summary=True, **self.method_kwargs
+            )
+            dists = summary["distances"]
+            populations.append(
+                {
+                    "generation": 0,
+                    "epsilon": float(dists.max()) if len(dists) else None,
+                    "run_hashes": lookup(samples),
+                    "weights": [1.0 / len(samples)] * len(samples) if len(samples) else [],
+                    "distances": dists.tolist(),
+                }
+            )
+        _count_generation_simulations(populations, call_of, call_sizes)
+        for generation, pop in enumerate(populations):
+            # Passes dropped because a round accepted more than were missing ("measured").
+            # Generation 0 is the initial population, so the log starts at generation 1.
+            entry = generation_log[generation - 1] if 0 < generation <= len(generation_log) else {}
+            pop["surplus"] = entry.get("surplus", 0)
+
+        final = populations[-1]
+        run_hashes = lookup(samples)
+        if run_hashes == final["run_hashes"]:
+            weights = torch.tensor(final["weights"])
+        else:
+            weights = torch.full((len(samples),), 1.0 / max(len(samples), 1))
+
+        for pop in populations:
+            for run_hash, w, d in zip(
+                pop["run_hashes"], pop["weights"], pop["distances"], strict=True
+            ):
+                if run_hash is not None:
+                    ctx.registry.set_attributes(
+                        run_hash,
+                        sbi_accepted=True,
+                        sbi_generation=pop["generation"],
+                        sbi_weight=w,
+                        sbi_distance=d,
+                    )
+
+        settings.update(
+            populations=populations,
+            epsilons=[pop["epsilon"] for pop in populations],
+            simulations=ctx.succeeded + ctx.failed,
+            failed_simulations=ctx.failed,
+            load_errors=load_errors,
+            final_run_hashes=run_hashes,
+        )
+        ctx.registry.update_session_metadata(ctx.session_id, sbi=settings)
+        self._warn_on_unusable_runs(load_errors, final)
+
+        if not ctx.quiet:
+            print(
+                f"sbi {self.method} complete: {len(populations)} population(s), "
+                f"{ctx.succeeded + ctx.failed} simulations ({ctx.failed} failed, "
+                f"{len(load_errors)} not loaded), final epsilon {final['epsilon']}"
+            )
+
+        return SbiResult(
+            job_results=list(ctx.job_results),
+            succeeded=ctx.succeeded,
+            failed=ctx.failed,
+            run_ids=dict(ctx.run_ids),
+            job_set=ctx.job_set(),
+            method=self.method,
+            param_names=names,
+            samples=samples,
+            weights=weights,
+            run_hashes=run_hashes,
+            populations=populations,
+            observed=observed,
+            summary=summary,
+            load_errors=load_errors,
+        )
+
+    @staticmethod
+    def _warn_on_unusable_runs(load_errors: dict[str, str], final: dict[str, Any]) -> None:
+        """Warn, even when quiet, about runs whose NaN summaries sbi saw.
+
+        A run whose results could not be loaded is never accepted, so it drops
+        out of the search unnoticed. A quantile-based MCABC keeps its share of
+        the simulations whether or not they have usable statistics, so its
+        accepted samples can include such runs.
+        """
+        import math
+        import warnings
+
+        if load_errors:
+            run_hash, message = next(iter(load_errors.items()))
+            warnings.warn(
+                f"{len(load_errors)} simulation(s) ran but their results could not be "
+                f"loaded, so their summaries were NaN and sbi never accepted them (first: "
+                f"{run_hash}: {message}). They are listed in SbiResult.load_errors and "
+                "the session metadata.",
+                stacklevel=2,
+            )
+        unusable = sum(not math.isfinite(d) for d in final["distances"])
+        if unusable:
+            warnings.warn(
+                f"{unusable} of {len(final['distances'])} accepted samples have non-finite "
+                "summaries (failed, unloaded or NaN-returning runs): a quantile keeps its "
+                "share of the simulations whether or not they have usable statistics.",
+                stacklevel=2,
+            )
+
+    def resolved_batch_policy(self, *, batch_remote: bool) -> str:
+        """The batch policy a run uses: ``batch_policy``, or else chosen by dispatch mode."""
+        if self.batch_policy is not None:
+            return self.batch_policy
+        return "measured" if batch_remote else "exact"
+
+    def _session_settings(self, observed: dict[str, float], policy: str = "exact") -> dict[str, Any]:
+        """Settings recorded in session metadata, with a replay fingerprint.
+
+        The batch policy is recorded only when it is ``"measured"``: ``"exact"``
+        is sbi's own loop, so sessions from before the policy existed keep their
+        fingerprint.
+        """
+        import hashlib
+        import json
+
+        import sbi
+        import torch
+
+        settings: dict[str, Any] = {
+            "method": self.method,
+            "prior": self.prior,
+            "param_names": self.param_names,
+            "observed": observed,
+            "summary_keys": list(observed),
+            "method_kwargs": self.method_kwargs,
+            "distance": self.distance,
+            "seed": self.seed,
+        }
+        if self.method == "smcabc" and policy == "measured":
+            settings["batch_policy"] = {
+                "policy": policy,
+                "first_round_fraction": self.first_round_fraction,
+                "round_margin": self.round_margin,
+                "max_batch": self.max_batch,
+            }
+        settings["fingerprint"] = hashlib.sha256(
+            json.dumps(settings, sort_keys=True).encode()
+        ).hexdigest()[:12]
+        settings["versions"] = {
+            "sbi": sbi.__version__,
+            "torch": torch.__version__,
+            "device": "cpu",
+        }
+        return settings
+
+    @staticmethod
+    def _warn_on_shared_seed(ctx: AdaptiveContext) -> None:
+        """Warn if JobConfig.seed gives every simulation the same random draws.
+
+        ABC compares one stochastic simulation per proposal with the data. With
+        a fixed Josh seed every proposal reuses one noise realization, so the
+        posterior conditions on that realization and ignores the model's noise.
+        """
+        import warnings
+
+        if ctx.config.seed is not None:
+            warnings.warn(
+                f"JobConfig.seed={ctx.config.seed} gives every simulation the same Josh "
+                "random draws, so ABC conditions on one noise realization and the "
+                "posterior ignores the model's stochasticity. Leave seed unset for "
+                "SbiStrategy runs and seed only the run that produces the observed data.",
+                stacklevel=2,
+            )
+
+    def _warn_on_version_drift(self, ctx: AdaptiveContext, settings: dict[str, Any]) -> None:
+        """Warn if an earlier session with the same settings ran other versions.
+
+        Replay-based resume needs identical proposals; a different sbi or torch
+        version may propose differently, so completed runs may not be reused.
+        """
+        import json
+        import warnings
+
+        rows = ctx.registry.conn.execute(
+            "SELECT session_id, metadata FROM sweep_sessions WHERE session_id != ?",
+            [ctx.session_id],
+        ).fetchall()
+        for session_id, raw in rows:
+            earlier = (json.loads(raw) if raw else {}).get("sbi") or {}
+            if (
+                earlier.get("fingerprint") == settings["fingerprint"]
+                and earlier.get("versions") != settings["versions"]
+            ):
+                warnings.warn(
+                    f"Session {session_id} ran these sbi settings under "
+                    f"{earlier.get('versions')}; this run uses {settings['versions']}. "
+                    "Proposals may differ, so its completed runs may not be reused.",
+                    stacklevel=2,
+                )
+
+
+@dataclass
+class BatchResult:
+    """Outcome of evaluating one batch of parameter sets.
+
+    Returned by :meth:`AdaptiveContext.evaluate`. The lists are aligned with
+    the requested rows. Rows with identical parameters resolve to the same job
+    (same ``run_hash``) and are run once.
+
+    Attributes:
+        params: The requested parameter rows.
+        jobs: Expanded job per row.
+        results: CLIResult per row (shared by rows that share a job).
+        values: Score per row (``score(registry, run_hash, job)``), or None
+            when the run failed, its results could not be loaded or scored,
+            or no score function was given.
+        rows_loaded: Rows loaded into ``cell_data`` for each row's job.
+        errors: Row index -> message for rows whose run succeeded but whose
+            results could not be loaded or scored.
+        score_exceptions: Row index -> the exception ``score`` raised, for
+            rows whose results loaded but could not be scored (a subset of
+            ``errors``).
+        run_ids: run_hash -> run_id of the run each job's results come from.
+        sources: Per row, where its result came from: ``"ran"`` (dispatched
+            in this batch), ``"reused"`` (an earlier completed, loaded run of
+            the same run_hash) or ``"reattached"`` (an earlier no-wait batch
+            job polled to completion).
+
+    Examples:
+        >>> batch = ctx.evaluate([{"x": 1.0}, {"x": 2.0}], score=my_objective)
+        >>> for job, value in zip(batch.jobs, batch.values):
+        ...     print(job.run_hash, value)
+        >>> batch.failures  # row indices that failed or could not be scored
+    """
+
+    params: list[dict[str, Any]] = field(default_factory=list)
+    jobs: list[ExpandedJob] = field(default_factory=list)
+    results: list[Any] = field(default_factory=list)
+    values: list[Any] = field(default_factory=list)
+    rows_loaded: list[int] = field(default_factory=list)
+    errors: dict[int, str] = field(default_factory=dict)
+    run_ids: dict[str, str] = field(default_factory=dict)
+    sources: list[str] = field(default_factory=list)
+    score_exceptions: dict[int, Exception] = field(default_factory=dict)
+
+    @property
+    def run_hashes(self) -> list[str]:
+        """run_hash per row."""
+        return [job.run_hash for job in self.jobs]
+
+    @property
+    def failures(self) -> list[int]:
+        """Row indices whose run failed or whose results could not be loaded or scored."""
+        return [
+            i
+            for i, result in enumerate(self.results)
+            if not result.success or i in self.errors
+        ]
+
+    def __len__(self) -> int:
+        return len(self.jobs)
+
+
+def _adaptive_config_name(config: Any) -> str:
+    """Default config namespace for adaptive sweeps when ``config_name`` is unset.
+
+    Adaptive sweeps have always named the rendered config after the template
+    file (``adaptive_config.jshc.j2`` -> ``config adaptive_config.*``), while
+    batch sweeps default to ``sweep_config``. Both defaults are relied on by
+    existing models, so each path keeps its own; an explicit
+    ``JobConfig.config_name`` wins on both.
+    """
+    if config.template_path is not None:
+        stem = Path(config.template_path).stem
+        return stem[: -len(".jshc")] if stem.endswith(".jshc") else stem
+    return "sweep_config"
+
+
+@dataclass
+class AdaptiveContext:
+    """What an adaptive strategy runs its loop against.
+
+    Built by :func:`run_adaptive_sweep` and passed to
+    :meth:`SweepStrategy.run_adaptive`. The strategy owns its loop and its own
+    in-memory state (an Optuna study, an sbi sampler, ...). The context owns
+    everything joshpy does, through one method, :meth:`evaluate`: expand a
+    batch of parameter sets, register each job, run them with
+    :func:`~joshpy.jobs.run_sweep` in the configured execution mode (local,
+    Josh Cloud, or batch remote), load their results into the registry, and
+    score them.
+
+    Every evaluated job is registered and recorded, whether or not the
+    strategy later uses its result. The registry doubles as the run store:
+    with ``reuse_runs`` (default), a run_hash that already completed and was
+    loaded is reused rather than run again, and a submitted no-wait batch job
+    is polled rather than re-dispatched, so an interrupted sweep resumes
+    from its last finished simulation.
+
+    Attributes:
+        cli: JoshCLI used for execution.
+        config: The JobConfig being swept (its ``sweep.strategy`` is the
+            adaptive strategy).
+        registry: Registry every job is recorded in.
+        session_id: Registry session for this run.
+        objective: Optional per-run score function override, passed through
+            from ``SweepManager.run(objective=...)``.
+        job_results: (job, CLIResult) for every evaluation, in order.
+        run_ids: run_hash -> run_id of its latest execution.
+        succeeded: Number of evaluations that ran successfully.
+        failed: Number of evaluations that failed.
+    """
+
+    cli: Any  # JoshCLI
+    config: Any  # JobConfig
+    registry: RunRegistry
+    session_id: str
+    objective: ObjectiveFn | None = None
+    remote: bool = False
+    api_key: str | None = None
+    endpoint: str | None = None
+    batch_remote: bool = False
+    target: str | None = None
+    batch_no_wait: bool = False
+    poll_interval: int = 10
+    batch_timeout: int | None = None
+    collision_policy: str = "fail"
+    on_complete: Callable[[Any, Any], None] | None = None
+    quiet: bool = False
+    load_config: Any | None = None  # LoadConfig
+    stop_on_failure: bool = True
+    jfr: Any | None = None  # JfrConfig
+    enable_profiler: bool = False
+    stream_output: bool = False
+    reuse_runs: bool = True
+
+    job_results: list[tuple[ExpandedJob, Any]] = field(default_factory=list)
+    run_ids: dict[str, str] = field(default_factory=dict)
+    succeeded: int = 0
+    failed: int = 0
+
+    _jobs: dict[str, ExpandedJob] = field(default_factory=dict, repr=False)
+    _work_dir: Path | None = field(default=None, repr=False)
+    _expansion_config: Any | None = field(default=None, repr=False)
+    _export_paths: dict[tuple[str, str], Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def work_dir(self) -> Path:
+        """Directory every batch is expanded into (created on first use).
+
+        One directory for the whole run keeps a templated or multi-file
+        model's rendered entry at a single path, so all evaluated jobs share
+        one ``source_path`` (``recover_sweep_results`` requires that).
+        """
+        if self._work_dir is None:
+            self._work_dir = Path(tempfile.mkdtemp(prefix="josh_adaptive_"))
+        return self._work_dir
+
+    def evaluate(
+        self,
+        params: list[dict[str, Any]],
+        *,
+        score: Callable[[RunRegistry, str, ExpandedJob], Any] | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> BatchResult:
+        """Run a batch of parameter sets and return their results.
+
+        Each row is expanded through :class:`~joshpy.jobs.JobExpander` (the
+        same rendering and run hashing as a batch sweep), registered, and run
+        as one :func:`~joshpy.jobs.run_sweep` call. Successful runs are loaded
+        into ``cell_data`` and, if *score* is given, scored.
+
+        Args:
+            params: Parameter rows, shaped like ``SweepConfig.expand()`` output.
+            score: Optional ``(registry, run_hash, job) -> Any`` evaluated for
+                each successfully loaded job (an objective, or a dict of
+                summary statistics).
+            attributes: Extra run-level attributes recorded on this batch's
+                jobs at registration (e.g. ``{"generation": 3}``).
+
+        Returns:
+            BatchResult aligned with *params*.
+
+        Raises:
+            SweepExecutionError: If ``stop_on_failure`` is set and a run
+                failed. Raised after the whole batch has run and the
+                successful runs have been loaded.
+        """
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import JobExpander, JobSet, run_sweep
+        from joshpy.sweep import LoadConfig, apply_sweep_labels, register_job
+
+        rows = [dict(p) for p in params]
+        if not rows:
+            return BatchResult()
+
+        config = self._config_for_expansion()
+        row_jobs = JobExpander().expand(
+            config, output_dir=self.work_dir, combinations=rows
+        ).jobs
+        apply_sweep_labels(row_jobs, config.label)
+        if attributes:
+            for job in row_jobs:
+                job.attributes.update(attributes)
+
+        # Rows with identical parameters share a run_hash; run each job once.
+        unique: dict[str, ExpandedJob] = {}
+        for job in row_jobs:
+            unique.setdefault(job.run_hash, job)
+        batch_jobs = list(unique.values())
+
+        for job in batch_jobs:
+            register_job(self.registry, self.session_id, job)
+
+        evaluated_before = self.succeeded + self.failed
+        succeeded_before = self.succeeded
+        load_config = self.load_config or LoadConfig()
+
+        # The registry is the run store: reuse runs that already completed and
+        # loaded, reattach to submitted no-wait jobs, and run only the rest.
+        # A crashed or interrupted run therefore resumes from its last
+        # finished simulation.
+        result_by_hash: dict[str, Any] = {}
+        run_id_by_hash: dict[str, str] = {}
+        source_by_hash: dict[str, str] = {}
+        to_attach: list[tuple[ExpandedJob, Any]] = []
+        to_run: list[ExpandedJob] = []
+        for job in batch_jobs:
+            state, prior = (
+                self._prior_run(job, load_config) if self.reuse_runs else ("new", None)
+            )
+            if state == "done":
+                assert prior is not None
+                result_by_hash[job.run_hash] = CLIResult(
+                    exit_code=0, stdout="", stderr="", command=["reuse", prior.run_id]
+                )
+                run_id_by_hash[job.run_hash] = prior.run_id
+                source_by_hash[job.run_hash] = "reused"
+            elif state == "submitted":
+                to_attach.append((job, prior))
+            else:
+                to_run.append(job)
+
+        n_reused = len(batch_jobs) - len(to_attach) - len(to_run)
+        if not self.quiet and (n_reused or to_attach):
+            print(
+                f"  Reusing {n_reused} completed run(s), reattaching to "
+                f"{len(to_attach)}, running {len(to_run)}"
+            )
+
+        if to_attach:
+            for run_hash, (run_id, result) in self._reattach(to_attach).items():
+                result_by_hash[run_hash] = result
+                run_id_by_hash[run_hash] = run_id
+                source_by_hash[run_hash] = "reattached"
+
+        if to_run:
+            self._check_distinct_exports(to_run)
+            show_progress = not self.quiet and len(to_run) > 1
+            done = 0
+
+            def _progress(job: ExpandedJob, result: Any) -> None:
+                nonlocal done
+                done += 1
+                if show_progress:
+                    status = "OK  " if result.success else "FAIL"
+                    print(f"  [{done}/{len(to_run)}] {status} {job.run_hash}")
+                if self.on_complete is not None:
+                    self.on_complete(job, result)
+
+            if show_progress:
+                print(f"Evaluating {len(to_run)} parameter sets")
+
+            sweep_result = run_sweep(
+                self.cli,
+                JobSet(jobs=to_run),
+                registry=self.registry,
+                session_id=self.session_id,
+                manage_status=False,
+                remote=self.remote,
+                api_key=self.api_key,
+                endpoint=self.endpoint,
+                batch_remote=self.batch_remote,
+                target=self.target,
+                batch_no_wait=self.batch_no_wait,
+                poll_interval=self.poll_interval,
+                batch_timeout=self.batch_timeout,
+                # Loaded explicitly below in every mode, not just batch remote.
+                auto_ingest=False,
+                collision_policy=self.collision_policy,
+                on_complete=_progress,
+                stop_on_failure=False,
+                quiet=True,
+                jfr=self.jfr,
+                enable_profiler=self.enable_profiler,
+                stream_output=self.stream_output,
+            )
+            for job, result in sweep_result.job_results:
+                result_by_hash[job.run_hash] = result
+                source_by_hash[job.run_hash] = "ran"
+            run_id_by_hash.update(sweep_result.run_ids)
+
+        for job in batch_jobs:
+            result = result_by_hash.get(job.run_hash)
+            if result is None:
+                result = CLIResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr="No result was recorded for this job.",
+                    command=[],
+                )
+                result_by_hash[job.run_hash] = result
+                source_by_hash.setdefault(job.run_hash, "ran")
+            self.job_results.append((job, result))
+            self._jobs.setdefault(job.run_hash, job)
+            if result.success:
+                self.succeeded += 1
+            else:
+                self.failed += 1
+        self.run_ids.update(run_id_by_hash)
+
+        # Load and score the successful runs (loading is idempotent, so reused
+        # runs load nothing new).
+        succeeded_jobs = [j for j in batch_jobs if result_by_hash[j.run_hash].success]
+        if any(source_by_hash[j.run_hash] != "reused" for j in succeeded_jobs):
+            time.sleep(load_config.settle_delay)
+
+        rows_by_hash: dict[str, int] = {}
+        values_by_hash: dict[str, Any] = {}
+        errors_by_hash: dict[str, str] = {}
+        score_exceptions_by_hash: dict[str, Exception] = {}
+        for k, job in enumerate(succeeded_jobs):
+            try:
+                rows_by_hash[job.run_hash] = self._load(
+                    job,
+                    run_id_by_hash.get(job.run_hash),
+                    load_config,
+                    succeeded_before=succeeded_before + k,
+                )
+            except Exception as e:
+                errors_by_hash[job.run_hash] = str(e)
+                if not self.quiet:
+                    print(f"  [WARN] Result loading failed: {e}")
+                continue
+
+            if score is None:
+                continue
+            try:
+                values_by_hash[job.run_hash] = score(self.registry, job.run_hash, job)
+            except Exception as e:
+                errors_by_hash[job.run_hash] = f"objective_error: {e}"
+                score_exceptions_by_hash[job.run_hash] = e
+                if not self.quiet:
+                    print(f"  [WARN] Objective evaluation failed: {e}")
+
+        if self.stop_on_failure:
+            for k, job in enumerate(batch_jobs):
+                result = result_by_hash[job.run_hash]
+                if not result.success:
+                    raise SweepExecutionError(
+                        job=job,
+                        result=result,
+                        trial_num=evaluated_before + k,
+                        succeeded_before=succeeded_before + sum(
+                            result_by_hash[j.run_hash].success for j in batch_jobs[:k]
+                        ),
+                    )
+
+        return BatchResult(
+            params=rows,
+            jobs=row_jobs,
+            results=[result_by_hash[j.run_hash] for j in row_jobs],
+            values=[values_by_hash.get(j.run_hash) for j in row_jobs],
+            rows_loaded=[rows_by_hash.get(j.run_hash, 0) for j in row_jobs],
+            errors={
+                i: errors_by_hash[j.run_hash]
+                for i, j in enumerate(row_jobs)
+                if j.run_hash in errors_by_hash
+            },
+            run_ids={h: run_id_by_hash[h] for h in unique if h in run_id_by_hash},
+            sources=[source_by_hash[j.run_hash] for j in row_jobs],
+            score_exceptions={
+                i: score_exceptions_by_hash[j.run_hash]
+                for i, j in enumerate(row_jobs)
+                if j.run_hash in score_exceptions_by_hash
+            },
+        )
+
+    def _prior_run(self, job: ExpandedJob, load_config: Any) -> tuple[str, Any]:
+        """Classify *job* by its latest recorded run.
+
+        Returns ``("done", run)`` for a successful run whose replicates are
+        loaded (loading it now if it completed but was never loaded),
+        ``("submitted", run)`` for a no-wait batch job that was dispatched but
+        never completed, and ``("new", None)`` otherwise: never run, failed,
+        not current (``bad`` / ``superseded``), or an interrupted blocking run.
+        """
+        config = self.registry.get_config_by_hash(job.run_hash)
+        if config is None or config.effective_status != "active":
+            return "new", None
+
+        runs = self.registry.get_runs_for_hash(job.run_hash)
+        if not runs:
+            return "new", None
+        latest = runs[-1]
+        metadata = latest.metadata or {}
+
+        if latest.completed_at is None:
+            if metadata.get("batch_job_id") and (metadata.get("target") or self.target):
+                return "submitted", latest
+            return "new", None
+        if latest.exit_code != 0:
+            return "new", None
+
+        if len(self.registry.loaded_replicates(job.run_hash)) < job.replicates:
+            # The replicate count isn't part of run_hash. A run with fewer
+            # replicates can't supply the rest, so rerun it without waiting for
+            # their files; loading keeps the replicates already loaded.
+            if metadata.get("replicates", job.replicates) < job.replicates:
+                return "new", None
+            # Completed but never (fully) loaded, e.g. interrupted before loading.
+            try:
+                self._load(job, latest.run_id, load_config, succeeded_before=0)
+            except Exception:
+                return "new", None
+            if len(self.registry.loaded_replicates(job.run_hash)) < job.replicates:
+                return "new", None
+        return "done", latest
+
+    def _reattach(
+        self, pending: list[tuple[ExpandedJob, Any]]
+    ) -> dict[str, tuple[str, Any]]:
+        """Poll submitted no-wait jobs from an earlier process until they finish.
+
+        Completes each job's run in the registry and registers its outputs.
+        A job that times out is left submitted (it may still be running).
+
+        Returns:
+            run_hash -> (run_id, CLIResult of the poll).
+        """
+        from joshpy.jobs import _register_job_outputs, poll_batch_jobs
+        from joshpy.registry import RegistryCallback
+
+        by_job_id = {run.metadata["batch_job_id"]: (job, run) for job, run in pending}
+        # _prior_run only reports "submitted" when a target is known.
+        targets = {
+            job_id: str(run.metadata.get("target") or self.target)
+            for job_id, (_, run) in by_job_id.items()
+        }
+        recorder = RegistryCallback(self.registry, self.session_id)
+        finished: dict[str, tuple[str, Any]] = {}
+
+        def _on_polled(job_id: str, result: Any) -> None:
+            job, run = by_job_id[job_id]
+            if result.exit_code != -1:
+                recorder.record_completion(run.run_id, result)
+                _register_job_outputs(
+                    self.cli,
+                    self.registry,
+                    job,
+                    run.run_id,
+                    export_paths=self._exports_for(job),
+                    quiet=True,
+                )
+            finished[job.run_hash] = (run.run_id, result)
+            if not self.quiet:
+                print(f"  [REATTACHED] {job_id} exit_code={result.exit_code}")
+            if self.on_complete is not None:
+                self.on_complete(job, result)
+
+        if not self.quiet:
+            print(f"Reattaching to {len(by_job_id)} submitted batch job(s)")
+        poll_batch_jobs(
+            self.cli,
+            targets,
+            poll_interval=self.poll_interval,
+            timeout=self.batch_timeout,
+            on_finished=_on_polled,
+        )
+        return finished
+
+    def job_set(self) -> JobSet:
+        """The jobs evaluated so far (one per run_hash), owning the work directory."""
+        from joshpy.jobs import JobSet
+
+        return JobSet(
+            jobs=list(self._jobs.values()),
+            temp_dir=self._work_dir,
+            template_path=self.config.template_path,
+        )
+
+    def cleanup(self) -> None:
+        """Remove the work directory."""
+        if self._work_dir is not None and self._work_dir.exists():
+            shutil.rmtree(self._work_dir, ignore_errors=True)
+        self._work_dir = None
+
+    def _config_for_expansion(self) -> Any:
+        """The JobConfig every batch expands from, resolved once per run.
+
+        Discovers a multi-file model's import closure once (instead of one
+        ``inspect-imports`` JVM call per batch) and applies the adaptive
+        config-name default.
+        """
+        if self._expansion_config is not None:
+            return self._expansion_config
+
+        from joshpy.jobs import (
+            _entry_has_imports,
+            _render_entry,
+            _source_root,
+            discover_import_files,
+        )
+
+        config = self.config
+        if not config.import_files and _source_root(config) is not None:
+            with tempfile.TemporaryDirectory(prefix="josh_adaptive_entry_") as tmp:
+                entry = _render_entry(config, Path(tmp))
+                has_imports = entry is not None and _entry_has_imports(entry)
+            if has_imports:
+                config = replace(config, import_files=discover_import_files(self.cli, config))
+        if config.config_name is None:
+            config = replace(config, config_name=_adaptive_config_name(config))
+
+        self._expansion_config = config
+        return config
+
+    def _check_distinct_exports(self, jobs: list[ExpandedJob]) -> None:
+        """Refuse a multi-job batch whose jobs would all write the same patch file.
+
+        evaluate() runs a whole batch before loading it, so jobs sharing one
+        export path would overwrite each other and the wrong rows would load.
+        Only ``{run_hash}`` and ``{label}`` are unique per job.
+
+        Raises:
+            ValueError: If the patch export path has neither placeholder.
+        """
+        if len(jobs) < 2 or jobs[0].source_path is None:
+            return
+        try:
+            info = self._exports_for(jobs[0]).export_files.get("patch")
+        except Exception:
+            return
+        path = getattr(info, "path", None)
+        if not isinstance(path, str) or "{run_hash}" in path or "{label}" in path:
+            return
+        raise ValueError(
+            f"exportFiles.patch ({path!r}) has no {{run_hash}} or {{label}}, so all "
+            f"{len(jobs)} jobs in this batch would write the same file and their "
+            "results could not be told apart. Add {run_hash} to the export path, "
+            'e.g. "file:///tmp/results_{run_hash}_{replicate}.csv".'
+        )
+
+    def _exports_for(self, job: ExpandedJob) -> Any:
+        """inspect-exports result for *job*'s script, cached per (script, simulation)."""
+        from joshpy.cli import InspectExportsConfig
+
+        if job.source_path is None:
+            raise RuntimeError(f"Job {job.run_hash} has no source_path to inspect exports")
+        key = (str(job.source_path), job.simulation)
+        if key not in self._export_paths:
+            self._export_paths[key] = self.cli.inspect_exports(
+                InspectExportsConfig(script=job.source_path, simulation=job.simulation)
+            )
+        return self._export_paths[key]
+
+    def _load(
+        self,
+        job: ExpandedJob,
+        run_id: str | None,
+        load_config: Any,
+        *,
+        succeeded_before: int,
+    ) -> int:
+        """Load one job's results into ``cell_data``; returns rows loaded."""
+        from joshpy.sweep import load_job_results
+
+        if run_id is None:
+            raise RuntimeError(f"No run was recorded for {job.run_hash}")
+
+        return load_job_results(
+            self.cli,
+            job,
+            self.registry,
+            self._exports_for(job),
+            run_id=run_id,
+            quiet=True,
+            load_config=load_config,
+            succeeded_before=succeeded_before,
+        )
+
+
 def run_adaptive_sweep(
     cli: Any,  # JoshCLI
     config: Any,  # JobConfig
@@ -859,67 +2599,72 @@ def run_adaptive_sweep(
     poll_interval: int = 10,
     batch_timeout: int | None = None,
     auto_ingest: bool = True,
+    collision_policy: str = "fail",
+    on_complete: Callable[[Any, Any], None] | None = None,
     quiet: bool = False,
     load_config: Any | None = None,  # LoadConfig
     stop_on_failure: bool = True,
     jfr: Any | None = None,  # JfrConfig
     enable_profiler: bool = False,
     stream_output: bool = False,
-) -> Any:  # AdaptiveSweepResult
-    """Run an adaptive sweep using Optuna.
+    reuse_runs: bool = True,
+) -> Any:
+    """Run an adaptive sweep: the strategy runs its own loop against joshpy.
 
-    Unlike run_sweep(), this generates jobs on-demand based on Optuna's
-    suggestions, loading results after each run to inform the next trial.
+    Builds an :class:`AdaptiveContext` and hands it to
+    ``config.sweep.strategy.run_adaptive(ctx)``. The strategy proposes
+    parameter sets and calls ``ctx.evaluate(...)`` for each batch; joshpy
+    expands, registers, runs, loads and scores them. For
+    :class:`OptunaStrategy` each trial is a batch of one.
 
-    The lifecycle for each trial:
-    1. Sample parameters from Optuna trial
-    2. Create and register job for these params
-    3. Execute CLI for all replicates
-    4. Wait briefly for export writes to settle
-    5. Load CSV results with retries
-    6. Evaluate objective function
-    7. Report metric back to Optuna and store in registry
-
-    Note: Optuna runs trials serially (one at a time). Josh maintains
-    parallel replicate execution internally. Metrics wait for all
-    replicates to finish before evaluation.
+    Session status is set to "running", then "completed" (or "failed" if any
+    evaluation failed or the strategy raised).
 
     Args:
         cli: JoshCLI instance to use for execution.
-        config: JobConfig with OptunaStrategy configured.
+        config: JobConfig whose ``sweep.strategy`` is adaptive.
         registry: RunRegistry for tracking (required).
         session_id: Session ID in registry (required).
-        objective: Optional objective function override. If not provided,
-            uses the objective from the strategy.
-        remote: If True, use run_remote() for cloud execution.
+        objective: Optional per-run score function override. If not provided,
+            the strategy uses its own (e.g. ``OptunaStrategy.objective``).
+        remote: If True, use run_remote() for Josh Cloud execution.
         api_key: API key for remote execution (optional for local servers).
         endpoint: Custom endpoint URL for remote execution.
+        batch_remote: If True, run each batch through batchRemote.
+        target: Target profile name (required if batch_remote=True).
+        batch_no_wait: If True, dispatch a batch with ``--no-wait`` then poll.
+        poll_interval: Seconds between polls in no-wait mode.
+        batch_timeout: Per-job timeout in seconds for no-wait polling.
+        auto_ingest: Accepted for signature compatibility. Adaptive sweeps
+            always load results, since the strategy needs them.
+        collision_policy: Collision policy for each batch (see ``run_sweep``).
+        on_complete: Optional callback invoked after each job completes.
         quiet: If True, suppress progress output.
         load_config: LoadConfig for result loading behavior.
-        stop_on_failure: If True (default), raise SweepExecutionError on first
-            trial failure. If False, continue with remaining trials and report
-            failures in the result.
+        stop_on_failure: If True (default), raise SweepExecutionError when a
+            run fails (after its batch finishes). If False, failed runs are
+            reported to the strategy and the sweep continues.
+        jfr: Optional JFR profiling configuration (one recording per job).
+        enable_profiler: Enable Josh evaluation profiler (--enable-profiler).
+        stream_output: Stream JAR stdout/stderr to the terminal.
+        reuse_runs: If True (default), a parameter set whose run_hash already
+            has a completed, loaded run in the registry is not run again, and a
+            submitted no-wait batch job is reattached to instead of
+            re-dispatched. This is what makes an interrupted sweep resumable.
+            Set False to always run.
 
     Returns:
-        AdaptiveSweepResult with trial outcomes and best params.
+        The strategy's result (AdaptiveSweepResult for OptunaStrategy). It
+        carries ``run_ids`` and a ``job_set`` owning the work directory; call
+        ``result.job_set.cleanup()`` when done (SweepManager does this).
 
     Raises:
-        TypeError: If config.sweep.strategy is not OptunaStrategy.
-        ValueError: If no objective function is configured.
-        ImportError: If optuna is not installed.
-        SweepExecutionError: If stop_on_failure=True and a trial fails.
+        ValueError: If config.sweep is missing, or batch_remote without target.
+        TypeError: If config.sweep.strategy is not adaptive.
+        SweepExecutionError: If stop_on_failure=True and a run fails.
 
     Examples:
         >>> from joshpy.strategies import run_adaptive_sweep, OptunaStrategy
-        >>> from joshpy.jobs import JobConfig, SweepConfig, ConfigSweepParameter
-        >>> from joshpy.registry import RunRegistry
-        >>> from joshpy.cli import JoshCLI
-        >>>
-        >>> def stability_metric(registry, run_hash, job):
-        ...     # Lower = more stable
-        ...     df = queries.get_timeseries("population", run_hash=run_hash)
-        ...     return df["value"].std() / df["value"].mean()
-        >>>
         >>> config = JobConfig(
         ...     template_path=Path("template.jshc.j2"),
         ...     source_path=Path("simulation.josh"),
@@ -930,448 +2675,65 @@ def run_adaptive_sweep(
         ...         strategy=OptunaStrategy(n_trials=50, direction="minimize"),
         ...     ),
         ... )
-        >>>
         >>> registry = RunRegistry("experiment.duckdb")
         >>> session_id = registry.create_session(config=config)
-        >>> cli = JoshCLI()
-        >>>
         >>> result = run_adaptive_sweep(
-        ...     cli, config,
+        ...     JoshCLI(), config,
         ...     registry=registry,
         ...     session_id=session_id,
         ...     objective=stability_metric,
         ... )
         >>> print(f"Best params: {result.best_params}")
-        >>> print(f"Best value: {result.best_value}")
     """
-    _check_optuna()
-
-    # Import here to avoid circular dependencies
-    from joshpy.cli import InspectExportsConfig
-    from joshpy.jobs import (
-        AdaptiveSweepResult,
-        _register_job_outputs,
-        to_run_config,
-        to_run_remote_config,
-    )
-    from joshpy.sweep import LoadConfig, load_job_results
-
-    if load_config is None:
-        load_config = LoadConfig()
-
-    # Validate strategy
     if config.sweep is None:
         raise ValueError("config.sweep is required for adaptive sweeps")
 
-    base_strategy = config.sweep.strategy
-    if not isinstance(base_strategy, OptunaStrategy):
+    strategy = config.sweep.strategy
+    if strategy is None or not strategy.is_adaptive:
         raise TypeError(
-            f"run_adaptive_sweep requires OptunaStrategy, got {type(base_strategy).__name__}. "
+            "run_adaptive_sweep requires OptunaStrategy or another adaptive strategy, "
+            f"got {type(strategy).__name__}. "
             "For non-adaptive strategies, use run_sweep() instead."
         )
+    if batch_remote and target is None:
+        raise ValueError("target is required when batch_remote=True")
 
-    # After isinstance check, we know it's OptunaStrategy
-    strategy: OptunaStrategy = base_strategy
-
-    # Get objective function (from arg or strategy)
-    obj_fn = objective or strategy.get_objective()
-
-    # Create Optuna study
-    study = strategy.create_study()
-
-    # Get export paths once (for result loading)
-    export_paths = cli.inspect_exports(
-        InspectExportsConfig(
-            script=config.source_path,
-            simulation=config.simulation,
-        )
+    ctx = AdaptiveContext(
+        cli=cli,
+        config=config,
+        registry=registry,
+        session_id=session_id,
+        objective=objective,
+        remote=remote,
+        api_key=api_key,
+        endpoint=endpoint,
+        batch_remote=batch_remote,
+        target=target,
+        batch_no_wait=batch_no_wait,
+        poll_interval=poll_interval,
+        batch_timeout=batch_timeout,
+        collision_policy=collision_policy,
+        on_complete=on_complete,
+        quiet=quiet,
+        load_config=load_config,
+        stop_on_failure=stop_on_failure,
+        jfr=jfr,
+        enable_profiler=enable_profiler,
+        stream_output=stream_output,
+        reuse_runs=reuse_runs,
     )
 
-    from joshpy.jobs import _per_job_jfr
-
-    # Initialize tracking
-    job_results: list[tuple[ExpandedJob, Any]] = []
-    succeeded = 0
-    failed = 0
-    n_trials = strategy.n_trials
-
-    if not quiet:
-        print(f"Running adaptive sweep with {n_trials} trials")
-        print(f"  Direction: {strategy.direction}")
-        print(f"  Sampler: {strategy.sampler}")
-
-    # Set session status to running
     registry.update_session_status(session_id, "running")
-
-    # Per-sweep staging root for batch remote mode. Cleaned up in finally.
-    sweep_workdir: Path | None = None
-    if batch_remote:
-        import tempfile
-
-        sweep_workdir = Path(
-            tempfile.mkdtemp(prefix=f"joshpy-adaptive-{session_id}-")
-        )
-
     try:
-        for trial_num in range(n_trials):
-            # 1. Ask Optuna for next params
-            trial = study.ask()
-
-            # 2. Sample parameters from trial
-            params = sample_params_from_trial(
-                trial,
-                config.sweep.config_parameters,
-                config.sweep.file_parameters,
-                config.sweep.compound_parameters,
-            )
-
-            if not quiet:
-                # Format params for display
-                display_params = {
-                    k: v["label"] if isinstance(v, dict) and "label" in v else v
-                    for k, v in params.items()
-                }
-                print(f"[{trial_num + 1}/{n_trials}] Params: {display_params}")
-
-            # 3. Create job for these params
-            job = _create_single_job(config, params, trial_num)
-
-            # 4. Register job in registry
-            josh_content = None
-            if job.source_path and job.source_path.exists():
-                josh_content = job.source_path.read_text()
-
-            registry.register_run(
-                session_id=session_id,
-                run_hash=job.run_hash,
-                josh_path=str(job.source_path) if job.source_path else "",
-                config_content=job.config_content,
-                file_mappings=_convert_file_mappings(job.file_mappings),
-                parameters=job.parameters,
-                josh_content=josh_content,
-            )
-
-            # Forward JobConfig-declared attributes (see SweepManager.run).
-            if job.attributes:
-                registry.set_attributes(job.run_hash, **job.attributes)
-
-            # 5. Execute CLI
-            job_jfr = _per_job_jfr(jfr, job.run_hash) if jfr else None
-            if batch_remote:
-                from joshpy.batch_orchestrator import assemble_batch_workdir
-                from joshpy.cli import StageToMinioConfig
-                from joshpy.jobs import to_batch_remote_config
-
-                assert target is not None
-                assert sweep_workdir is not None
-
-                job_dir = assemble_batch_workdir(job, sweep_workdir)
-                per_job_prefix = (
-                    f"sweeps/{session_id}/jobs/{job.run_hash}/"
-                )
-                stage_result = cli.stage_to_minio(
-                    StageToMinioConfig(input_dir=job_dir, prefix=per_job_prefix),
-                )
-                if not stage_result.success:
-                    result = stage_result
-                else:
-                    br_config = to_batch_remote_config(
-                        job, target, per_job_prefix,
-                        no_wait=False,  # adaptive sweeps always block
-                        timeout=batch_timeout,
-                        require_prestaged=True,
-                    )
-                    result = cli.batch_remote(
-                        br_config, jfr=job_jfr, stream_output=stream_output,
-                    )
-            elif remote:
-                run_config = to_run_remote_config(job, api_key=api_key, endpoint=endpoint)
-                result = cli.run_remote(run_config, jfr=job_jfr, stream_output=stream_output)
-            else:
-                run_config = to_run_config(job, enable_profiler=enable_profiler)
-                result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
-
-            job_results.append((job, result))
-
-            # 6. Record the run result in the registry (needed for load_job_results)
-            run_id = registry.start_run(
-                run_hash=job.run_hash,
-                session_id=session_id,
-                replicate=0,  # CLI runs all replicates at once
-                output_path=str(job.config_path.parent) if job.config_path else None,
-                metadata={"parameters": job.parameters, "trial": trial_num},
-            )
-            error_msg = result.stderr if not result.success else None
-            registry.complete_run(
-                run_id=run_id,
-                exit_code=result.exit_code,
-                error_message=error_msg,
-            )
-
-            _register_job_outputs(
-                cli=cli,
-                registry=registry,
-                job=job,
-                run_id=run_id,
-                export_paths=export_paths,
-                quiet=quiet,
-            )
-
-            if result.success:
-                succeeded += 1
-
-                # 7. Wait for writes to settle and load results
-                import time
-
-                time.sleep(load_config.settle_delay)
-
-                try:
-                    rows_loaded = load_job_results(
-                        cli,
-                        job,
-                        registry,
-                        export_paths,
-                        quiet=True,
-                        load_config=load_config,
-                        succeeded_before=succeeded - 1,
-                        run_id=run_id,
-                    )
-                except Exception as e:
-                    # Log but don't fail the whole sweep
-                    if not quiet:
-                        print(f"  [WARN] Result loading failed: {e}")
-                    # Set user attrs BEFORE tell() since trial is finished after tell()
-                    trial.set_user_attr("error", str(e))
-                    trial.set_user_attr("run_hash", job.run_hash)
-                    study.tell(trial, float("inf"))
-                    continue
-
-                # 7. Compute objective
-                try:
-                    metric = obj_fn(registry, job.run_hash, job)
-                except Exception as e:
-                    if not quiet:
-                        print(f"  [WARN] Objective evaluation failed: {e}")
-                    # Set user attrs BEFORE tell() since trial is finished after tell()
-                    trial.set_user_attr("error", f"objective_error: {e}")
-                    trial.set_user_attr("run_hash", job.run_hash)
-                    study.tell(trial, float("inf"))
-                    continue
-
-                # 8. Store traceability info BEFORE tell() since trial is finished after
-                trial.set_user_attr("run_hash", job.run_hash)
-                trial.set_user_attr("metric", metric)
-                trial.set_user_attr("rows_loaded", rows_loaded)
-
-                # Report to Optuna (finishes the trial)
-                study.tell(trial, metric)
-
-                if not quiet:
-                    print(f"  [OK] metric={metric:.4f} (rows={rows_loaded})")
-
-            else:
-                failed += 1
-                # Set user attrs BEFORE tell() since trial is finished after tell()
-                trial.set_user_attr("run_hash", job.run_hash)
-                trial.set_user_attr("error", f"exit_code={result.exit_code}")
-                # Failed trial gets worst possible value
-                study.tell(trial, float("inf"))
-
-                if not quiet:
-                    print(f"  [FAIL] exit_code={result.exit_code}")
-                    if result.stderr:
-                        print(f"\n  STDERR:\n{result.stderr}")
-
-                if stop_on_failure:
-                    # Update session status before raising
-                    registry.update_session_status(session_id, "failed")
-                    raise SweepExecutionError(
-                        job=job,
-                        result=result,
-                        trial_num=trial_num,
-                        succeeded_before=succeeded,
-                    )
-
-        # Store study outcomes in registry
-        _store_study_outcomes(registry, session_id, study)
-
-        # Update session status
-        final_status = "completed" if failed == 0 else "failed"
-        registry.update_session_status(session_id, final_status)
-
-        if not quiet:
-            print("\nAdaptive sweep complete:")
-            print(f"  Trials: {n_trials} ({succeeded} succeeded, {failed} failed)")
-            if study.best_trial is not None:
-                print(f"  Best value: {study.best_value}")
-                print(f"  Best params: {study.best_params}")
-
-        return AdaptiveSweepResult(
-            job_results=job_results,
-            succeeded=succeeded,
-            failed=failed,
-            study=study,
-            best_params=study.best_params if study.best_trial else None,
-            best_value=study.best_value if study.best_trial else None,
-        )
-
-    except Exception:
-        # Set status to failed on exception
+        result = strategy.run_adaptive(ctx)
+    except BaseException:
+        # Includes KeyboardInterrupt: an interrupted sweep is marked failed;
+        # rerunning it resumes from the runs already in the registry.
         registry.update_session_status(session_id, "failed")
+        ctx.cleanup()
         raise
-    finally:
-        if sweep_workdir is not None:
-            import shutil
 
-            shutil.rmtree(sweep_workdir, ignore_errors=True)
-
-
-def _create_single_job(
-    config: Any,  # JobConfig
-    params: dict[str, Any],
-    trial_num: int,
-) -> Any:  # ExpandedJob
-    """Create a single ExpandedJob from sampled parameters.
-
-    Used by run_adaptive_sweep() to create jobs dynamically for each trial.
-
-    Args:
-        config: The JobConfig with template and settings.
-        params: Parameter values sampled from Optuna trial.
-        trial_num: Trial number (for unique directory naming).
-
-    Returns:
-        ExpandedJob ready for execution.
-    """
-    import tempfile
-    from pathlib import Path
-
-    # Import here to avoid circular dependencies
-    from joshpy.jobs import ExpandedJob, _compute_run_hash
-
-    try:
-        from jinja2 import Environment, FileSystemLoader
-    except ImportError:
-        raise ImportError(
-            "jinja2 is required for job templating. Install with: pip install joshpy[jobs]"
-        )
-
-    # Load template
-    if config.template_path:
-        template_dir = config.template_path.parent
-        template_name = config.template_path.name
-        env = Environment(loader=FileSystemLoader(str(template_dir)), autoescape=False)
-        template = env.get_template(template_name)
-    elif config.template_string:
-        env = Environment(autoescape=False)
-        template = env.from_string(config.template_string)
-    else:
-        raise ValueError("Either template_path or template_string must be provided")
-
-    # Separate config params from file params
-    config_params: dict[str, Any] = {}
-    file_mappings = config.file_mappings.copy()
-    custom_tags: dict[str, str] = {}
-
-    for key, value in params.items():
-        if isinstance(value, dict) and "path" in value and "label" in value:
-            # File parameter
-            file_path = value["path"]
-            file_label = value["label"]
-            file_mappings[key] = file_path
-            config_params[key] = file_label
-            custom_tags[key] = file_label
-            if hasattr(file_path, "name"):
-                custom_tags[f"{key}_file"] = file_path.name
-            else:
-                custom_tags[f"{key}_file"] = str(file_path).split("/")[-1]
-        else:
-            # Config parameter
-            config_params[key] = value
-            custom_tags[str(key)] = str(value)
-
-    # Render template
-    rendered = template.render(**config_params)
-
-    # Compute run_hash
-    run_hash = _compute_run_hash(
-        josh_path=config.source_path,
-        config_content=rendered,
-        file_mappings=file_mappings if file_mappings else None,
-    )
-
-    # Add run_hash as custom tag
-    custom_tags["run_hash"] = run_hash
-
-    # Add label as a custom tag if provided
-    if config.label is not None:
-        custom_tags["label"] = config.label
-
-    # Derive config name from template path (e.g., "adaptive_config.jshc.j2" -> "adaptive_config.jshc")
-    # This ensures the config name matches what the Josh file references via "config <name>.xxx"
-    if config.template_path:
-        # Remove .j2 extension to get .jshc filename
-        config_name = config.template_path.stem  # "adaptive_config.jshc"
-        if not config_name.endswith(".jshc"):
-            config_name = config_name + ".jshc"
-    else:
-        config_name = "sweep_config.jshc"
-
-    # Write config file to temp directory
-    temp_dir = Path(tempfile.mkdtemp(prefix="josh_adaptive_"))
-    config_subdir = temp_dir / f"trial_{trial_num:04d}_{run_hash}"
-    config_subdir.mkdir(parents=True, exist_ok=True)
-    config_path = config_subdir / config_name
-    config_path.write_text(rendered)
-
-    return ExpandedJob(
-        config_content=rendered,
-        config_path=config_path,
-        config_name=config_name,
-        run_hash=run_hash,
-        parameters=config_params,
-        simulation=config.simulation,
-        replicates=config.replicates,
-        source_path=config.source_path,
-        file_mappings=file_mappings,
-        custom_tags=custom_tags,
-        label=config.label,
-        attributes=dict(config.attributes),
-        upload_source_path=config.upload_source_path,
-        upload_config_path=config.upload_config_path,
-        upload_data_path=config.upload_data_path,
-        output_steps=config.output_steps,
-        seed=config.seed,
-        crs=config.crs,
-        use_float64=config.use_float64,
-    )
-
-
-def _convert_file_mappings(
-    file_mappings: dict[str, Any],
-) -> dict[str, dict[str, str]] | None:
-    """Convert file_mappings from {name: Path} to registry format.
-
-    Args:
-        file_mappings: Dict mapping names to Path objects.
-
-    Returns:
-        Dict in {name: {path, hash}} format, or None if empty.
-    """
-    if not file_mappings:
-        return None
-
-    from pathlib import Path
-
-    from joshpy.jobs import _hash_file
-
-    result: dict[str, dict[str, str]] = {}
-    for name, path in file_mappings.items():
-        path = Path(path) if not isinstance(path, Path) else path
-        result[name] = {
-            "path": str(path),
-            "hash": _hash_file(path) if path.exists() else "",
-        }
+    registry.update_session_status(session_id, "completed" if ctx.failed == 0 else "failed")
     return result
 
 
@@ -1389,8 +2751,6 @@ def _store_study_outcomes(
         session_id: Session ID to update.
         study: Completed Optuna study.
     """
-    import json
-
     # Build metadata dict
     metadata: dict[str, Any] = {
         "optuna_n_trials": len(study.trials),
@@ -1402,15 +2762,4 @@ def _store_study_outcomes(
         metadata["optuna_best_value"] = study.best_value
         metadata["optuna_best_trial_number"] = study.best_trial.number
 
-    # Get existing session metadata and merge
-    session = registry.get_session(session_id)
-    if session and session.metadata:
-        existing = session.metadata
-        existing.update(metadata)
-        metadata = existing
-
-    # Update session metadata via direct SQL (registry doesn't have update_session_metadata)
-    registry.conn.execute(
-        "UPDATE sweep_sessions SET metadata = ? WHERE session_id = ?",
-        [json.dumps(metadata), session_id],
-    )
+    registry.update_session_metadata(session_id, **metadata)

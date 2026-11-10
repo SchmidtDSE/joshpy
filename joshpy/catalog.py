@@ -473,15 +473,20 @@ class ProjectCatalog:
         }
 
         # Add sweep summary if present
-        if config.sweep:
+        if config.sweep is not None:
             param_names = [p.name for p in (config.sweep.config_parameters or [])]
             param_names += [p.name for p in (config.sweep.file_parameters or [])]
             param_names += [p.name for p in (config.sweep.compound_parameters or [])]
-            strategy_name = type(config.sweep.strategy).__name__ if config.sweep.strategy else "CartesianStrategy"
+            strategy = config.sweep.strategy
+            strategy_name = type(strategy).__name__ if strategy else "CartesianStrategy"
+            adaptive = strategy is not None and strategy.is_adaptive
+            if adaptive and not param_names:
+                param_names = list(getattr(strategy, "param_names", []))
             orchestration["sweep_summary"] = {
                 "parameters": param_names,
                 "strategy": strategy_name,
-                "total_combinations": len(config.sweep),
+                # Adaptive strategies decide their combinations at run time.
+                "total_combinations": None if adaptive else len(config.sweep),
             }
 
         # Add template sources if present

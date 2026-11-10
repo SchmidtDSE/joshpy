@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 try:
     import duckdb  # noqa: F401
@@ -610,6 +610,63 @@ class TestJobExpander(unittest.TestCase):
         self.assertIn("run_hash", job.custom_tags)
 
         job_set.cleanup()
+
+    def test_expand_static_custom_tags(self):
+        """JobConfig.custom_tags reach every job and leave run_hash unchanged."""
+        sweep = SweepConfig(config_parameters=[ConfigSweepParameter(name="a", values=[1, 2])])
+        plain = JobExpander().expand(JobConfig(template_string="a={{ a }}", sweep=sweep))
+        tagged = JobExpander().expand(
+            JobConfig(
+                template_string="a={{ a }}",
+                sweep=sweep,
+                custom_tags={"exportPrefix": "study-a"},
+            )
+        )
+        try:
+            for plain_job, tagged_job in zip(plain.jobs, tagged.jobs, strict=True):
+                self.assertEqual(tagged_job.custom_tags["exportPrefix"], "study-a")
+                self.assertEqual(tagged_job.custom_tags["a"], plain_job.custom_tags["a"])
+                self.assertEqual(tagged_job.run_hash, plain_job.run_hash)
+                self.assertNotIn("exportPrefix", tagged_job.parameters)
+        finally:
+            plain.cleanup()
+            tagged.cleanup()
+
+    def test_static_custom_tags_must_not_clash_with_parameters(self):
+        config = JobConfig(
+            template_string="a={{ a }}",
+            sweep=SweepConfig(config_parameters=[ConfigSweepParameter(name="a", values=[1])]),
+            custom_tags={"a": "2"},
+        )
+        with self.assertRaisesRegex(ValueError, "clash with sweep parameters"):
+            JobExpander().expand(config)
+
+    def test_static_custom_tags_reject_reserved_names(self):
+        for name in ("run_hash", "label", "replicate"):
+            with self.assertRaisesRegex(ValueError, "custom_tags may not set"):
+                JobConfig(template_string="x = 1", custom_tags={name: "v"})
+
+    def test_static_custom_tags_round_trip(self):
+        config = JobConfig(template_string="x = 1", custom_tags={"exportPrefix": "study-a"})
+        self.assertEqual(JobConfig.from_dict(config.to_dict()).custom_tags, config.custom_tags)
+        self.assertNotIn("custom_tags", JobConfig(template_string="x = 1").to_dict())
+
+    def test_static_custom_tags_reach_the_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "sim.josh"
+            source.write_text("start simulation Main\nend simulation\n")
+            job_set = JobExpander().expand(
+                JobConfig(
+                    template_string="x = 1",
+                    source_path=source,
+                    custom_tags={"exportPrefix": "study-a"},
+                )
+            )
+            try:
+                run_config = to_run_config(job_set.jobs[0])
+                self.assertEqual(run_config.custom_tags["exportPrefix"], "study-a")
+            finally:
+                job_set.cleanup()
 
     def test_expand_to_specific_dir(self):
         """Expanding to specific directory should use that directory."""
@@ -2658,6 +2715,93 @@ class TestRunSweepBatchRemote(unittest.TestCase):
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
 
+    def test_seeded_jobs_warn_that_batch_remote_takes_no_seed(self):
+        """batchRemote has no --seed, so a seeded job runs unseeded on the target."""
+        import warnings
+        from dataclasses import replace
+
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+        mock_cli.batch_remote.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+
+        def dispatch(job):
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            run_sweep(
+                mock_cli, job_set, batch_remote=True, target="gke-test", session_id="s1",
+                quiet=True,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_str:
+            job = self._make_real_job(Path(tmp_str))
+            with self.assertWarnsRegex(UserWarning, r"no --seed: jobs seeded \[3\]"):
+                dispatch(replace(job, seed=3))
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                dispatch(job)  # unseeded: nothing to warn about
+
+        self.assertNotIn("--seed", " ".join(map(str, mock_cli.batch_remote.call_args.args)))
+
+    def _stage_config_for(self, target: str, targets_dir: Path, env: dict[str, str]):
+        """Run one blocking batch job against *target* and return its StageToMinioConfig."""
+        import os
+
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+        mock_cli.batch_remote.return_value = MagicMock(
+            success=True, exit_code=0, stdout="", stderr="",
+        )
+        minio_vars = ("MINIO_ENDPOINT", "MINIO_ACCESS_KEY", "MINIO_SECRET_KEY", "MINIO_BUCKET")
+        clean_env = {k: v for k, v in os.environ.items() if k not in minio_vars}
+        with tempfile.TemporaryDirectory() as tmp_str, patch(
+            "joshpy.targets.TARGETS_DIR", targets_dir
+        ), patch.dict(os.environ, {**clean_env, **env}, clear=True):
+            job = self._make_real_job(Path(tmp_str))
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            run_sweep(mock_cli, job_set, batch_remote=True, target=target, session_id="s1", quiet=True)
+        return mock_cli.stage_to_minio.call_args[0][0]
+
+    def test_stages_to_the_target_profiles_bucket(self):
+        """stageToMinio takes no target, so the profile's endpoint and bucket are passed."""
+        import json
+
+        with tempfile.TemporaryDirectory() as targets_str:
+            targets_dir = Path(targets_str)
+            (targets_dir / "cluster.json").write_text(json.dumps({
+                "type": "kubernetes",
+                "kubernetes": {"context": "ctx", "namespace": "ns", "image": "img"},
+                "minio_endpoint": "https://storage.example.com",
+                "minio_bucket": "profile-bucket",
+            }))
+            stage_cfg = self._stage_config_for(
+                "cluster", targets_dir, {"MINIO_BUCKET": "env-bucket", "MINIO_ACCESS_KEY": "k"}
+            )
+
+        self.assertEqual(stage_cfg.minio_bucket, "profile-bucket")  # the profile wins
+        self.assertEqual(stage_cfg.minio_endpoint, "https://storage.example.com")
+        # Keys stay in the environment, off the command line.
+        self.assertIsNone(stage_cfg.minio_access_key)
+        self.assertIsNone(stage_cfg.minio_secret_key)
+
+    def test_stages_to_the_environments_bucket_without_a_profile(self):
+        with tempfile.TemporaryDirectory() as targets_str:
+            stage_cfg = self._stage_config_for(
+                "unprofiled", Path(targets_str),
+                {"MINIO_BUCKET": "env-bucket", "MINIO_ENDPOINT": "https://env.example.com"},
+            )
+
+        self.assertEqual(stage_cfg.minio_bucket, "env-bucket")
+        self.assertEqual(stage_cfg.minio_endpoint, "https://env.example.com")
+
     def test_stage_failure_short_circuits_dispatch(self):
         """If stage_to_minio fails, batch_remote should not be called."""
         from joshpy.jobs import run_sweep
@@ -2733,6 +2877,71 @@ class TestRunSweepBatchRemote(unittest.TestCase):
         mock_cli.poll_batch.assert_called()
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
+
+    def _no_wait_dispatch(self, stdout: str):
+        """Dispatch one job with --no-wait, Josh printing *stdout*; returns (result, mock_cli)."""
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = CLIResult(0, "", "", [])
+        mock_cli.batch_remote.return_value = CLIResult(0, stdout, "", ["batchRemote"])
+        mock_cli.poll_batch.return_value = CLIResult(0, '{"status":"complete"}', "", [])
+        with tempfile.TemporaryDirectory() as tmp_str:
+            job = self._make_real_job(Path(tmp_str))
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            result = run_sweep(
+                mock_cli, job_set, batch_remote=True, target="gke-test", batch_no_wait=True,
+                session_id="s1", quiet=True, stop_on_failure=False,
+            )
+        return result, mock_cli
+
+    def test_async_dispatch_reads_the_job_id_after_progress_lines(self):
+        """Josh prints progress before the JSON; the job id is on the last JSON line."""
+        result, mock_cli = self._no_wait_dispatch(
+            "Loading target profile: gke-test\n"
+            "Dispatching to target (1 replicates) against sweeps/s1/jobs/abc123/...\n"
+            "Dispatched. Status path: batch-status/job-7/status.json\n"
+            '{"jobId":"job-7","target":"gke-test","statusPath":"batch-status/job-7/status.json"}\n'
+        )
+        self.assertEqual(mock_cli.poll_batch.call_args.args[0].job_id, "job-7")
+        self.assertEqual((result.succeeded, result.failed), (1, 0))
+
+    def test_async_pool_skip_is_a_success_without_a_dispatch(self):
+        """A run the collision policy skips was never dispatched, so it has no job id to read."""
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import run_sweep
+        from joshpy.registry import RunRegistry
+        from joshpy.sweep import _CollisionAction, register_job
+
+        mock_cli = MagicMock()
+        registry = RunRegistry(":memory:")
+        self.addCleanup(registry.close)
+        skip = _CollisionAction(action="skip", existing=frozenset({0}))
+        with tempfile.TemporaryDirectory() as tmp_str, patch(
+            "joshpy.sweep.resolve_collision_action", return_value=(skip, None)
+        ):
+            job = self._make_real_job(Path(tmp_str))
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            session_id = registry.create_session(config=JobConfig(template_string="x = 1"))
+            register_job(registry, session_id, job)
+            result = run_sweep(
+                mock_cli, job_set, registry=registry, session_id=session_id,
+                batch_remote=True, target="gke-test", batch_no_wait=True,
+                collision_policy="pool", quiet=True, stop_on_failure=False,
+            )
+        mock_cli.batch_remote.assert_not_called()
+        mock_cli.poll_batch.assert_not_called()
+        self.assertEqual((result.succeeded, result.failed), (1, 0))
+        self.assertIsInstance(result.job_results[0][1], CLIResult)
+
+    def test_async_dispatch_without_a_job_id_fails_instead_of_completing(self):
+        """A dispatched job that can't be polled must never be recorded as completed."""
+        result, mock_cli = self._no_wait_dispatch("Loading target profile: gke-test\nDispatched.\n")
+        mock_cli.poll_batch.assert_not_called()
+        self.assertEqual((result.succeeded, result.failed), (0, 1))
+        _, failed = result.job_results[0]
+        self.assertIn("no batch job id", failed.stderr)
 
     def test_bottle_records_batch_metadata(self):
         """bottle=first_failure should embed target + minio_prefix in manifest."""
@@ -3232,3 +3441,131 @@ class TestRunSingle(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestRunSweepNoWaitRegistry(unittest.TestCase):
+    """batch_no_wait records a dispatch as submitted and completes it when polled."""
+
+    def setUp(self):
+        import json
+
+        from joshpy.cli import CLIResult
+        from joshpy.registry import RunRegistry
+        from joshpy.sweep import register_job
+
+        self.tmp = Path(tempfile.mkdtemp())
+        src = self.tmp / "sim.josh"
+        src.write_text("start simulation Main\nend simulation\n")
+        (self.tmp / "config.jshc").write_text("x = 1 count")
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(config=JobConfig(source_path=src))
+        self.job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=self.tmp / "config.jshc",
+            config_name="config.jshc",
+            run_hash="abc123abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=src,
+        )
+        register_job(self.registry, self.session_id, self.job)
+
+        self.cli = MagicMock()
+        self.cli.inspect_exports.return_value = MagicMock(export_files={}, debug_files={})
+        self.cli.stage_to_minio.return_value = CLIResult(0, "", "", [])
+        self.cli.batch_remote.return_value = CLIResult(0, json.dumps({"jobId": "job-1"}), "", [])
+
+    def tearDown(self):
+        import shutil
+
+        self.registry.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, **kwargs):
+        from joshpy.jobs import run_sweep
+
+        return run_sweep(
+            self.cli,
+            JobSet(jobs=[self.job]),
+            registry=self.registry,
+            session_id=self.session_id,
+            batch_remote=True,
+            target="gke-test",
+            batch_no_wait=True,
+            poll_interval=0,
+            quiet=True,
+            **kwargs,
+        )
+
+    def _latest_run(self):
+        return self.registry.get_runs_for_hash(self.job.run_hash)[-1]
+
+    def test_dispatch_recorded_as_submitted_until_polled(self):
+        from joshpy.cli import CLIResult
+
+        seen = []
+
+        def poll(config):
+            run = self._latest_run()
+            seen.append((run.completed_at, run.exit_code, run.metadata["batch_job_id"],
+                         run.metadata["target"]))
+            return CLIResult(0, '{"status":"complete"}', "", [])
+
+        self.cli.poll_batch.side_effect = poll
+        result = self._run()
+
+        self.assertEqual(seen, [(None, None, "job-1", "gke-test")])
+        runs = self.registry.get_runs_for_hash(self.job.run_hash)
+        self.assertEqual(len(runs), 1)
+        self.assertIsNotNone(runs[0].completed_at)
+        self.assertEqual(runs[0].exit_code, 0)
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.run_ids[self.job.run_hash], runs[0].run_id)
+
+    def test_cluster_failure_recorded_as_failed(self):
+        from joshpy.cli import CLIResult
+
+        self.cli.poll_batch.return_value = CLIResult(1, "", "pod OOMKilled", [])
+        result = self._run(stop_on_failure=False)
+
+        run = self._latest_run()
+        self.assertEqual(run.exit_code, 1)
+        self.assertIn("OOMKilled", run.error_message)
+        self.assertEqual(result.failed, 1)
+
+    def test_cluster_failure_raises_with_stop_on_failure(self):
+        from joshpy.cli import CLIResult
+        from joshpy.strategies import SweepExecutionError
+
+        self.cli.poll_batch.return_value = CLIResult(1, "", "pod OOMKilled", [])
+        with self.assertRaises(SweepExecutionError):
+            self._run(stop_on_failure=True)
+        self.assertEqual(self._latest_run().exit_code, 1)
+
+    def test_timeout_leaves_run_submitted(self):
+        from joshpy.cli import CLIResult
+
+        self.cli.poll_batch.return_value = CLIResult(2, "", "", [])
+        result = self._run(batch_timeout=0, stop_on_failure=True)
+
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.job_results[0][1].exit_code, -1)
+        run = self._latest_run()
+        self.assertIsNone(run.completed_at)
+        self.assertEqual(run.metadata["batch_job_id"], "job-1")
+
+    def test_completion_registers_outputs_ingests_and_reports(self):
+        from joshpy.cli import CLIResult
+
+        poll_result = CLIResult(0, '{"status":"complete"}', "", [])
+        self.cli.poll_batch.return_value = poll_result
+        completed = []
+        with patch("joshpy.jobs._register_job_outputs", return_value=MagicMock()) as outputs, \
+                patch("joshpy.sweep.ingest_results") as ingest:
+            self._run(on_complete=lambda job, result: completed.append(result))
+
+        run = self._latest_run()
+        self.assertEqual(outputs.call_args.kwargs["run_id"], run.run_id)
+        ingest.assert_called_once()
+        self.assertEqual(completed, [poll_result])

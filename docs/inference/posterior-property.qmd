@@ -1,0 +1,377 @@
+---
+title: "Posterior Probability of the Target"
+description: "Given the marked-plot survey, how probable is it that the stand keeps two-thirds of its adults under each climate future? The projected stand, weighted by the SMC-ABC posterior"
+execute:
+  warning: false
+---
+
+{{< include _sbi-setup.qmd >}}
+
+## Introduction
+
+The two previous pages asked separate questions. The
+[fire-model page](fire-model.qmd) asked which values of the vital rates
+reproduce the survey, and the [rejection filter](rejection-filter.qmd) asked
+which would meet the target under a hot, dry future, with no data. This page
+combines them: **given the survey, how probable is it that the stand meets the
+target under each future?**
+
+Read as a manager would, the workflow has two steps:
+
+1. **The survey bounds the uncertainty in the vital rates.** The model has two
+   unknown rates: `recruitment`, how readily adults recruit, and
+   `juvenileMortality`, how many juveniles die each year. The SMC-ABC posterior
+   is the set of values the marked plots support, with weights.
+2. **Each supported set of rates implies a future.** Project each one 40 years
+   under a future, check the target (the stand keeps at least two-thirds of its
+   adults, adult λ ≥ 0.99), and weight the answers by the posterior. The result
+   is the probability of meeting the target, given the survey, the model and
+   that future.
+
+The probability carries both sources of uncertainty into the answer: which
+rates the stand has (the posterior), and what the weather, fire and the
+model's own randomness do with them (the replicates).
+
+The truth is known here, so the answer can be checked. The truth meets the
+target under all three futures, in every replicate (see
+[the truth and its futures](fire-model.qmd#the-truth-and-its-futures)), so a
+posterior that recovers it should give probabilities near 1. `hot_dry` is the
+test that matters: there the truth's margin is smallest (λ 0.993), and the
+prior gives only 0.41 ([the rejection filter](rejection-filter.qmd#not-a-posterior)).
+A survey that told us nothing would leave it there.
+
+::: {.callout-note}
+## Runtime
+
+The first render runs 900 projections, 30 particles × 3 futures × 10
+replicates, of 260 years each: about 5 hours on a laptop one simulation at a
+time. On a Kubernetes cluster (`JOSH_BATCH_TARGET`; see the
+[fire-model page](fire-model.qmd)) it took about an hour, including loading the
+runs into the registry. The search and the prior filter replay from the
+registry.
+:::
+
+## Picking Up from the Previous Pages
+
+```{python}
+import sys
+from dataclasses import replace
+
+from dotenv import find_dotenv, load_dotenv
+
+_ = load_dotenv(find_dotenv(usecwd=True))  # MinIO keys from the repository's .env, if any
+sys.path.insert(0, "../../examples/sbi_forevertree")
+import forevertree_fire_case as case
+import numpy as np
+import pandas as pd
+
+from joshpy.cli import JoshCLI
+from joshpy.inference import KnownTruthStudy, PropertyFilter, effective_sample_size, weighted_quantile
+from joshpy.jar import JarMode
+from joshpy.registry import RunRegistry
+
+registry = RunRegistry("forevertree_fire.duckdb")  # shared by the replacement pages
+cli = JoshCLI(josh_jar=JarMode.DEV)
+
+spec = KnownTruthStudy(**case.STUDY)  # the fire-model page's definition
+study = spec.load(registry, cli)  # its truth run and prior simulations
+```
+
+The fire-model page's SMC-ABC search, replayed from the registry: sbi proposes
+the same parameter sets, and each is already a completed run.
+
+```{python}
+def runs_in_registry():
+    return registry.conn.execute("SELECT COUNT(*) FROM job_runs").fetchone()[0]
+
+
+runs_before = runs_in_registry()
+SMC = {"num_initial_pop": 60, "num_particles": 30, "epsilon_decay": 0.5, "num_simulations": 600}
+result, _ = study.search(
+    registry, cli, "smcabc", SMC, "forevertree_fire_smcabc", batch_policy="measured"
+)
+particles = result.to_dataframe()  # the final population: parameters, weight, run_hash
+ess = effective_sample_size(particles["weight"])
+print(f"replayed: {runs_in_registry() - runs_before} new simulations")
+print(f"{len(particles)} particles, effective sample size {ess:.1f}")
+```
+
+What the survey says about the vital rates:
+
+```{python}
+study.posterior(result).round(3)
+```
+
+The target, as the rejection filter states it:
+
+```{python}
+holds = PropertyFilter(
+    measure=case.projected,
+    criteria={"holds": ("adult_lambda", case.TARGET_LAMBDA, None)},  # λ at least 0.99
+    replicates=10,
+    min_share=0.9,  # of the replicates
+)
+```
+
+## The Estimate
+
+The ABC posterior is the final population: particles $\theta_i$ with
+importance weights $w_i$. Let $\mathrm{pass}_i$ be 1 if particle $i$ meets the
+target under a future (in 9 of its 10 replicates) and 0 if not. The posterior
+probability of meeting the target is the weighted share of passing particles:
+
+$$
+\hat P(\text{meets the target} \mid S_\text{obs}) = \frac{\sum_i w_i \,\mathrm{pass}_i}{\sum_i w_i}.
+$$
+
+With unequal weights, 30 particles carry the information of fewer independent
+draws: the effective sample size, $\mathrm{ESS} = (\sum_i w_i)^2 / \sum_i w_i^2$.
+The Monte Carlo standard error of $\hat P$ is approximately
+$\sqrt{\hat P(1 - \hat P)/\mathrm{ESS}}$. It is zero when no particle passes,
+or every particle does, and that is not certainty: with $\mathrm{ESS}$ draws
+and no passes, a true probability above about $3/\mathrm{ESS}$ would show at
+least one pass 95% of the time [the rule of three, @hanley1983].
+
+```{python}
+def posterior_probability(passes, weights):
+    """Weighted share of passing particles, its Monte Carlo SE, and a 95% bound if none or all pass."""
+    weights = np.asarray(weights, dtype=float)
+    p = float(np.sum(weights * np.asarray(passes)) / np.sum(weights))
+    standard_error = np.sqrt(p * (1 - p) / effective_sample_size(weights))
+    bound = 3 / effective_sample_size(weights)
+    return {
+        "P": p,
+        "Monte Carlo SE": standard_error,
+        "95% bound": bound if p == 0 else 1 - bound if p == 1 else np.nan,
+    }
+```
+
+## Projecting the Particles
+
+Each particle is a fit run: it stops at the end of the present. To test the
+target, each particle's parameters are run again, as projections under each
+future, with 10 replicates. `result.to_dataframe()` gives the parameter values
+each particle's run was rendered with, and `run_at_each` runs all 30 particles
+under one future as one batch: on a batch target, one dispatch of 30 Jobs.
+
+```{python}
+params = [{name: row[name] for name in case.PRIOR} for row in particles.to_dict("records")]
+projections = {
+    future: replace(spec, model=case.projection_model(future)).run_at_each(
+        registry, cli, params, f"forevertree_fire_posterior_{future}", replicates=10
+    )
+    for future in case.FUTURES
+}
+```
+
+Each projection is a new run, with a new `run_hash`: the fit model run 40
+years further. Its present is a fresh realization of the particle's
+parameters, not the search's run.
+
+## Results
+
+For each future, the probability of meeting the target given the survey,
+beside the share of the replicates that do (pooled; see
+[Reading the Results](#reading-the-results)):
+
+```{python}
+weights = particles["weight"].to_numpy()
+
+
+def pooled_probability(shares, weights):
+    """Posterior probability that one replicate meets the target, pooling the replicates."""
+    return float(np.sum(weights * shares) / np.sum(weights))
+
+
+rows, measured = {}, []
+for future, jobs in projections.items():
+    hashes = [job.run_hash for job in jobs]
+    shares = holds.evaluate(registry, hashes).loc[hashes]
+    rows[future] = {
+        **posterior_probability(shares["passes"], weights),
+        "pooled P": pooled_probability(shares["holds"].to_numpy(), weights),
+    }
+    measured.append(
+        holds.measurements(registry, hashes)
+        .assign(future=future, weight=lambda m: m["run_hash"].map(dict(zip(hashes, weights / 10))))
+    )
+measured = pd.concat(measured, ignore_index=True)
+probabilities = pd.DataFrame(rows).T
+probabilities.round(3)
+```
+
+Under `normal` and `cool_wet`, every particle meets the target. With an
+effective sample size of 22.9, P = 1 means at least 0.87, with 95% confidence.
+Under `hot_dry`, P = 0.95 (Monte Carlo SE 0.04). One particle, at 52% and 8.2%,
+near the truth, meets the target in only 8 of its 10 replicates, and it carries
+4.7% of the weight. Twenty particles meet it in all 10 replicates. Pooling the
+replicates gives the same 0.95: 4.7% of the weighted replicates fall below the
+target.
+
+The adults' yearly growth factor under each future, as a posterior mean and
+central 90%:
+
+```{python}
+measured.groupby("future", sort=False).apply(
+    lambda m: pd.Series(
+        {
+            "adult λ": np.average(m["adult_lambda"], weights=m["weight"]),
+            "5%": weighted_quantile(m["adult_lambda"], m["weight"], 0.05),
+            "95%": weighted_quantile(m["adult_lambda"], m["weight"], 0.95),
+        }
+    ),
+    include_groups=False,
+).round(4)
+```
+
+```{python}
+#| code-fold: true
+#| code-summary: "Figure data"
+years = []
+for future, jobs in projections.items():
+    by_hash = dict(zip([job.run_hash for job in jobs], weights / 10))
+    landscape = case.landscape(registry, list(by_hash))
+    at_start = landscape.loc[landscape["years"] == 0, ["run_hash", "replicate", "adults"]]
+    landscape = landscape.merge(at_start.rename(columns={"adults": "start"}))
+    landscape["adults_relative"] = landscape["adults"] / landscape["start"].where(landscape["start"] > 0)
+    years.append(landscape.assign(future=future, weight=landscape["run_hash"].map(by_hash)))
+years = pd.concat(years, ignore_index=True).dropna(subset=["adults_relative"])
+bands = (
+    years.groupby(["future", "years"])
+    .apply(
+        lambda y: pd.Series(
+            {
+                q: weighted_quantile(y["adults_relative"], y["weight"], level)
+                for q, level in [("low", 0.05), ("median", 0.5), ("high", 0.95)]
+            }
+        ),
+        include_groups=False,
+    )
+    .reset_index()
+)
+target_path = pd.DataFrame({"years": np.arange(case.PROJECTION_YEARS + 1)})
+target_path["adults_relative"] = case.TARGET_LAMBDA ** target_path["years"]
+target = case.TARGET_LAMBDA
+```
+
+```{r}
+#| label: fig-bands
+#| fig-cap: "Adults over the whole landscape under each future, relative to the end of the present, given the survey: the posterior median (line) and central 90% (band) in each year, over all replicates of all particles, each replicate weighted by its particle's weight. The dashed line is the target's path, 1% fewer a year."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 7
+#| fig-height: 4.2
+future_colours <- c(cool_wet = blue, normal = ink, hot_dry = orange)
+bands <- transform(py$bands, future = factor(future, names(future_colours)))
+ggplot(bands, aes(years, median, colour = future, fill = future)) +
+  geom_ribbon(aes(ymin = low, ymax = high), alpha = 0.18, colour = NA) +
+  geom_line(linewidth = 0.9) +
+  geom_line(aes(years, adults_relative), py$target_path, inherit.aes = FALSE, linetype = "dashed") +
+  geom_hline(yintercept = 1, linetype = "dotted") +
+  scale_colour_manual(NULL, values = future_colours) +
+  scale_fill_manual(NULL, values = future_colours) +
+  labs(x = "years since the present", y = "adults / adults at year 0") +
+  theme(legend.position = "top")
+```
+
+```{r}
+#| label: fig-predictive
+#| fig-cap: "The posterior predictive distribution of adult λ over the projection, under each future: every replicate of every particle, weighted. The dashed line is the target."
+#| code-fold: true
+#| code-summary: "Plot code (ggplot2)"
+#| fig-width: 7
+#| fig-height: 4.4
+measured <- transform(py$measured, future = factor(future, names(future_colours)))
+ggplot(measured, aes(adult_lambda, weight = weight, fill = future)) +
+  geom_histogram(binwidth = 0.001, boundary = 1, alpha = 0.85) +
+  geom_vline(xintercept = py$target, linetype = "dashed") +
+  scale_fill_manual(NULL, values = future_colours) +
+  facet_wrap(~future, ncol = 1) +
+  labs(x = "adult λ over the projection, one value per replicate", y = "probability") +
+  theme(legend.position = "none")
+```
+
+Under `normal` and `cool_wet`, the adults hold steady or grow, and the band
+stays well above the target's path. Under `hot_dry`, the adults decline from
+about year 20, as that future dries, and by year 40 the band's lower edge
+reaches the target's path. The posterior's adult λ under `hot_dry` is 0.9946,
+and its 5% quantile is 0.990, the target itself: the stand meets the target,
+with little margin. The truth's own replicates gave 0.993.
+
+## Against the Prior
+
+The rejection filter projected the 200 prior draws under `hot_dry`. Its share
+of passing draws is the answer before the survey: only a baseline, since it
+depends on how wide the prior box was drawn as much as on the model.
+
+```{python}
+hot_dry = replace(spec, model=case.projection_model("hot_dry"))
+prior_table = hot_dry.filter_prior(
+    registry, cli, holds, n=case.N_PRIOR, experiment="forevertree_fire_filter_hot_dry"
+)
+pd.Series(
+    {
+        "prior P (200 draws)": prior_table["passes"].mean(),
+        "posterior P (30 particles)": probabilities.loc["hot_dry", "P"],
+    },
+    name="hot_dry",
+).round(3)
+```
+
+Before the survey, 41% of the prior's parameter sets meet the target under
+`hot_dry`; given the survey, 95% of the posterior does. The survey changes the
+answer. It rules out the corner of the prior box where the stand declines, low
+`recruitment` and high `juvenileMortality`
+([the rejection filter](rejection-filter.qmd#results) maps it), and puts the
+posterior where the target holds. The prior probability depends on how the box
+was drawn; the posterior much less, since the survey, not the box, places it.
+
+## Reading the Results
+
+Each probability above asks whether a parameter set **reliably** meets the
+target: 9 of its 10 replicates must. That is the probability that the stand is
+one that meets it, whatever its weather and fires do. The pooled probability
+asks instead how probable it is that the landscape meets it in one
+realization. For a stand whose replicates differ more, the two can be far
+apart; choose the one the decision needs.
+
+Here the two agree, at 0.95 under `hot_dry`. Most particles that miss the
+target miss it in one replicate of 10, and those still pass the 9-of-10 rule;
+only one particle misses in two.
+
+## Caveats
+
+- **30 particles.** The probabilities rest on an effective sample size of
+  22.9: P = 1 is consistent with a true probability as low as 0.87, and under
+  `hot_dry` the Monte Carlo SE is 0.04.
+- **The margin is small.** Under `hot_dry`, the posterior's λ is 0.9946 against
+  a target of 0.99, and one replicate's λ differs from another's by about
+  0.005. A target of 0.995 would sit at the posterior's centre, and the answer
+  would turn on the replicates' luck as much as on the vital rates.
+- **The model is the truth's.** In a known-truth study, the model that projects
+  is the one that made the survey. With field data, the model's own error
+  enters too, and these probabilities do not account for it.
+- **Each probability is conditional on its future.** Nothing here weighs the
+  futures against each other.
+
+## Scaling Up
+
+- **Small probabilities need more particles.** With 30 particles, the smallest
+  probability distinguishable from zero is about $3/\mathrm{ESS}$. To tell
+  whether the target holds for 5% or 20% of the posterior, the final
+  population should hold a few hundred particles.
+- **Projections cost particles × futures × replicates runs**, here 900. They
+  are independent, so a cluster runs each future's 30 particles as one batch.
+- **Replicates at every proposal are the alternative** to projecting
+  afterwards, but the search fits the present: its runs stop at its end and
+  know nothing of a future. Projections are separate runs either way.
+
+```{python}
+#| include: false
+registry.close()  # the registry stays on disk for the other replacement pages
+```
+
+## References
+
+::: {#refs}
+:::

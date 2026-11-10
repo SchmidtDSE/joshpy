@@ -866,6 +866,91 @@ class TestSweepManagerAdaptiveDispatch(unittest.TestCase):
                 manager.cleanup()
                 manager.close()
 
+    def _run_real_optuna_sweep(self):
+        """Run a 3-trial Optuna sweep end to end against a fake CLI."""
+        from joshpy.cli import CLIResult
+        from joshpy.strategies import OptunaStrategy
+
+        config = JobConfig(
+            template_string="x = {{ x }} meters",
+            source_path=self.josh_path,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2, 3])],
+                strategy=OptunaStrategy(n_trials=3, objective="math:sin"),
+            ),
+        )
+        cli = MagicMock()
+        cli.run.return_value = CLIResult(exit_code=0, stdout="", stderr="", command=[])
+        manager = (
+            SweepManager.builder(config).with_registry(":memory:").with_cli(cli).build()
+        )
+        with patch("joshpy.sweep.load_job_results", return_value=1):
+            result = manager.run(quiet=True, objective=lambda r, h, j: 0.5)
+        return manager, result
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_adaptive_run_adopts_evaluated_jobs(self):
+        """After an adaptive run the manager holds the evaluated jobs and run_ids."""
+        manager, result = self._run_real_optuna_sweep()
+        try:
+            self.assertEqual(result.succeeded, 3)
+            self.assertGreater(len(manager.job_set), 0)
+            self.assertIs(manager.job_set, result.job_set)
+            self.assertEqual(
+                set(manager._last_run_ids), {job.run_hash for job in manager.job_set}
+            )
+            work_dir = manager.job_set.temp_dir
+            self.assertTrue(work_dir.exists())
+        finally:
+            manager.cleanup()
+            manager.close()
+        self.assertFalse(work_dir.exists())
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_load_results_after_adaptive_run(self):
+        manager, _ = self._run_real_optuna_sweep()
+        try:
+            with patch("joshpy.sweep.load_job_results", return_value=2) as load:
+                rows = manager.load_results(quiet=True)
+            self.assertEqual(load.call_count, len(manager.job_set))
+            self.assertEqual(rows, 2 * len(manager.job_set))
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    @unittest.skipUnless(_has_optuna(), "optuna not installed")
+    def test_ingest_after_adaptive_run(self):
+        manager, _ = self._run_real_optuna_sweep()
+        try:
+            with patch("joshpy.sweep.ingest_results", return_value=5) as ingest:
+                self.assertEqual(manager.ingest(quiet=True), 5)
+            self.assertEqual(
+                ingest.call_args.kwargs["label_or_hash"], manager.job_set.jobs[0].run_hash
+            )
+        finally:
+            manager.cleanup()
+            manager.close()
+
+    def test_ingest_before_adaptive_run_raises(self):
+        from joshpy.strategies import OptunaStrategy
+
+        config = JobConfig(
+            template_string="# config",
+            source_path=self.josh_path,
+            sweep=SweepConfig(
+                config_parameters=[ConfigSweepParameter(name="x", values=[1, 2])],
+                strategy=OptunaStrategy(n_trials=2, objective="math:sin"),
+            ),
+        )
+        manager = SweepManager.from_config(config, registry=":memory:")
+        try:
+            with self.assertRaises(RuntimeError) as raised:
+                manager.ingest(quiet=True)
+            self.assertIn("call run() first", str(raised.exception))
+        finally:
+            manager.cleanup()
+            manager.close()
+
     def test_run_dry_run_with_adaptive_prints_message(self):
         """run(dry_run=True) should print message for adaptive without executing."""
         from joshpy.strategies import OptunaStrategy
@@ -1228,6 +1313,82 @@ class TestIngestResults(unittest.TestCase):
                 for rep in range(3):
                     Path(f"/tmp/output_{rep}.csv").unlink(missing_ok=True)
 
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_export_paths_resolve_the_runs_custom_tags(self, mock_loader_cls):
+        """A static tag in the export path ({exportPrefix}) resolves from the run's metadata."""
+        from joshpy.cli import ExportFileInfo, ExportPaths
+        from joshpy.sweep import ingest_results
+
+        registry, session_id, _ = self._make_registry_with_run(replicates=2)
+        latest = registry.start_run(
+            "abc123def456", session_id=session_id,
+            metadata={"replicates": 2, "custom_tags": {"exportPrefix": "study-a"}},
+        )
+        registry.complete_run(latest, exit_code=0)
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 1
+        mock_loader_cls.return_value = mock_loader
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = f"{tmpdir}/{{exportPrefix}}_out_{{run_hash}}_{{replicate}}.csv"
+            mock_cli = MagicMock()
+            mock_cli.inspect_exports.return_value = ExportPaths(
+                simulation="Main",
+                export_files={
+                    "patch": ExportFileInfo(
+                        raw=f"file://{template}", protocol="file", host="", path=template,
+                        file_type="csv",
+                    ),
+                },
+                debug_files={},
+            )
+            for rep in range(2):
+                Path(f"{tmpdir}/study-a_out_abc123def456_{rep}.csv").write_text("step,replicate\n0,0\n")
+
+            ingest_results(mock_cli, registry, "abc123def456", quiet=True)
+
+            loaded = sorted(str(call.kwargs["csv_path"]) for call in mock_loader.load_csv.call_args_list)
+            self.assertEqual(
+                loaded, [f"{tmpdir}/study-a_out_abc123def456_{rep}.csv" for rep in range(2)]
+            )
+        registry.close()
+
+    @patch("joshpy.sweep.CellDataLoader")
+    def test_loads_only_the_runs_output_steps(self, mock_loader_cls):
+        """A batch target writes every step; ingest loads the run's output_steps."""
+        from joshpy.cli import ExportFileInfo, ExportPaths
+        from joshpy.sweep import ingest_results
+
+        registry, session_id, _ = self._make_registry_with_run(replicates=1)
+        latest = registry.start_run(
+            "abc123def456", session_id=session_id,
+            metadata={"replicates": 1, "output_steps": "209,240-241"},
+        )
+        registry.complete_run(latest, exit_code=0)
+        mock_loader = MagicMock()
+        mock_loader.load_csv.return_value = 1
+        mock_loader_cls.return_value = mock_loader
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            template = f"{tmpdir}/out_{{run_hash}}_{{replicate}}.csv"
+            mock_cli = MagicMock()
+            mock_cli.inspect_exports.return_value = ExportPaths(
+                simulation="Main",
+                export_files={
+                    "patch": ExportFileInfo(
+                        raw=f"file://{template}", protocol="file", host="", path=template,
+                        file_type="csv",
+                    ),
+                },
+                debug_files={},
+            )
+            Path(f"{tmpdir}/out_abc123def456_0.csv").write_text("step,replicate\n0,0\n")
+
+            ingest_results(mock_cli, registry, "abc123def456", quiet=True)
+
+        self.assertEqual(mock_loader.load_csv.call_args.kwargs["steps"], [209, 240, 241])
         registry.close()
 
     @patch("joshpy.sweep.CellDataLoader")
@@ -1909,6 +2070,26 @@ class TestLoadJobResultsMinioRouting(unittest.TestCase):
 
             self.assertEqual(rows, 99)
             mock_minio.assert_called_once()
+
+    @patch("joshpy.sweep._load_ingest_replicates", return_value=0)
+    @patch("joshpy.sweep.list_output_replicates", return_value={0, 1})
+    @patch("joshpy.sweep._configure_minio_access", return_value=("bucket", None))
+    def test_minio_loader_loads_the_jobs_output_steps(self, _access, _listed, mock_load):
+        """batchRemote takes no --output-steps, so the per-job loader applies them."""
+        from dataclasses import replace
+
+        from joshpy.sweep import _load_job_results_minio
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "sim.josh"
+            src.write_text("x")
+            job = replace(self._make_job(src), output_steps="209,240-249")
+            _load_job_results_minio(
+                MagicMock(), MagicMock(), job, MagicMock(), MagicMock(path="out_{replicate}.csv"),
+                "run-1", "patch", True,
+            )
+
+        self.assertEqual(mock_load.call_args.kwargs["meta"].output_steps, "209,240-249")
 
     @patch("joshpy.sweep._load_job_results_minio")
     def test_file_protocol_uses_local_path(self, mock_minio):

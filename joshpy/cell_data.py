@@ -112,6 +112,36 @@ if HAS_PYDANTIC:
         model_config = ConfigDict(frozen=True)
 
 
+def parse_output_steps(spec: str | None) -> list[int] | None:
+    """The steps an ``output_steps`` spec names, as Josh reads ``--output-steps``.
+
+    Args:
+        spec: Comma-separated steps and inclusive ranges, such as ``"0-10,50,100"``,
+            or ``None`` for every step.
+
+    Returns:
+        The steps, sorted and without duplicates, or ``None`` for every step.
+
+    Raises:
+        ValueError: If a part is not a step or a range of steps.
+    """
+    if spec is None or not spec.strip():
+        return None
+    steps: set[int] = set()
+    for part in spec.split(","):
+        low, dash, high = part.strip().partition("-")
+        try:
+            first, last = int(low), int(high if dash else low)
+        except ValueError:
+            raise ValueError(
+                f"Invalid output_steps {spec!r}: {part.strip()!r} is not a step or a range"
+            ) from None
+        if last < first:
+            raise ValueError(f"Invalid output_steps {spec!r}: range {part.strip()!r} is reversed")
+        steps.update(range(first, last + 1))
+    return sorted(steps)
+
+
 class CellDataLoader:
     """Load Josh export CSVs into the cell_data table.
 
@@ -152,6 +182,7 @@ class CellDataLoader:
         run_id: str,
         run_hash: str,
         entity_type: str = "patch",
+        steps: Iterable[int] | None = None,
     ) -> int:
         """Load a CSV export into the cell_data table.
 
@@ -175,6 +206,9 @@ class CellDataLoader:
             run_id: The run ID this data belongs to.
             run_hash: Run hash for this run.
             entity_type: Type of entity being exported (default: "patch").
+            steps: Load only these steps; ``None`` (the default) loads every
+                step. For a job's ``output_steps`` where Josh can't apply them
+                (``batchRemote`` takes no ``--output-steps``).
 
         Returns:
             Number of rows loaded.
@@ -286,11 +320,17 @@ class CellDataLoader:
             all_cols = core_cols
             all_exprs = core_exprs
 
+        step_filter = ""
+        if steps is not None:
+            step_list = ", ".join(str(int(step)) for step in steps) or "NULL"
+            step_filter = f"WHERE CAST(step AS INTEGER) IN ({step_list})"
+
         insert_sql = f"""
             INSERT INTO cell_data
             ({all_cols})
             SELECT{all_exprs}
             FROM read_csv_auto('{csv_path_str}')
+            {step_filter}
         """
 
         conn.execute(insert_sql)
@@ -309,7 +349,7 @@ class CellDataLoader:
 
         # Get row count
         count_result = conn.execute(
-            f"SELECT COUNT(*) FROM read_csv_auto('{csv_path_str}')"
+            f"SELECT COUNT(*) FROM read_csv_auto('{csv_path_str}') {step_filter}"
         ).fetchone()
         rows_loaded = count_result[0] if count_result else 0
 
