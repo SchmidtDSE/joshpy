@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 try:
     import duckdb  # noqa: F401
@@ -2734,6 +2734,74 @@ class TestRunSweepBatchRemote(unittest.TestCase):
         self.assertEqual(result.succeeded, 1)
         self.assertEqual(result.failed, 0)
 
+    def _no_wait_dispatch(self, stdout: str):
+        """Dispatch one job with --no-wait, Josh printing *stdout*; returns (result, mock_cli)."""
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import run_sweep
+
+        mock_cli = MagicMock()
+        mock_cli.stage_to_minio.return_value = CLIResult(0, "", "", [])
+        mock_cli.batch_remote.return_value = CLIResult(0, stdout, "", ["batchRemote"])
+        mock_cli.poll_batch.return_value = CLIResult(0, '{"status":"complete"}', "", [])
+        with tempfile.TemporaryDirectory() as tmp_str:
+            job = self._make_real_job(Path(tmp_str))
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            result = run_sweep(
+                mock_cli, job_set, batch_remote=True, target="gke-test", batch_no_wait=True,
+                session_id="s1", quiet=True, stop_on_failure=False,
+            )
+        return result, mock_cli
+
+    def test_async_dispatch_reads_the_job_id_after_progress_lines(self):
+        """Josh prints progress before the JSON; the job id is on the last JSON line."""
+        result, mock_cli = self._no_wait_dispatch(
+            "Loading target profile: gke-test\n"
+            "Dispatching to target (1 replicates) against sweeps/s1/jobs/abc123/...\n"
+            "Dispatched. Status path: batch-status/job-7/status.json\n"
+            '{"jobId":"job-7","target":"gke-test","statusPath":"batch-status/job-7/status.json"}\n'
+        )
+        self.assertEqual(mock_cli.poll_batch.call_args.args[0].job_id, "job-7")
+        self.assertEqual((result.succeeded, result.failed), (1, 0))
+
+    def test_async_pool_skip_is_a_success_without_a_dispatch(self):
+        """A run the collision policy skips was never dispatched, so it has no job id to read."""
+        from joshpy.cli import CLIResult
+        from joshpy.jobs import run_sweep
+        from joshpy.registry import RunRegistry
+        from joshpy.sweep import _CollisionAction
+
+        mock_cli = MagicMock()
+        registry = RunRegistry(":memory:")
+        self.addCleanup(registry.close)
+        skip = _CollisionAction(action="skip", existing=frozenset({0}))
+        with tempfile.TemporaryDirectory() as tmp_str, patch(
+            "joshpy.sweep.resolve_collision_action", return_value=(skip, None)
+        ):
+            job = self._make_real_job(Path(tmp_str))
+            job_set = MagicMock(total_jobs=1, total_replicates=1, __iter__=lambda s: iter([job]))
+            session_id = registry.create_session(config=JobConfig(template_string="x = 1"))
+            registry.register_run(
+                session_id=session_id, run_hash=job.run_hash, josh_path=str(job.source_path),
+                config_content=job.config_content, file_mappings=None, parameters=job.parameters,
+            )
+            result = run_sweep(
+                mock_cli, job_set, registry=registry, session_id=session_id,
+                batch_remote=True, target="gke-test", batch_no_wait=True,
+                collision_policy="pool", quiet=True, stop_on_failure=False,
+            )
+        mock_cli.batch_remote.assert_not_called()
+        mock_cli.poll_batch.assert_not_called()
+        self.assertEqual((result.succeeded, result.failed), (1, 0))
+        self.assertIsInstance(result.job_results[0][1], CLIResult)
+
+    def test_async_dispatch_without_a_job_id_fails_instead_of_completing(self):
+        """A dispatched job that can't be polled must never be recorded as completed."""
+        result, mock_cli = self._no_wait_dispatch("Loading target profile: gke-test\nDispatched.\n")
+        mock_cli.poll_batch.assert_not_called()
+        self.assertEqual((result.succeeded, result.failed), (0, 1))
+        _, failed = result.job_results[0]
+        self.assertIn("no batch job id", failed.stderr)
+
     def test_bottle_records_batch_metadata(self):
         """bottle=first_failure should embed target + minio_prefix in manifest."""
         import json as _json
@@ -3228,6 +3296,190 @@ class TestRunSingle(unittest.TestCase):
                 run = run_single(cli, config, bottle_dir=tmp / "bottles")
 
             self.assertEqual(run.csv_paths, [])
+
+
+class TestRunSweepNoWaitRegistry(unittest.TestCase):
+    """batch_no_wait records a dispatch as submitted and completes it when polled."""
+
+    def setUp(self):
+        import json
+
+        from joshpy.cli import CLIResult
+        from joshpy.registry import RunRegistry
+
+        self.tmp = Path(tempfile.mkdtemp())
+        src = self.tmp / "sim.josh"
+        src.write_text("start simulation Main\nend simulation\n")
+        (self.tmp / "config.jshc").write_text("x = 1 count")
+        self.registry = RunRegistry(":memory:")
+        self.session_id = self.registry.create_session(config=JobConfig(source_path=src))
+        self.job = ExpandedJob(
+            config_content="x = 1 count",
+            config_path=self.tmp / "config.jshc",
+            config_name="config.jshc",
+            run_hash="abc123abc123",
+            parameters={"x": 1},
+            simulation="Main",
+            replicates=1,
+            source_path=src,
+        )
+        self._register(self.job)
+
+        self.cli = MagicMock()
+        self.cli.inspect_exports.return_value = MagicMock(export_files={}, debug_files={})
+        self.cli.stage_to_minio.return_value = CLIResult(0, "", "", [])
+        self.cli.batch_remote.return_value = CLIResult(0, json.dumps({"jobId": "job-1"}), "", [])
+
+    def _register(self, job):
+        self.registry.register_run(
+            session_id=self.session_id, run_hash=job.run_hash, josh_path=str(job.source_path),
+            config_content=job.config_content, file_mappings=None, parameters=job.parameters,
+        )
+
+    def tearDown(self):
+        import shutil
+
+        self.registry.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, **kwargs):
+        from joshpy.jobs import run_sweep
+
+        return run_sweep(
+            self.cli,
+            JobSet(jobs=[self.job]),
+            registry=self.registry,
+            session_id=self.session_id,
+            batch_remote=True,
+            target="gke-test",
+            batch_no_wait=True,
+            poll_interval=0,
+            quiet=True,
+            **kwargs,
+        )
+
+    def _latest_run(self):
+        return self.registry.get_runs_for_hash(self.job.run_hash)[-1]
+
+    def test_dispatch_recorded_as_submitted_until_polled(self):
+        from joshpy.cli import CLIResult
+
+        seen = []
+
+        def poll(config):
+            run = self._latest_run()
+            seen.append((run.completed_at, run.exit_code, run.metadata["batch_job_id"],
+                         run.metadata["target"]))
+            return CLIResult(0, '{"status":"complete"}', "", [])
+
+        self.cli.poll_batch.side_effect = poll
+        result = self._run()
+
+        self.assertEqual(seen, [(None, None, "job-1", "gke-test")])
+        runs = self.registry.get_runs_for_hash(self.job.run_hash)
+        self.assertEqual(len(runs), 1)
+        self.assertIsNotNone(runs[0].completed_at)
+        self.assertEqual(runs[0].exit_code, 0)
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.run_ids[self.job.run_hash], runs[0].run_id)
+
+    def test_cluster_failure_recorded_as_failed(self):
+        from joshpy.cli import CLIResult
+
+        self.cli.poll_batch.return_value = CLIResult(1, "", "pod OOMKilled", [])
+        result = self._run(stop_on_failure=False)
+
+        run = self._latest_run()
+        self.assertEqual(run.exit_code, 1)
+        self.assertIn("OOMKilled", run.error_message)
+        self.assertEqual(result.failed, 1)
+
+    def test_cluster_failure_raises_with_stop_on_failure(self):
+        from joshpy.cli import CLIResult
+        from joshpy.strategies import SweepExecutionError
+
+        self.cli.poll_batch.return_value = CLIResult(1, "", "pod OOMKilled", [])
+        with self.assertRaises(SweepExecutionError):
+            self._run(stop_on_failure=True)
+        self.assertEqual(self._latest_run().exit_code, 1)
+
+    def test_timeout_leaves_run_submitted(self):
+        from joshpy.cli import CLIResult
+
+        self.cli.poll_batch.return_value = CLIResult(2, "", "", [])
+        result = self._run(batch_timeout=0, stop_on_failure=True)
+
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.job_results[0][1].exit_code, -1)
+        run = self._latest_run()
+        self.assertIsNone(run.completed_at)
+        self.assertEqual(run.metadata["batch_job_id"], "job-1")
+
+    def test_completion_registers_outputs_ingests_and_reports(self):
+        from joshpy.cli import CLIResult
+
+        poll_result = CLIResult(0, '{"status":"complete"}', "", [])
+        self.cli.poll_batch.return_value = poll_result
+        completed = []
+        with patch("joshpy.jobs._register_job_outputs", return_value=MagicMock()) as outputs, \
+                patch("joshpy.sweep.ingest_results") as ingest:
+            self._run(on_complete=lambda job, result: completed.append(result))
+
+        run = self._latest_run()
+        self.assertEqual(outputs.call_args.kwargs["run_id"], run.run_id)
+        ingest.assert_called_once()
+        self.assertEqual(completed, [poll_result])
+
+    def test_multi_job_sweep_with_josh_progress_lines(self):
+        """Two dispatches with Josh's progress lines on stdout: neither is recorded or
+        ingested at dispatch; each completes with its own poll outcome."""
+        import dataclasses
+        import json
+
+        from joshpy.cli import CLIResult
+
+        job2 = dataclasses.replace(self.job, run_hash="def456def456", parameters={"x": 2})
+        self._register(job2)
+
+        def dispatch(config, **kwargs):
+            job_id = f"job-{self.cli.batch_remote.call_count}"
+            return CLIResult(0, (
+                "Loading target profile: gke-test\n"
+                f"Dispatching to target (1 replicates) against {config.minio_prefix}...\n"
+                f"Dispatched. Status path: batch-status/{job_id}/status.json\n"
+                + json.dumps({"jobId": job_id, "target": "gke-test",
+                              "statusPath": f"batch-status/{job_id}/status.json"}) + "\n"
+            ), "", [])
+
+        events = []
+
+        def poll(config):
+            events.append(("poll", config.job_id))
+            if config.job_id == "job-1":
+                return CLIResult(0, '{"status":"complete"}', "", [])
+            return CLIResult(1, "", "pod OOMKilled", [])
+
+        self.cli.batch_remote.side_effect = dispatch
+        self.cli.poll_batch.side_effect = poll
+        with patch("joshpy.jobs._register_job_outputs", return_value=MagicMock()), \
+                patch("joshpy.sweep.ingest_results",
+                      side_effect=lambda cli, reg, run_hash, **kw: events.append(("ingest", run_hash))):
+            from joshpy.jobs import run_sweep
+
+            result = run_sweep(
+                self.cli, JobSet(jobs=[self.job, job2]),
+                registry=self.registry, session_id=self.session_id,
+                batch_remote=True, target="gke-test", batch_no_wait=True,
+                poll_interval=0, quiet=True, stop_on_failure=False,
+            )
+
+        self.assertEqual((result.succeeded, result.failed), (1, 1))
+        self.assertEqual(events, [("poll", "job-1"), ("ingest", self.job.run_hash), ("poll", "job-2")])
+        ok = self.registry.get_runs_for_hash(self.job.run_hash)
+        bad = self.registry.get_runs_for_hash(job2.run_hash)
+        self.assertEqual([(r.exit_code, r.metadata["batch_job_id"]) for r in ok], [(0, "job-1")])
+        self.assertEqual([(r.exit_code, r.metadata["batch_job_id"]) for r in bad], [(1, "job-2")])
+        self.assertIn("OOMKilled", bad[0].error_message)
 
 
 if __name__ == '__main__':
