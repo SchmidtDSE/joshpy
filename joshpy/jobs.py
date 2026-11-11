@@ -1996,6 +1996,79 @@ def _resolved_output_uri(info: Any, resolved: Path) -> str:
     return str(resolved)
 
 
+def poll_batch_jobs(
+    cli: JoshCLI,
+    targets: dict[str, str],
+    *,
+    poll_interval: int = 10,
+    timeout: int | None = None,
+    on_finished: Callable[[str, Any], None],
+) -> None:
+    """Poll no-wait batch jobs until each one finishes or *timeout* passes.
+
+    Calls ``on_finished(job_id, result)`` exactly once per job: with the poll
+    result when the job completes (exit 0) or errors (exit 1), or with an
+    exit -1 result once *timeout* seconds have passed. Exit codes 2
+    (running/pending) and 100 (transient poll failure) keep waiting.
+
+    Args:
+        cli: JoshCLI used for ``pollBatch``.
+        targets: Batch job id -> target profile name.
+        poll_interval: Seconds between polling rounds.
+        timeout: Overall timeout in seconds (None waits indefinitely).
+        on_finished: Callback per finished job. Exceptions it raises propagate
+            and stop polling.
+    """
+    import time
+
+    from joshpy.cli import CLIResult, PollBatchConfig
+
+    remaining = list(targets)
+    start = time.monotonic()
+    while remaining:
+        if timeout is not None and time.monotonic() - start > timeout:
+            for job_id in list(remaining):
+                remaining.remove(job_id)
+                on_finished(
+                    job_id,
+                    CLIResult(
+                        exit_code=-1,
+                        stdout="",
+                        stderr=f"Batch job {job_id} timed out after {timeout}s",
+                        command=[],
+                    ),
+                )
+            return
+
+        for job_id in list(remaining):
+            result = cli.poll_batch(PollBatchConfig(job_id=job_id, target=targets[job_id]))
+            if result.exit_code in (0, 1):
+                remaining.remove(job_id)
+                on_finished(job_id, result)
+
+        if remaining:
+            time.sleep(poll_interval)
+
+
+def _no_wait_job_id(stdout: str) -> str | None:
+    """The batch job id that ``batchRemote --no-wait`` prints, or None.
+
+    Josh prints progress lines ("Loading target profile: ...", "Dispatched. ...")
+    before the JSON object, so read the last line that parses as one with a
+    ``jobId``.
+    """
+    import json
+
+    for line in reversed(stdout.strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("jobId"):
+            return str(data["jobId"])
+    return None
+
+
 def run_sweep(
     cli: JoshCLI,
     job_set: JobSet,
@@ -2175,8 +2248,8 @@ def run_sweep(
     _bottled_success = False
     _bottle_collect: list[tuple[ExpandedJob, Any]] = []
 
-    # Async batch remote tracking: job_id -> (job, dispatch_result)
-    _async_dispatched: dict[str, tuple[ExpandedJob, Any]] = {}
+    # Async batch remote tracking: job_id -> (job, job index, submitted run_id)
+    _async_dispatched: dict[str, tuple[ExpandedJob, int, str | None]] = {}
 
     # Batch metadata per run_hash for bottling (target + per-job minio_prefix).
     _batch_metadata_by_hash: dict[str, dict[str, Any]] = {}
@@ -2192,6 +2265,134 @@ def run_sweep(
             tempfile.mkdtemp(prefix=f"joshpy-sweep-{session_id or 'adhoc'}-")
         )
         _stage_prefix_root = f"sweeps/{session_id or 'adhoc'}/"
+
+    def _finish_job(
+        i: int,
+        job: ExpandedJob,
+        result: Any,
+        *,
+        dispatched_run_id: str | None = None,
+        record: bool = True,
+        bottle_job: bool = True,
+        may_raise: bool = True,
+    ) -> None:
+        """Record, register, ingest and report one finished job.
+
+        Shared by the main loop and by no-wait polling. A no-wait job was
+        recorded as submitted at dispatch (*dispatched_run_id*); here that run
+        is completed with the poll outcome instead of being recorded afresh.
+        ``record=False`` leaves the registry untouched (a timed-out no-wait
+        job may still be running on the cluster, so its run stays submitted).
+        """
+        nonlocal succeeded, failed, _bottled_failure, _bottled_success
+
+        job_results.append((job, result))
+        if result.success:
+            succeeded += 1
+        else:
+            failed += 1
+
+        # Record to registry if configured
+        if registry_callback is not None and record:
+            if dispatched_run_id is None:
+                run_id = registry_callback.record(job, result)
+            else:
+                run_id = dispatched_run_id
+                registry_callback.record_completion(run_id, result)
+            run_ids[job.run_hash] = run_id
+
+            # Register resolved output/debug paths for quick registry lookup.
+            cache_key: tuple[str, str] | None = None
+            cached_paths: Any | None = None
+            if job.source_path is not None:
+                cache_key = (str(job.source_path), job.simulation)
+                cached_paths = export_paths_cache.get(cache_key)
+
+            resolved_paths = _register_job_outputs(
+                cli=cli,
+                registry=registry_callback.registry,
+                job=job,
+                run_id=run_id,
+                export_paths=cached_paths,
+                quiet=quiet,
+            )
+
+            # Cache inspect-exports result for subsequent jobs with the
+            # same script/simulation pair.
+            if (
+                cache_key is not None
+                and cache_key not in export_paths_cache
+                and resolved_paths is not None
+            ):
+                export_paths_cache[cache_key] = resolved_paths
+
+            # Auto-ingest MinIO CSVs for successful batch-remote jobs.
+            # Passes the cached export_paths so ingest_results skips
+            # its own inspect_exports subprocess.
+            if (
+                batch_remote
+                and auto_ingest
+                and result.success
+                and resolved_paths is not None
+            ):
+                from joshpy.sweep import ingest_results
+
+                try:
+                    ingest_results(
+                        cli, registry_callback.registry, job.run_hash,
+                        export_paths=resolved_paths,
+                        quiet=quiet,
+                    )
+                except Exception as e:
+                    if not quiet:
+                        print(f"  [INGEST] Warning: ingest failed: {e}")
+
+        # Call user's callback if provided
+        if on_complete is not None:
+            on_complete(job, result)
+
+        # Bottle if configured (after on_complete, before stop_on_failure)
+        if bottle is not None and bottle_job:
+            from joshpy.bottle import _should_bottle, create_bottle
+
+            _is_sweep_mode = bottle in ("all", "all_failures")
+
+            if _is_sweep_mode:
+                # Collect for sweep bottle (created after the loop)
+                if _should_bottle(bottle, result.success, False, False):
+                    _bottle_collect.append((job, result))
+            elif _should_bottle(bottle, result.success, _bottled_failure, _bottled_success):
+                # Single-job bottle (first_failure, first_success)
+                try:
+                    bottle_path = create_bottle(
+                        job=job,
+                        cli_result=result,
+                        cli=cli,
+                        output_dir=bottle_dir or Path("bottles"),
+                        omit_jshd=bottle_omit_jshd,
+                        batch_metadata=_batch_metadata_by_hash.get(job.run_hash),
+                    )
+                    if not quiet:
+                        print(f"  [BOTTLE] {bottle_path}")
+                    if not result.success:
+                        _bottled_failure = True
+                    else:
+                        _bottled_success = True
+                except Exception as e:
+                    if not quiet:
+                        print(f"  [BOTTLE] Warning: bottling failed: {e}")
+
+        if stop_on_failure and may_raise and not result.success:
+            # Set status to "failed" before raising
+            if manage_status and registry is not None and session_id is not None:
+                registry.update_session_status(session_id, "failed")
+            raise SweepExecutionError(
+                job=job,
+                result=result,
+                trial_num=i,
+                succeeded_before=succeeded,
+            )
+
 
     try:
         for i, job in enumerate(job_set):
@@ -2247,6 +2448,7 @@ def run_sweep(
                     [(job, patch_info.path if patch_info else "?", list(action.existing))]
                 )
 
+            dispatched = False  # batchRemote was called for this job
             if action is not None and action.action == "skip":
                 if not quiet:
                     print(
@@ -2312,6 +2514,7 @@ def run_sweep(
                     result = cli.batch_remote(
                         br_config, jfr=job_jfr, stream_output=stream_output,
                     )
+                    dispatched = True
             elif remote:
                 # pool dispatches exactly the missing indices via --replicate-indices.
                 dispatch_indices = (
@@ -2333,202 +2536,77 @@ def run_sweep(
                 )
                 result = cli.run(run_config, jfr=job_jfr, stream_output=stream_output)
 
-            # Async batch dispatch: parse job_id, defer result tracking
-            if batch_no_wait and batch_remote and result.success:
-                import json as _json
-
-                try:
-                    dispatch_data = _json.loads(result.stdout.strip())
-                    job_id = dispatch_data["jobId"]
-                    _async_dispatched[job_id] = (job, result)
+            # Async batch dispatch: record the run as submitted (no exit code
+            # yet) with its batch job id, then poll after the loop.
+            if batch_no_wait and dispatched and result.success:
+                job_id = _no_wait_job_id(result.stdout)
+                if job_id is None:
+                    # The job may be running, but without its id it can't be
+                    # polled: record a failure, never a completed run.
+                    result = CLIResult(
+                        exit_code=1,
+                        stdout=result.stdout,
+                        stderr=(
+                            f"{result.stderr}\nbatchRemote --no-wait printed no batch job id "
+                            "(a JSON line with \"jobId\"); the job can't be polled."
+                        ),
+                        command=result.command,
+                    )
+                else:
+                    dispatched_run_id = None
+                    if registry_callback is not None:
+                        dispatched_run_id = registry_callback.record_dispatch(
+                            job, batch_job_id=job_id, target=target,
+                        )
+                        run_ids[job.run_hash] = dispatched_run_id
+                    _async_dispatched[job_id] = (job, i, dispatched_run_id)
                     if not quiet:
                         print(f"  [DISPATCHED] job_id={job_id}")
-                    # Store batch metadata in registry
-                    if registry_callback is not None:
-                        run_id = registry_callback.record(job, result)
-                        run_ids[job.run_hash] = run_id
-                    continue  # skip normal result handling
-                except (ValueError, KeyError) as e:
-                    if not quiet:
-                        print(f"  [WARN] Could not parse --no-wait output: {e}")
-                    # Fall through to normal result handling
-
-            job_results.append((job, result))
+                    continue  # completed by the polling below
 
             if result.success:
-                succeeded += 1
                 if not quiet:
                     print("  [OK] Completed successfully")
-            else:
-                failed += 1
-                if not quiet:
-                    print(f"  [FAIL] Exit code: {result.exit_code}")
+            elif not quiet:
+                print(f"  [FAIL] Exit code: {result.exit_code}")
 
-            # Record to registry if configured
-            if registry_callback is not None:
-                run_id = registry_callback.record(job, result)
-                run_ids[job.run_hash] = run_id
-
-                # Register resolved output/debug paths for quick registry lookup.
-                cache_key: tuple[str, str] | None = None
-                cached_paths: Any | None = None
-                if job.source_path is not None:
-                    cache_key = (str(job.source_path), job.simulation)
-                    cached_paths = export_paths_cache.get(cache_key)
-
-                resolved_paths = _register_job_outputs(
-                    cli=cli,
-                    registry=registry_callback.registry,
-                    job=job,
-                    run_id=run_id,
-                    export_paths=cached_paths,
-                    quiet=quiet,
-                )
-
-                # Cache inspect-exports result for subsequent jobs with the
-                # same script/simulation pair.
-                if (
-                    cache_key is not None
-                    and cache_key not in export_paths_cache
-                    and resolved_paths is not None
-                ):
-                    export_paths_cache[cache_key] = resolved_paths
-
-                # Auto-ingest MinIO CSVs for successful batch-remote jobs.
-                # Passes the cached export_paths so ingest_results skips
-                # its own inspect_exports subprocess.
-                if (
-                    batch_remote
-                    and auto_ingest
-                    and result.success
-                    and resolved_paths is not None
-                ):
-                    from joshpy.sweep import ingest_results
-
-                    try:
-                        ingest_results(
-                            cli, registry_callback.registry, job.run_hash,
-                            export_paths=resolved_paths,
-                            quiet=quiet,
-                        )
-                    except Exception as e:
-                        if not quiet:
-                            print(f"  [INGEST] Warning: ingest failed: {e}")
-
-            # Call user's callback if provided
-            if on_complete is not None:
-                on_complete(job, result)
-
-            # Bottle if configured (after on_complete, before stop_on_failure)
-            if bottle is not None:
-                from joshpy.bottle import _should_bottle, create_bottle
-
-                _is_sweep_mode = bottle in ("all", "all_failures")
-
-                if _is_sweep_mode:
-                    # Collect for sweep bottle (created after the loop)
-                    if _should_bottle(bottle, result.success, False, False):
-                        _bottle_collect.append((job, result))
-                elif _should_bottle(bottle, result.success, _bottled_failure, _bottled_success):
-                    # Single-job bottle (first_failure, first_success)
-                    try:
-                        bottle_path = create_bottle(
-                            job=job,
-                            cli_result=result,
-                            cli=cli,
-                            output_dir=bottle_dir or Path("bottles"),
-                            omit_jshd=bottle_omit_jshd,
-                            batch_metadata=_batch_metadata_by_hash.get(job.run_hash),
-                        )
-                        if not quiet:
-                            print(f"  [BOTTLE] {bottle_path}")
-                        if not result.success:
-                            _bottled_failure = True
-                        else:
-                            _bottled_success = True
-                    except Exception as e:
-                        if not quiet:
-                            print(f"  [BOTTLE] Warning: bottling failed: {e}")
-
-            if stop_on_failure and not result.success:
-                # Set status to "failed" before raising
-                if manage_status and registry is not None and session_id is not None:
-                    registry.update_session_status(session_id, "failed")
-                raise SweepExecutionError(
-                    job=job,
-                    result=result,
-                    trial_num=i,
-                    succeeded_before=succeeded,
-                )
+            _finish_job(i, job, result)
 
         # -----------------------------------------------------------
-        # Async batch polling: wait for all dispatched jobs
+        # Async batch polling: wait for all dispatched jobs, completing each
+        # one (registry, outputs, ingest, on_complete) as it finishes.
         # -----------------------------------------------------------
         if _async_dispatched:
-            import time
-
-            from joshpy.cli import CLIResult, PollBatchConfig
-
             assert target is not None  # validated above
-            remaining = set(_async_dispatched.keys())
 
             if not quiet:
-                print(f"Polling {len(remaining)} dispatched jobs...")
+                print(f"Polling {len(_async_dispatched)} dispatched jobs...")
 
-            poll_start = time.monotonic()
-            while remaining:
-                if batch_timeout is not None:
-                    elapsed = time.monotonic() - poll_start
-                    if elapsed > batch_timeout:
-                        for job_id in list(remaining):
-                            job, _ = _async_dispatched[job_id]
-                            timeout_result = CLIResult(
-                                success=False,
-                                exit_code=-1,
-                                stdout="",
-                                stderr=f"Batch job {job_id} timed out after {batch_timeout}s",
-                                command=[],
-                            )
-                            job_results.append((job, timeout_result))
-                            failed += 1
-                            remaining.discard(job_id)
-                        break
-
-                for job_id in list(remaining):
-                    job, dispatch_result = _async_dispatched[job_id]
-                    poll_result = cli.poll_batch(
-                        PollBatchConfig(job_id=job_id, target=target),
+            def _on_polled(job_id: str, poll_result: Any) -> None:
+                job, i, dispatched_run_id = _async_dispatched[job_id]
+                timed_out = poll_result.exit_code == -1
+                if not quiet:
+                    status = "COMPLETE" if poll_result.success else (
+                        "TIMEOUT" if timed_out else "ERROR"
                     )
+                    print(f"  [{status}] {job_id}")
+                _finish_job(
+                    i, job, poll_result,
+                    dispatched_run_id=dispatched_run_id,
+                    # A timed-out job may still be running: leave it submitted
+                    # so a later run can reattach to it.
+                    record=not timed_out,
+                    bottle_job=False,
+                    may_raise=not timed_out,
+                )
 
-                    if poll_result.exit_code == 0:
-                        # Complete
-                        remaining.discard(job_id)
-                        job_results.append((job, poll_result))
-                        succeeded += 1
-                        if not quiet:
-                            print(f"  [COMPLETE] {job_id}")
-                    elif poll_result.exit_code == 1:
-                        # Error
-                        remaining.discard(job_id)
-                        job_results.append((job, poll_result))
-                        failed += 1
-                        if not quiet:
-                            print(f"  [ERROR] {job_id}")
-                        if stop_on_failure:
-                            if manage_status and registry is not None and session_id is not None:
-                                registry.update_session_status(session_id, "failed")
-                            raise SweepExecutionError(
-                                job=job,
-                                result=poll_result,
-                                trial_num=0,
-                                succeeded_before=succeeded,
-                            )
-                    elif poll_result.exit_code in (2, 100):
-                        # Running/pending or transient poll failure — keep waiting
-                        pass
-
-                if remaining:
-                    time.sleep(poll_interval)
+            poll_batch_jobs(
+                cli,
+                {job_id: target for job_id in _async_dispatched},
+                poll_interval=poll_interval,
+                timeout=batch_timeout,
+                on_finished=_on_polled,
+            )
 
         if not quiet:
             print(f"Completed: {succeeded} succeeded, {failed} failed")
